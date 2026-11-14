@@ -1,0 +1,35 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: minishop-config
+  namespace: minishop
+  labels:
+    app: minishop-config
+    app.kubernetes.io/name: minishop-config
+    app.kubernetes.io/part-of: kubeverse-demo
+    app.kubernetes.io/component: configuration
+data:
+  PRODUCT_URL: http://product-api.minishop.svc.cluster.local:8000
+  CART_URL: http://cart-api.minishop.svc.cluster.local:8000
+  PAYMENT_URL: http://payment-api.minishop.svc.cluster.local:8000
+  REDIS_URL: redis://redis.minishop.svc.cluster.local:6379/0
+  DB_TARGET: postgres.minishop.svc.cluster.local
+  REDIS_TARGET: redis.minishop.svc.cluster.local
+  PAYMENT_FAIL: 'false'
+  PAYMENT_DELAY_MS: '100'
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: minishop-secrets
+  namespace: minishop
+  labels:
+    app: minishop-secrets
+    app.kubernetes.io/name: minishop-secrets
+    app.kubernetes.io/part-of: kubeverse-demo
+    app.kubernetes.io/component: configuration
+type: Opaque
+stringData:
+  POSTGRES_PASSWORD: minishop-local-only
+  DATABASE_URL: postgresql://minishop:minishop-local-only@postgres.minishop.svc.cluster.local:5432/minishop
+  INTERNAL_TOKEN: minishop-internal-local-only

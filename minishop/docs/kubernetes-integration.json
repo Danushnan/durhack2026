@@ -1,0 +1,111 @@
+{
+  "context": "kind-minishop",
+  "request_id": "6d7ee53a-f8dd-4c94-ba18-5f296aab7459",
+  "order_id": "dec943c5-e91d-4bb5-9146-aee5c5c994f3",
+  "edges": [
+    {
+      "from": "minishop/cart-api",
+      "to": "minishop/product-api",
+      "rps": 0.6,
+      "healthy": true
+    },
+    {
+      "from": "minishop/cart-api",
+      "to": "minishop/redis",
+      "rps": 1.4,
+      "healthy": true
+    },
+    {
+      "from": "minishop/checkout-api",
+      "to": "minishop/cart-api",
+      "rps": 0.6,
+      "healthy": true
+    },
+    {
+      "from": "minishop/checkout-api",
+      "to": "minishop/payment-api",
+      "rps": 0.2,
+      "healthy": true
+    },
+    {
+      "from": "minishop/checkout-api",
+      "to": "minishop/postgres",
+      "rps": 0.6,
+      "healthy": true
+    },
+    {
+      "from": "minishop/checkout-api",
+      "to": "minishop/product-api",
+      "rps": 0.2,
+      "healthy": true
+    },
+    {
+      "from": "minishop/minishop-web",
+      "to": "minishop/cart-api",
+      "rps": 0.8,
+      "healthy": true
+    },
+    {
+      "from": "minishop/minishop-web",
+      "to": "minishop/checkout-api",
+      "rps": 0.6,
+      "healthy": true
+    },
+    {
+      "from": "minishop/minishop-web",
+      "to": "minishop/product-api",
+      "rps": 0.4,
+      "healthy": true
+    },
+    {
+      "from": "minishop/product-api",
+      "to": "minishop/postgres",
+      "rps": 1.2,
+      "healthy": true
+    }
+  ],
+  "deployments": [
+    {
+      "uid": "9f1bbb49-7ff0-428b-bd2b-b62ca649b707",
+      "name": "cart-api",
+      "namespace": "minishop",
+      "creationTimestamp": "2026-11-14T20:06:25Z"
+    },
+    {
+      "uid": "73f788c1-da43-4be3-b36e-b33c23ffc67c",
+      "name": "checkout-api",
+      "namespace": "minishop",
+      "creationTimestamp": "2026-11-14T20:06:25Z"
+    },
+    {
+      "uid": "97cbbb19-fd9d-4275-936c-959e9f1b8612",
+      "name": "minishop-web",
+      "namespace": "minishop",
+      "creationTimestamp": "2026-11-14T20:06:25Z"
+    },
+    {
+      "uid": "c6587f8b-ec78-4c02-8e3a-339a9917c784",
+      "name": "payment-api",
+      "namespace": "minishop",
+      "creationTimestamp": "2026-11-14T20:06:25Z"
+    },
+    {
+      "uid": "0a42b3c0-9d0e-4d1d-9b2b-1abc341ba26d",
+      "name": "postgres",
+      "namespace": "minishop",
+      "creationTimestamp": "2026-11-14T20:06:25Z"
+    },
+    {
+      "uid": "c47bf575-725c-47e6-ac19-523afbec5600",
+      "name": "product-api",
+      "namespace": "minishop",
+      "creationTimestamp": "2026-11-14T20:06:25Z"
+    },
+    {
+      "uid": "131ebfc2-47e2-4b65-8628-bd212e3d706d",
+      "name": "redis",
+      "namespace": "minishop",
+      "creationTimestamp": "2026-11-14T20:06:25Z"
+    }
+  ]
+}

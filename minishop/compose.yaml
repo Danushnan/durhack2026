@@ -1,0 +1,103 @@
+name: minishop
+x-api: &api
+  restart: unless-stopped
+  init: true
+  healthcheck:
+    test: [CMD, python, -c, "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health/ready', timeout=2)"]
+    interval: 5s
+    timeout: 3s
+    retries: 20
+    start_period: 10s
+  mem_limit: 192m
+  cpus: 0.5
+x-env: &env
+  INTERNAL_TOKEN: ${INTERNAL_TOKEN:-minishop-internal-local-only}
+  DATABASE_URL: postgresql://minishop:${POSTGRES_PASSWORD:-minishop-local-only}@postgres:5432/minishop
+  DB_TARGET: postgres
+  REDIS_TARGET: redis
+  PRODUCT_URL: http://product-api:8000
+  CART_URL: http://cart-api:8000
+  PAYMENT_URL: http://payment-api:8000
+
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: minishop
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-minishop-local-only}
+      POSTGRES_DB: minishop
+    volumes: [postgres-data:/var/lib/postgresql/data]
+    restart: unless-stopped
+    mem_limit: 384m
+    healthcheck:
+      test: [CMD-SHELL, "pg_isready -U minishop -d minishop"]
+      interval: 3s
+      timeout: 3s
+      retries: 30
+  redis:
+    image: redis:8-alpine
+    command: [redis-server, --appendonly, "yes", --maxmemory, 64mb, --maxmemory-policy, noeviction]
+    volumes: [redis-data:/data]
+    restart: unless-stopped
+    mem_limit: 128m
+    healthcheck:
+      test: [CMD, redis-cli, ping]
+      interval: 3s
+      timeout: 3s
+      retries: 30
+  migrate:
+    image: minishop-product-api:demo
+    build: {context: ., dockerfile: services/Dockerfile, args: {SERVICE: products}}
+    environment: *env
+    command: [python, -m, db.migrate]
+    depends_on: {postgres: {condition: service_healthy}}
+    restart: "no"
+  product-api:
+    <<: *api
+    image: minishop-product-api:demo
+    build: {context: ., dockerfile: services/Dockerfile, args: {SERVICE: products}}
+    environment: *env
+    depends_on: {migrate: {condition: service_completed_successfully}}
+  cart-api:
+    <<: *api
+    image: minishop-cart-api:demo
+    build: {context: ., dockerfile: services/Dockerfile, args: {SERVICE: cart}}
+    environment:
+      <<: *env
+      REDIS_URL: redis://redis:6379/0
+    depends_on: {redis: {condition: service_healthy}, product-api: {condition: service_healthy}}
+  payment-api:
+    <<: *api
+    image: minishop-payment-api:demo
+    build: {context: ., dockerfile: services/Dockerfile, args: {SERVICE: payments}}
+    environment:
+      <<: *env
+      PAYMENT_FAIL: ${PAYMENT_FAIL:-false}
+      PAYMENT_DELAY_MS: ${PAYMENT_DELAY_MS:-100}
+  checkout-api:
+    <<: *api
+    image: minishop-checkout-api:demo
+    build: {context: ., dockerfile: services/Dockerfile, args: {SERVICE: checkout}}
+    environment: *env
+    depends_on:
+      migrate: {condition: service_completed_successfully}
+      cart-api: {condition: service_healthy}
+      payment-api: {condition: service_healthy}
+  minishop-web:
+    image: minishop-web:demo
+    build: {context: ., dockerfile: frontend/Dockerfile}
+    ports: ["127.0.0.1:8080:8080"]
+    restart: unless-stopped
+    mem_limit: 96m
+    depends_on:
+      product-api: {condition: service_healthy}
+      cart-api: {condition: service_healthy}
+      checkout-api: {condition: service_healthy}
+    healthcheck:
+      test: [CMD, wget, -q, -O, /dev/null, http://127.0.0.1:8080/health/ready]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+volumes:
+  postgres-data:
+  redis-data:

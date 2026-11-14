@@ -1,0 +1,54 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: minishop-migrate
+  namespace: minishop
+  labels:
+    app: minishop-migrate
+    app.kubernetes.io/name: minishop-migrate
+    app.kubernetes.io/part-of: kubeverse-demo
+    app.kubernetes.io/component: migration
+spec:
+  backoffLimit: 6
+  activeDeadlineSeconds: 300
+  template:
+    metadata:
+      labels:
+        app: minishop-migrate
+        app.kubernetes.io/name: minishop-migrate
+        app.kubernetes.io/part-of: kubeverse-demo
+        app.kubernetes.io/component: migration
+    spec:
+      restartPolicy: OnFailure
+      containers:
+      - name: workload
+        image: minishop-product-api:demo
+        imagePullPolicy: IfNotPresent
+        command:
+        - python
+        - -m
+        - db.migrate
+        env:
+        - name: DATABASE_URL
+          valueFrom:
+            secretKeyRef:
+              name: minishop-secrets
+              key: DATABASE_URL
+        resources:
+          requests:
+            cpu: 50m
+            memory: 64Mi
+          limits:
+            cpu: 500m
+            memory: 192Mi
+        securityContext:
+          runAsNonRoot: true
+          runAsUser: 10001
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+            - ALL
+      dnsConfig:
+        options:
+        - name: ndots
+          value: '1'
