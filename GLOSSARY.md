@@ -41,9 +41,21 @@ _Avoid_: Road, lane, path
 A moving object on a Street representing a request from one service to another; a red Car that turns back is a failed request.
 _Avoid_: Vehicle, packet, particle
 
+**Power Station**:
+The structure on the City's edge representing one Node; its lit meter shows how many of the Node's Pod slots are in use.
+_Avoid_: Server, machine building, generator
+
 **Power Grid**:
-An optional overlay that tints each Unit by the Node its Pod runs on.
+An optional overlay that tints each Unit by the Power Station (Node) its Pod runs on.
 _Avoid_: Node view, infrastructure layer
+
+**Scenery**:
+Decorative buildings, houses and parks that fill out the City; they represent nothing in the cluster.
+_Avoid_: Filler, background buildings
+
+**Impacted**:
+A service that is itself running but cannot do its job because a service it depends on is down.
+_Avoid_: Degraded, cascading, broken
 
 ## Interactions
 
@@ -60,7 +72,7 @@ The user action that undoes Sabotage, letting a Deployment's Pods start normally
 _Avoid_: Fix, heal
 
 **Node Outage**:
-The user action that makes a Node NotReady, evicting its Pods so they must be rescheduled elsewhere.
+The user action (clicking a Power Station) that makes a Node NotReady, evicting its Pods so they must be rescheduled elsewhere.
 _Avoid_: Node failure, kill node, blackout
 
 **Restore**:

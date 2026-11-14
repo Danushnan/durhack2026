@@ -22,14 +22,17 @@ Open http://localhost:5173. Tests: `cd backend && .venv/bin/pytest`.
 
 ## Demo script
 
-1. Pick a service from the **Buildings** list (or click a Building) → the camera flies there and the inspect panel opens.
-2. **Demolish** a Unit → it shuts down, Kubernetes creates a replacement, the scheduler places it.
-3. **Sabotage** `payments` (the Bank) → its Units pulse red ("Crashing, next retry waits 4s") and Cars to it turn red,
-   flash hazards and turn back. **Repair** → it recovers.
-4. **Add / Remove a Unit** → scale up/down; outlined Plots show Units Kubernetes still has to create.
-5. **⚡ node-1 cut power** (Node Outage) → its Units are evicted and rescheduled; with only 10 slots left some wait
-   for space (Pending). Toggle **Power Grid** to colour Units by Node. Click again to restore.
-6. **🌙 / ☀️** switches night and day (remembered per browser). Hover Buildings, Units and Cars for details.
+1. Press **?** for a short explainer of the city and of how Kubernetes thinks (desired vs actual state).
+2. Hover a Building to see what the service does and what breaks if it stops; click it (or pick it from the left rail)
+   to fly there and open the inspect panel.
+3. **Demolish** a Unit → it shuts down, Kubernetes creates a replacement, the scheduler places it.
+4. **Sabotage** `payments` (the Bank) → its Units pulse red ("Crashing, next retry waits 4s"), Cars to it turn red and
+   drive back, and a banner shows the knock-on effect: checkout becomes **Impacted**. **Repair** → it recovers.
+5. **Add / Remove Unit** → scale up/down; outlined Plots show Units Kubernetes still has to create.
+6. Click a **Power Station** (a Node) to cut its power → its Units are evicted and rescheduled; with only 10 slots left
+   some wait for space (Pending). Toggle **⚡ Power Grid** to colour Units by Node. Click the station again to restore.
+7. **🌙 / ☀️** switches night and day (remembered per browser). The ticker at the bottom explains each thing Kubernetes
+   does; click it for the full list.
 
 ## Simulated cases
 
