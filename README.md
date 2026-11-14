@@ -1,8 +1,8 @@
 # KubeVerse — Watch Kubernetes Think
 
 Port Kube is a 3D city that renders a (simulated) Kubernetes cluster live. Namespaces are Districts, each service
-(Deployment) is a distinct landmark Building, its Pods are Units on plots out front, and requests are Cars driving the
-streets between Buildings. Break things and watch the control loop heal them. See `GLOSSARY.md` for the vocabulary.
+(Deployment) is a distinct landmark Building, its Pods are Units on plots out front, a Road joins two Buildings only
+where one service calls the other, and requests are Cars driving those Roads. Break things and watch the control loop heal them. See `GLOSSARY.md` for the vocabulary.
 
 ## Run (two terminals)
 
@@ -26,12 +26,13 @@ Open http://localhost:5173. Tests: `cd backend && .venv/bin/pytest`.
 2. Hover a Building to see what the service does and what breaks if it stops; click it (or pick it from the left rail)
    to fly there and open the inspect panel.
 3. **Demolish** a Unit → it shuts down, Kubernetes creates a replacement, the scheduler places it.
-4. **Sabotage** `payments` (the Bank) → its Units pulse red ("Crashing, next retry waits 4s"), Cars to it turn red and
-   drive back, and a banner shows the knock-on effect: checkout becomes **Impacted**. **Repair** → it recovers.
-5. **Add / Remove Unit** → scale up/down; outlined Plots show Units Kubernetes still has to create.
+4. **Sabotage** `payments` (the Bank) → its Units pulse red ("Crashing, next retry waits 4s"), the Road to it turns red
+   and its Cars drive back, and a banner shows the knock-on effect: checkout becomes **Impacted**. **Repair** → it recovers.
+5. **Add / Remove Unit** → the Building grows or shrinks with the replicas you ask for; outlined Plots show Units
+   Kubernetes still has to create.
 6. Click a **Power Station** (a Node) to cut its power → its Units are evicted and rescheduled; with only 10 slots left
    some wait for space (Pending). Toggle **⚡ Power Grid** to colour Units by Node. Click the station again to restore.
-7. **🌙 / ☀️** switches night and day (remembered per browser). The ticker at the bottom explains each thing Kubernetes
+7. **🌙 / ☀️** switches night and day (remembered per browser); **⌂** returns the camera to the overview. The ticker at the bottom explains each thing Kubernetes
    does; click it for the full list.
 
 ## Simulated cases
