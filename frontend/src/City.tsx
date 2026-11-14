@@ -3,51 +3,41 @@ import { Edges, OrbitControls } from '@react-three/drei'
 import { useEffect, useMemo, useRef } from 'react'
 import * as THREE from 'three'
 import {
-  type ClusterState, type Edge, type K8sObject, deploymentHealth, describeDeployment, describePod, HEALTH_COLOR,
+  api, type ClusterState, type Edge, type K8sObject, deploymentHealth, describePod, HEALTH_COLOR,
   keyOf, NODE_COLORS, podStatus, STATUS_COLOR,
 } from './k8s'
-import { Landmark, type LandmarkInfo, landmarkFor } from './landmarks'
+import { FacadeSign, Landmark, type LandmarkInfo, landmarkFor } from './landmarks'
 import { type CityLayout, checkRoutes, DRIVEWAY_X, laneOffset, layoutCity, LOT, Path, routeBetween, STREET_W } from './layout'
+import { Scenery } from './scenery'
+import { nameOf, roleOf } from './teach'
+import { textTexture, type TextLine } from './textures'
 import type { Theme } from './theme'
 
 export interface HoverInfo { title: string; lines: string[]; x: number; y: number }
 type OnHover = (h: HoverInfo | null) => void
+/** Per-service state the City needs for labelling: down, or impacted via a chain of dependencies. */
+export type ServiceState = Record<string, { down: boolean; chain: string[] | null }>
 
 const UNIT = 0.9
 const UNIT_GAP = 1.25
 const UNIT_COLS = 6
 const CAR_SPEED = 6 // world units per second
 const PARK_SECONDS = 1.2
+const AMBER = '#f59e0b'
 
-// ---------- text labels as sprites (no DOM, so they never fight the camera or React roots) ----------
+const at = (e: ThreeEvent<PointerEvent>) => ({ x: e.nativeEvent.clientX, y: e.nativeEvent.clientY })
 
-function Label({ text, position, fg, bg, border, scale = 1 }: {
-  text: string; position: [number, number, number]; fg: string; bg: string; border: string; scale?: number
+// ---------- floating name tags (canvas sprites: no DOM, so they never fight the camera) ----------
+
+function Tag({ lines, border, position, height = 1.7, theme }: {
+  lines: TextLine[]; border: string; position: [number, number, number]; height?: number; theme: Theme
 }) {
-  const tex = useMemo(() => {
-    const c = document.createElement('canvas')
-    const ctx = c.getContext('2d')!
-    const font = '600 44px ui-monospace, Menlo, monospace'
-    ctx.font = font
-    const w = Math.ceil(ctx.measureText(text).width) + 48
-    c.width = w; c.height = 76
-    ctx.font = font
-    ctx.fillStyle = bg
-    ctx.strokeStyle = border
-    ctx.lineWidth = 6
-    ctx.beginPath(); ctx.roundRect(3, 3, w - 6, 70, 14); ctx.fill(); ctx.stroke()
-    ctx.fillStyle = fg
-    ctx.textBaseline = 'middle'
-    ctx.fillText(text, 24, 40)
-    const t = new THREE.CanvasTexture(c)
-    t.colorSpace = THREE.SRGBColorSpace
-    return t
-  }, [text, fg, bg, border])
-  useEffect(() => () => tex.dispose(), [tex])
-  const aspect = tex.image.width / tex.image.height
+  const key = JSON.stringify(lines) + border + theme.mode
+  const { texture, aspect } = useMemo(() => textTexture(lines, { bg: theme.labelBg, border }), [key]) // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => () => texture.dispose(), [texture])
   return (
-    <sprite position={position} scale={[1.3 * aspect * scale, 1.3 * scale, 1]} renderOrder={10}>
-      <spriteMaterial map={tex} depthTest={false} transparent />
+    <sprite position={position} scale={[height * aspect, height, 1]} renderOrder={10}>
+      <spriteMaterial map={texture} depthTest={false} transparent />
     </sprite>
   )
 }
@@ -56,29 +46,32 @@ function Label({ text, position, fg, bg, border, scale = 1 }: {
 
 function Ground({ layout, theme }: { layout: CityLayout; theme: Theme }) {
   const { x0, x1, z0, z1 } = layout.extent
-  const w = x1 - x0 + 40, d = z1 - z0 + 40
   const len = (a: number, b: number) => b - a + STREET_W
+  const inner = LOT - STREET_W
   return (
     <group>
       <mesh rotation-x={-Math.PI / 2} position={[0, -0.02, 0]} receiveShadow>
-        <planeGeometry args={[w * 3, d * 3]} />
+        <planeGeometry args={[(x1 - x0) * 4, (z1 - z0) * 4]} />
         <meshStandardMaterial color={theme.ground} />
       </mesh>
+      {[...layout.scenery, ...Object.values(layout.stations)].map((l) => (
+        <mesh key={`${l.col},${l.row}`} rotation-x={-Math.PI / 2} position={[l.center.x, 0.004, l.center.z]} receiveShadow>
+          <planeGeometry args={[inner, inner]} /><meshStandardMaterial color={theme.lot} />
+        </mesh>
+      ))}
       {layout.districts.map((dist) => (
         <group key={dist.name}>
-          <mesh rotation-x={-Math.PI / 2} position={[(dist.x0 + dist.x1) / 2, 0, (dist.z0 + dist.z1) / 2]}>
+          <mesh rotation-x={-Math.PI / 2} position={[(dist.x0 + dist.x1) / 2, 0, (dist.z0 + dist.z1) / 2]} receiveShadow>
             <planeGeometry args={[dist.x1 - dist.x0, dist.z1 - dist.z0]} />
             <meshStandardMaterial color={theme.district} />
           </mesh>
-          {/* Street sign on the district's front-left corner */}
-          <mesh position={[dist.x0 + 2, 1.2, dist.z1 + 2]}><cylinderGeometry args={[0.08, 0.08, 2.4, 8]} /><meshStandardMaterial color="#64748b" /></mesh>
-          <Label text={`${dist.name.toUpperCase()} DISTRICT`} position={[dist.x0 + 2, 2.8, dist.z1 + 2]}
-            fg="#ffffff" bg="#15803d" border="#f8fafc" scale={1.3} />
+          <mesh position={[dist.x0 + 2, 1.4, dist.z0 + 2]}><cylinderGeometry args={[0.08, 0.08, 2.8, 8]} /><meshStandardMaterial color="#64748b" /></mesh>
+          <FacadeSign text={`${dist.name.toUpperCase()} DISTRICT`} width={4.4} pos={[dist.x0 + 2, 3, dist.z0 + 2.1]} bg="#15803d" theme={theme} />
         </group>
       ))}
       {layout.streetsX.map((x) => (
         <group key={`x${x}`}>
-          <mesh rotation-x={-Math.PI / 2} position={[x, 0.01, 0]}>
+          <mesh rotation-x={-Math.PI / 2} position={[x, 0.01, 0]} receiveShadow>
             <planeGeometry args={[STREET_W, len(z0, z1)]} /><meshStandardMaterial color={theme.street} />
           </mesh>
           <mesh rotation-x={-Math.PI / 2} position={[x, 0.02, 0]}>
@@ -88,7 +81,7 @@ function Ground({ layout, theme }: { layout: CityLayout; theme: Theme }) {
       ))}
       {layout.streetsZ.map((z) => (
         <group key={`z${z}`}>
-          <mesh rotation-x={-Math.PI / 2} position={[0, 0.011, z]}>
+          <mesh rotation-x={-Math.PI / 2} position={[0, 0.011, z]} receiveShadow>
             <planeGeometry args={[len(x0, x1), STREET_W]} /><meshStandardMaterial color={theme.street} />
           </mesh>
           <mesh rotation-x={-Math.PI / 2} position={[0, 0.021, z]}>
@@ -124,7 +117,7 @@ function Unit({ pod, index, powerGrid, nodeColor, onHover }: {
   const dim = status === 'Terminating' || status === 'Pending'
   return (
     <mesh ref={ref} position={[target.x, 3, target.z]} castShadow
-      onPointerOver={(e) => { e.stopPropagation(); onHover({ title: `Unit ${pod.metadata.name}`, lines: [describePod(pod), `Pod · ${status}`, `Node: ${pod.spec.nodeName ?? 'none yet'}`], x: e.nativeEvent.clientX, y: e.nativeEvent.clientY }) }}
+      onPointerOver={(e) => { e.stopPropagation(); onHover({ title: `Unit ${pod.metadata.name}`, lines: [describePod(pod), `Pod · ${status}`, `Runs on: ${pod.spec.nodeName ?? 'no Node yet'}`], ...at(e) }) }}
       onPointerOut={() => onHover(null)}>
       <boxGeometry args={[UNIT, UNIT, UNIT]} />
       <meshStandardMaterial ref={mat} color={color} emissive={color} transparent opacity={dim ? 0.4 : 1} />
@@ -143,47 +136,124 @@ function Plot({ index, color }: { index: number; color: string }) {
   )
 }
 
-function Building({ dep, info, pods, pos, selected, onSelect, powerGrid, nodeColors, theme, onHover }: {
+function tagFor(dep: K8sObject, info: LandmarkInfo, state: ServiceState[string] | undefined, theme: Theme): { lines: TextLine[]; border: string } {
+  const ready = dep.status.readyReplicas ?? 0, want = dep.spec.replicas
+  const health = deploymentHealth(dep)
+  const title: TextLine = { text: `${info.emoji} ${dep.metadata.name}`, px: 56, color: theme.labelFg }
+  if (state?.down) return { lines: [title, { text: `DOWN · ${ready}/${want} ready`, px: 40, color: '#ef4444' }], border: '#ef4444' }
+  if (state?.chain) return { lines: [title, { text: `⚠ IMPACTED · needs ${nameOf(state.chain[state.chain.length - 1])}`, px: 40, color: AMBER }], border: AMBER }
+  const color = health === 'healthy' ? (theme.mode === 'night' ? '#4ade80' : '#15803d') : AMBER
+  return { lines: [title, { text: `${info.title} · ${ready}/${want} ready`, px: 40, color }], border: HEALTH_COLOR[health] }
+}
+
+function Building({ dep, info, pods, pos, selected, onSelect, powerGrid, nodeColors, theme, onHover, state }: {
   dep: K8sObject; info: LandmarkInfo; pods: K8sObject[]; pos: THREE.Vector3; selected: boolean; onSelect: () => void
-  powerGrid: boolean; nodeColors: Record<string, string>; theme: Theme; onHover: OnHover
+  powerGrid: boolean; nodeColors: Record<string, string>; theme: Theme; onHover: OnHover; state?: ServiceState[string]
 }) {
   const health = deploymentHealth(dep)
   const desired: number = dep.spec.replicas
   const sorted = [...pods].sort((a, b) => (a.metadata.creationTimestamp ?? '').localeCompare(b.metadata.creationTimestamp ?? ''))
   const plots = Math.max(0, desired - sorted.filter((p) => !p.metadata.deletionTimestamp).length)
-  const glowRef = useRef(HEALTH_COLOR[health])
-  glowRef.current = HEALTH_COLOR[health]
+  const glow = state?.chain && health === 'healthy' ? AMBER : HEALTH_COLOR[health]
+  const role = roleOf(dep.metadata.name)
   const hover = (e: ThreeEvent<PointerEvent>) => {
     e.stopPropagation()
-    onHover({ title: `${info.emoji} ${info.title}: ${dep.metadata.name}`, lines: [describeDeployment(dep), 'Click to inspect'], x: e.nativeEvent.clientX, y: e.nativeEvent.clientY })
+    onHover({ title: `${info.emoji} ${info.title}: ${dep.metadata.name}`, lines: [role.does, `If it stops: ${role.ifDown}`, 'Click to inspect'], ...at(e) })
   }
+  const tag = tagFor(dep, info, state, theme)
   return (
     <group position={pos}>
-      {/* Lot */}
-      <mesh rotation-x={-Math.PI / 2} position={[0, 0.005, 0]}>
+      <mesh rotation-x={-Math.PI / 2} position={[0, 0.006, 0]} receiveShadow>
         <planeGeometry args={[LOT - STREET_W, LOT - STREET_W]} />
         <meshStandardMaterial color={selected ? info.accent : theme.district} transparent opacity={selected ? 0.35 : 1} />
       </mesh>
-      {/* Driveway to the street */}
       <mesh rotation-x={-Math.PI / 2} position={[DRIVEWAY_X, 0.012, LOT / 2 - STREET_W]}>
         <planeGeometry args={[1.8, STREET_W]} /><meshStandardMaterial color={theme.street} />
       </mesh>
       <group position={[0, 0, -2]}>
-        <Landmark info={info} glow={HEALTH_COLOR[health]} theme={theme} />
+        <Landmark info={info} glow={glow} theme={theme} />
         {/* One invisible hit-box for hover/click instead of handlers on every part */}
-        <mesh position={[0, info.height / 2, 0]} visible={false}
+        <mesh position={[0, info.height / 2, -0.5]} visible={false}
           onClick={(e) => { e.stopPropagation(); onSelect() }}
           onPointerOver={hover} onPointerMove={hover} onPointerOut={() => onHover(null)}>
-          <boxGeometry args={[7.5, info.height, 5.5]} />
+          <boxGeometry args={[9, info.height, 6]} />
         </mesh>
       </group>
       {sorted.map((p, i) => (
         <Unit key={p.metadata.uid} pod={p} index={i} powerGrid={powerGrid} nodeColor={nodeColors[p.spec.nodeName]} onHover={onHover} />
       ))}
       {Array.from({ length: plots }, (_, i) => <Plot key={`plot${i}`} index={sorted.length + i} color={theme.marking} />)}
-      <Label text={`${info.emoji} ${dep.metadata.name}  ${dep.status.readyReplicas}/${desired}`}
-        position={[0, info.height + 0.6, -2]} fg={theme.labelFg} bg={theme.labelBg}
-        border={selected ? info.accent : HEALTH_COLOR[health]} />
+      <Tag lines={tag.lines} border={selected ? info.accent : tag.border} position={[0, info.height + 1.6, -2]} theme={theme} />
+    </group>
+  )
+}
+
+// ---------- Power Stations (Nodes) ----------
+
+function PowerStation({ node, pos, used, color, theme, onHover }: {
+  node: K8sObject; pos: THREE.Vector3; used: number; color: string; theme: Theme; onHover: OnHover
+}) {
+  const ready = node.status.conditions[0].status === 'True'
+  const capacity = Number(node.status.capacity.pods)
+  const name = node.metadata.name
+  const night = theme.mode === 'night'
+  const beacon = useRef<THREE.Mesh>(null)
+  const smoke = useRef<THREE.Group>(null)
+  useFrame(({ clock }) => {
+    const t = clock.elapsedTime
+    if (beacon.current) beacon.current.visible = ready || Math.sin(t * 8) > 0
+    smoke.current?.children.forEach((c, i) => {
+      const k = (t * 0.35 + i / 3) % 1
+      c.position.y = 5.8 + k * 4
+      c.scale.setScalar(0.6 + k * 1.4)
+      ;((c as THREE.Mesh).material as THREE.MeshStandardMaterial).opacity = ready ? 0.5 * (1 - k) : 0
+    })
+  })
+  const wall = night ? '#4b5568' : '#e5e2da'
+  const concrete = night ? '#3b4252' : '#c9c5bb'
+  const hover = (e: ThreeEvent<PointerEvent>) => {
+    e.stopPropagation()
+    onHover({
+      title: `⚡ Power Station ${name}`,
+      lines: ['A Node: a machine that runs Pods.', ready ? `Running ${used} of ${capacity} Pod slots.` : 'POWER CUT: its Pods were evicted.',
+        ready ? 'Click to cut power (Node Outage).' : 'Click to restore power.'],
+      ...at(e),
+    })
+  }
+  return (
+    <group position={pos}>
+      <mesh position={[-1.5, 1.6, 1]} castShadow receiveShadow><boxGeometry args={[6, 3.2, 3.4]} /><meshStandardMaterial color={wall} /></mesh>
+      <mesh position={[-1.5, 3.3, 1]}><boxGeometry args={[6.2, 0.2, 3.6]} /><meshStandardMaterial color={color} /></mesh>
+      {/* Capacity meter: one light per Pod slot, lit when used */}
+      {Array.from({ length: capacity }, (_, i) => (
+        <mesh key={i} position={[-3.8 + i * 1.0, 1.1, 2.73]}>
+          <boxGeometry args={[0.7, 1.2, 0.06]} />
+          <meshBasicMaterial color={ready && i < used ? color : night ? '#1e293b' : '#64748b'} toneMapped={false} />
+        </mesh>
+      ))}
+      {[[2.4, -2.2], [-1.4, -2.9]].map(([x, z]) => (
+        <mesh key={x} position={[x, 2.9, z]} castShadow><cylinderGeometry args={[1.1, 1.7, 5.8, 20]} /><meshStandardMaterial color={concrete} /></mesh>
+      ))}
+      <group ref={smoke}>
+        {[0, 1, 2].map((i) => (
+          <mesh key={i} position={[2.4, 6, -2.2]}><sphereGeometry args={[0.9, 10, 8]} /><meshStandardMaterial color="#e2e8f0" transparent opacity={0.4} depthWrite={false} /></mesh>
+        ))}
+      </group>
+      <mesh position={[-4.3, 3.6, -2.6]} castShadow><cylinderGeometry args={[0.28, 0.36, 7.2, 12]} /><meshStandardMaterial color={concrete} /></mesh>
+      {[5.6, 6.6].map((y) => <mesh key={y} position={[-4.3, y, -2.6]}><cylinderGeometry args={[0.31, 0.31, 0.35, 12]} /><meshStandardMaterial color="#dc2626" /></mesh>)}
+      <mesh ref={beacon} position={[-4.3, 7.4, -2.6]}><sphereGeometry args={[0.22, 10, 8]} /><meshBasicMaterial color={ready ? color : '#ef4444'} toneMapped={false} /></mesh>
+      {[2.4, 3.6].map((x) => <mesh key={x} position={[x, 0.6, 1.6]} castShadow><boxGeometry args={[0.9, 1.2, 0.9]} /><meshStandardMaterial color={night ? '#334155' : '#9ca3af'} /></mesh>)}
+      <mesh position={[3, 1.8, 0.4]}><boxGeometry args={[0.1, 3.6, 0.1]} /><meshStandardMaterial color="#64748b" /></mesh>
+      <mesh position={[3, 3.4, 0.4]}><boxGeometry args={[2.2, 0.08, 0.08]} /><meshStandardMaterial color="#64748b" /></mesh>
+      <FacadeSign text="POWER STATION" width={3.6} pos={[-1.5, 2.55, 2.73]} bg={ready ? color : '#7f1d1d'} theme={theme} />
+      <mesh position={[0, 3, 0]} visible={false} onPointerOver={hover} onPointerMove={hover} onPointerOut={() => onHover(null)}
+        onClick={(e) => { e.stopPropagation(); onHover(null); api.outage(name, ready) }}>
+        <boxGeometry args={[10, 6, 9]} />
+      </mesh>
+      <Tag theme={theme} position={[-1.5, 9.4, 0]} border={ready ? color : '#ef4444'}
+        lines={[{ text: `⚡ ${name}`, px: 56, color: theme.labelFg },
+          ready ? { text: `Node · ${used}/${capacity} slots used`, px: 40, color: night ? '#cbd5e1' : '#334155' }
+            : { text: 'POWER CUT', px: 40, color: '#ef4444' }]} />
     </group>
   )
 }
@@ -237,12 +307,12 @@ function Traffic({ edge, layout, theme, accent, onHover }: {
     })
   })
   const color = edge.healthy ? accent : '#ef4444'
-  const [src, dst] = [edge.from.split('/')[1], edge.to.split('/')[1]]
+  const [src, dst] = [nameOf(edge.from), nameOf(edge.to)]
   return (
     <group>
       {Array.from({ length: count }, (_, i) => (
         <group key={i} ref={(g) => { refs.current[i] = g }}
-          onPointerOver={(e) => { e.stopPropagation(); onHover({ title: `🚗 Request ${src} → ${dst}`, lines: [edge.healthy ? 'Delivered successfully' : `Failed: ${dst} has no working Units, turning back`, `${edge.rps} requests/second on this route`], x: e.nativeEvent.clientX, y: e.nativeEvent.clientY }) }}
+          onPointerOver={(e) => { e.stopPropagation(); onHover({ title: `🚗 Request: ${src} → ${dst}`, lines: [edge.healthy ? 'Delivered successfully.' : `Failed: ${dst} has no working Units, so the car turns back.`, `${edge.rps} requests/second on this route.`], ...at(e) }) }}
           onPointerOut={() => onHover(null)}>
           <Car color={color} theme={theme} hazards={!edge.healthy} />
         </group>
@@ -251,21 +321,22 @@ function Traffic({ edge, layout, theme, accent, onHover }: {
   )
 }
 
-// ---------- camera fly-to ----------
+// ---------- camera: intro and fly-to ----------
 
 interface Controls extends THREE.EventDispatcher<{ start: object }> { target: THREE.Vector3; update(): void }
 
-function CameraRig({ focus }: { focus: THREE.Vector3 | null }) {
+function CameraRig({ focus, home }: { focus: THREE.Vector3 | null; home: THREE.Vector3 }) {
   const camera = useThree((s) => s.camera)
   const controls = useThree((s) => s.controls) as unknown as Controls | null
   const flying = useRef(false)
   const goal = useRef({ target: new THREE.Vector3(), cam: new THREE.Vector3() })
-  useEffect(() => {
-    if (!focus) return
-    goal.current.target.copy(focus)
-    goal.current.cam.copy(focus).add(new THREE.Vector3(9, 10, 14))
+  const fly = (target: THREE.Vector3, offset: THREE.Vector3) => {
+    goal.current.target.copy(target)
+    goal.current.cam.copy(target).add(offset)
     flying.current = true
-  }, [focus])
+  }
+  useEffect(() => { fly(home, new THREE.Vector3(6, 34, 50)) }, [home.x, home.z]) // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => { if (focus) fly(focus, new THREE.Vector3(10, 11, 17)) }, [focus])
   useEffect(() => {
     if (!controls) return
     const stop = () => { flying.current = false } // the user grabbed the camera
@@ -274,7 +345,7 @@ function CameraRig({ focus }: { focus: THREE.Vector3 | null }) {
   }, [controls])
   useFrame((_, dt) => {
     if (!flying.current || !controls) return
-    const k = Math.min(1, dt * 3)
+    const k = Math.min(1, dt * 2.5)
     controls.target.lerp(goal.current.target, k)
     camera.position.lerp(goal.current.cam, k)
     controls.update()
@@ -285,33 +356,40 @@ function CameraRig({ focus }: { focus: THREE.Vector3 | null }) {
 
 // ---------- the City ----------
 
-export function City({ cluster, selected, onSelect, powerGrid, theme, onHover }: {
+export function City({ cluster, selected, onSelect, powerGrid, theme, onHover, states }: {
   cluster: ClusterState; selected: string | null; onSelect: (key: string | null) => void
-  powerGrid: boolean; theme: Theme; onHover: OnHover
+  powerGrid: boolean; theme: Theme; onHover: OnHover; states: ServiceState
 }) {
   const all = Object.values(cluster.objects)
   const deployments = all.filter((o) => o.kind === 'Deployment')
   const pods = all.filter((o) => o.kind === 'Pod')
   const nodes = all.filter((o) => o.kind === 'Node').sort((a, b) => a.metadata.name.localeCompare(b.metadata.name))
   const nodeColors = Object.fromEntries(nodes.map((n, i) => [n.metadata.name, NODE_COLORS[i % NODE_COLORS.length]]))
-  const layoutKey = deployments.map(keyOf).sort().join(',')
-  const layout = useMemo(() => layoutCity(deployments.map((d) => ({ namespace: d.metadata.namespace!, name: d.metadata.name }))),
+  const layoutKey = deployments.map(keyOf).sort().join(',') + '|' + nodes.map((n) => n.metadata.name).join(',')
+  const layout = useMemo(() => layoutCity(
+    deployments.map((d) => ({ namespace: d.metadata.namespace!, name: d.metadata.name })), nodes.map((n) => n.metadata.name)),
     [layoutKey]) // eslint-disable-line react-hooks/exhaustive-deps
   const edges = cluster.edges.filter((e) => layout.lots[e.from] && layout.lots[e.to])
   useEffect(() => {
     if (import.meta.env.DEV) checkRoutes(layout, edges.map((e) => routeBetween(layout, e.from, e.to)))
   }, [layout, edges.length]) // eslint-disable-line react-hooks/exhaustive-deps
   const focus = selected && layout.lots[selected] ? layout.lots[selected].center : null
+  const podsOn = (node: string) => pods.filter((p) => p.spec.nodeName === node && !p.metadata.deletionTimestamp).length
 
   return (
-    <Canvas shadows camera={{ position: [4, 17, 30], fov: 45 }} onPointerMissed={() => onSelect(null)}>
+    <Canvas shadows camera={{ position: [6, 40, 70], fov: 45 }} onPointerMissed={() => onSelect(null)}>
       <color attach="background" args={[theme.sky]} />
       <fog attach="fog" args={[theme.sky, ...theme.fog]} />
       <ambientLight intensity={theme.ambient} />
       <hemisphereLight args={[theme.sky, theme.ground, theme.ambient * 0.5]} />
-      <directionalLight position={[20, 30, 15]} intensity={theme.sun} color={theme.sunColor} castShadow
-        shadow-mapSize={[2048, 2048]} shadow-camera-left={-40} shadow-camera-right={40} shadow-camera-top={40} shadow-camera-bottom={-40} />
+      <directionalLight position={[30, 45, 25]} intensity={theme.sun} color={theme.sunColor} castShadow
+        shadow-mapSize={[2048, 2048]} shadow-camera-left={-70} shadow-camera-right={70} shadow-camera-top={70} shadow-camera-bottom={-70} shadow-camera-far={200} />
       <Ground layout={layout} theme={theme} />
+      <Scenery layout={layout} theme={theme} />
+      {nodes.map((n) => layout.stations[n.metadata.name] && (
+        <PowerStation key={n.metadata.uid} node={n} pos={layout.stations[n.metadata.name].center} used={podsOn(n.metadata.name)}
+          color={nodeColors[n.metadata.name]} theme={theme} onHover={onHover} />
+      ))}
       {deployments.map((dep) => {
         const key = keyOf(dep)
         const lot = layout.lots[key]
@@ -319,16 +397,16 @@ export function City({ cluster, selected, onSelect, powerGrid, theme, onHover }:
         return (
           <Building key={dep.metadata.uid} dep={dep} info={landmarkFor(dep.metadata.name)} pos={lot.center}
             selected={selected === key} onSelect={() => onSelect(key)} powerGrid={powerGrid} nodeColors={nodeColors}
-            theme={theme} onHover={onHover}
+            theme={theme} onHover={onHover} state={states[key]}
             pods={pods.filter((p) => p.metadata.namespace === dep.metadata.namespace && p.metadata.labels?.app === dep.metadata.name)} />
         )
       })}
       {edges.map((e) => (
         <Traffic key={`${e.from}->${e.to}`} edge={e} layout={layout} theme={theme} onHover={onHover}
-          accent={landmarkFor(e.from.split('/')[1]).accent} />
+          accent={landmarkFor(nameOf(e.from)).accent} />
       ))}
-      <OrbitControls makeDefault maxPolarAngle={Math.PI / 2.15} minDistance={8} maxDistance={90} />
-      <CameraRig focus={focus} />
+      <OrbitControls makeDefault maxPolarAngle={Math.PI / 2.15} minDistance={8} maxDistance={140} />
+      <CameraRig focus={focus} home={layout.focus} />
     </Canvas>
   )
 }
