@@ -94,13 +94,16 @@ class LiveCluster:
                     source = f'{namespace}/{sample["source"]}'
                     destination = f"{target[1] if len(target) > 1 else namespace}/{target[0]}"
                     timestamp = sample["timestamp_ms"]
-                    failed = sample["status"] >= 400
                     if timestamp >= cutoff and source in buildings and destination in buildings:
-                        samples.setdefault((source, destination), []).append(failed)
+                        samples.setdefault((source, destination), []).append(int(sample["status"]))
                 except (ValueError, TypeError, KeyError):
                     continue
+        # healthy: nobody refused the call (502/503/504 = no ready Pod answered).
+        # errors: it answered, but with an error (e.g. 500 because something it depends on is failing).
+        refused = {502, 503, 504}
         return [{"from": source, "to": target, "rps": len(results) / 5,
-                 "healthy": not any(results)}
+                 "healthy": not any(code in refused for code in results),
+                 "errors": any(code >= 400 and code not in refused for code in results)}
                 for (source, target), results in sorted(samples.items())]
 
     def initial_events(self):

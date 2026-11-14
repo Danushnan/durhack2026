@@ -15,18 +15,19 @@ export const roleOf = (service: string) =>
 
 /** Why Kubernetes did each thing, in one plain sentence. */
 const EXPLAIN: Record<string, string> = {
-  SuccessfulCreate: 'The Deployment had fewer Pods than desired, so it created one. This is the control loop at work.',
-  Scheduled: 'The scheduler picked a Node (Power Station) with a free slot for this Pod.',
+  SuccessfulCreate: 'The ReplicaSet had fewer Pods than desired, so it created one. This is the control loop at work.',
+  SuccessfulDelete: 'The ReplicaSet had more Pods than desired, so it deleted one.',
+  Scheduled: 'The scheduler picked a Node (Power Station) with a free slot, spreading copies of a service across Nodes.',
   Started: 'The container started running inside the Pod.',
   BackOff: 'The app keeps crashing. Kubernetes keeps restarting it, waiting longer each time so it does not hammer the Node.',
   Killing: 'Kubernetes is stopping this Pod gracefully.',
   FailedScheduling: 'No Node has a free slot, so the Pod waits in Pending until space appears.',
-  ScalingReplicaSet: 'Kubernetes changed how many Pods of one version (a ReplicaSet) should run. During a release it adds new-version Pods and removes old ones a few at a time.',
+  ScalingReplicaSet: 'The Deployment changed how many Pods its ReplicaSet (one per version) should run. During a release it grows the new ReplicaSet and shrinks the old one a few Pods at a time.',
   ProgressDeadlineExceeded: 'The new version never became ready, so the rollout stopped. The old version keeps serving; roll back, or release a fix.',
   DeploymentRollback: 'The Deployment went back to the previous version. Kubernetes rolls back as carefully as it rolls forward.',
-  NodeNotReady: 'A Node stopped responding. Its Pods can no longer be trusted to run.',
+  NodeNotReady: 'A Node stopped sending heartbeats. Kubernetes tainted it unreachable and took its Pods out of rotation; they are evicted if it stays silent.',
   NodeReady: 'The Node is healthy again and can accept new Pods.',
-  TaintManagerEviction: 'Pods on a failed Node are marked for deletion. They stay Terminating until the Node confirms; a Deployment starts replacements elsewhere meanwhile, a StatefulSet waits.',
+  TaintManagerEviction: 'The Node stayed unreachable longer than its Pods tolerate, so they are marked for deletion. They stay Terminating until the Node confirms; a Deployment starts replacements elsewhere meanwhile, a StatefulSet waits.',
   SuccessfulRescale: 'The autoscaler compared requests per Unit with its target and changed how many Units the service should run.',
   NodeNotSchedulable: 'The Node was cordoned: no new Pods will be placed on it (the first step of kubectl drain).',
   NodeSchedulable: 'The Node was uncordoned and can accept new Pods again.',
@@ -80,3 +81,6 @@ export const COMPONENTS: Record<string, { label: string; color: string; does: st
   'taint-eviction-controller': { label: 'Eviction controller', color: '#f87171', does: 'evicts Pods from failed Power Stations' },
   kubelet: { label: 'Kubelet', color: '#facc15', does: 'the agent on each Power Station that starts and stops containers' },
 }
+
+/** Which part of Kubernetes reported an event: reportingComponent, or the older source.component real clusters often use. */
+export const componentOf = (e: K8sObject) => e.reportingComponent || e.source?.component || ''

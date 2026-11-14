@@ -8,7 +8,7 @@ import * as THREE from 'three'
 const COL = 34            // x distance between call-graph columns
 const ROW = 28            // z distance between Buildings in a column
 const PAD = 11            // District padding around its Buildings
-const DISTRICT_GAP = 7
+const DISTRICT_GAP = 16    // room for a row of Scenery between Districts
 export const ROAD_W = 3.2       // two lanes: requests go out on the right, failed ones come back on the left
 export const KERB = 0.7         // pavement on each side of a Road
 /** Room a Building can take at its largest size (10 replicas), Building-local, including its Unit rows. */
@@ -110,6 +110,19 @@ export function layoutCity(deployments: { namespace: string; name: string }[], n
     districts: districts.map((d) => ({ name: d.name, ...moved(d) })),
     core: moved(core),
   }
+}
+
+/**
+ * The tallest thing that can stand at (x, z) without hiding any `keep` area from the isometric camera,
+ * which looks down the (-1, -1, -1) diagonal: a height h hides the ground from (x, z) to (x - h, z - h).
+ */
+export function heightCap(keep: Rect[], x: number, z: number) {
+  let cap = Infinity
+  for (const k of keep) {
+    const lo = Math.max(x - k.x1, z - k.z1), hi = Math.min(x - k.x0, z - k.z0)
+    if (lo <= hi && hi >= 0) cap = Math.min(cap, Math.max(0, lo))
+  }
+  return cap
 }
 
 /** True if a point (with `margin`) is inside the room reserved for a Building. */

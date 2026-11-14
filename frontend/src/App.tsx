@@ -5,7 +5,7 @@ import {
   nodeReady, podsOf, type PodStatus, podStatus, rolloutOf, versionColor, STATUS_COLOR, useCluster,
 } from './k8s'
 import { landmarkFor } from './landmarks'
-import { COMPONENTS, downServices, explain, impactChain, kubectl, nameOf, roleOf } from './teach'
+import { COMPONENTS, componentOf, downServices, explain, impactChain, kubectl, nameOf, roleOf } from './teach'
 import { THEMES, useThemeMode } from './theme'
 import { routeKey, Telemetry, useTelemetry } from './Telemetry'
 
@@ -187,7 +187,7 @@ function Help({ onClose }: { onClose: () => void }) {
     <div className="hud help" role="dialog" aria-label="How this city works">
       <button className="close" onClick={onClose} aria-label="Close">×</button>
       <h2>How Port Kube works</h2>
-      <p>Port Kube is a shop's software running on <b>Kubernetes</b>, drawn as a city.</p>
+      <p>Port Kube is a shop's software running on <b>Kubernetes</b>, drawn as a city. Drag to move around; scroll or pinch to zoom.</p>
       <ul>
         <li>🏦 <b>Buildings</b> are services (Deployments). Each does one job: hover one to see what. A bigger Building means more copies were asked for.</li>
         <li>🏙️ Towers, houses and trees around the edge are just scenery.</li>
@@ -280,6 +280,9 @@ function Inspect({ dep, all, events, states, edges, sim, onPick, onClose }: {
   const hpa = all.find((o) => o.kind === 'HorizontalPodAutoscaler' && o.metadata.namespace === ns && o.spec.scaleTargetRef.name === name)
   const claims = all.filter((o) => o.kind === 'PersistentVolumeClaim' && o.metadata.namespace === ns && o.metadata.labels?.app === name)
   const pdb = all.find((o) => o.kind === 'PodDisruptionBudget' && o.metadata.namespace === ns && o.metadata.name === name)
+  const replicaSets = all.filter((o) => o.kind === 'ReplicaSet' && o.metadata.namespace === ns &&
+    o.metadata.ownerReferences?.[0]?.uid === dep.metadata.uid)
+    .sort((a, b) => a.metadata.name.localeCompare(b.metadata.name))
   const mine = events.filter((e) => e.involvedObject?.namespace === ns &&
     (e.involvedObject.name === name || e.involvedObject.name.startsWith(`${name}-`))).slice(0, 6)
   const sabotaged = dep.metadata.annotations?.['kubeverse.io/sabotaged'] === 'true'
@@ -330,6 +333,9 @@ function Inspect({ dep, all, events, states, edges, sim, onPick, onClose }: {
         </div>
       )}
       {pdb && <p className="endpoints">Disruption budget: at most <b>{pdb.spec.maxUnavailable}</b> Unit may be taken away on purpose (e.g. by maintenance) at a time.</p>}
+      {replicaSets.length > 0 && <p className="endpoints">ReplicaSets (one per version; old ones are kept for roll back): {replicaSets.map((rs, i) => (
+        <span key={rs.metadata.uid}>{i > 0 && ' · '}<code>{rs.metadata.name}</code> {rs.metadata.labels?.version} {rs.status?.readyReplicas ?? 0}/{rs.spec?.replicas}</span>
+      ))}</p>}
       <p className="endpoints">Service <code>{name}</code> sends requests to <b>{endpoints} of {pods.filter((p) => !p.metadata.deletionTimestamp).length}</b> Units: only ready ones are in rotation.</p>
       {sim ? <>
         <h3>Try it <small>· each button is a kubectl command</small></h3>
@@ -385,8 +391,10 @@ function StationPanel({ node, all, sim, onClose }: { node: K8sObject; all: K8sOb
   const cordoned = !!node.spec?.unschedulable
   const drain: string = node.metadata.annotations?.['kubeverse.io/drain'] ?? ''
   const pods = all.filter((o) => o.kind === 'Pod' && o.spec?.nodeName === name)
-  const capacity = Number(node.status.capacity.pods)
-  const state = !ready ? { cls: 'bad', text: '🔌 Power cut: the Node stopped responding. Its Pods are stuck Terminating until it returns; Deployments start replacements elsewhere, the StatefulSet waits.' }
+  const capacity = Number(node.status?.capacity?.pods ?? 0)
+  const cut = node.metadata.annotations?.['kubeverse.io/power-cut'] === 'true'
+  const state = !ready ? { cls: 'bad', text: '🔌 Power cut: no heartbeats, so Kubernetes marked the Node NotReady and tainted it. Its Pods left rotation, then were evicted: they stay Terminating until it returns; Deployments start replacements elsewhere, the StatefulSet waits.' }
+    : cut ? { cls: 'bad', text: '🔌 Power cut, but Kubernetes has not noticed yet: the control plane only knows a Node is gone when its heartbeats stop arriving.' }
     : cordoned ? { cls: 'warn', text: drain.startsWith('blocked') ? `🚧 Maintenance, waiting: ${drain.slice(9)}. Kubernetes waits for a replacement to be ready elsewhere first.`
       : drain === 'draining' ? '🚧 Maintenance: moving its Units elsewhere, respecting each service\'s disruption budget.'
         : '🚧 Maintenance: drained and cordoned. No new Pods will be placed here until it is uncordoned.' }
@@ -403,7 +411,7 @@ function StationPanel({ node, all, sim, onClose }: { node: K8sObject; all: K8sOb
           {cordoned
             ? <Action label="✅ End maintenance" hint="Uncordon: new Pods may come here again" cmd={kubectl.uncordon(name)} onClick={() => api.drain(name, false)} />
             : <Action label="🚧 Maintenance" hint="Planned: cordon, then move Units out gently" cmd={kubectl.drain(name)} onClick={() => api.drain(name, true)} disabled={!ready} />}
-          {ready
+          {!cut
             ? <Action bad label="🔌 Cut power" hint="Unplanned: the machine just dies" cmd="(simulation only)" onClick={() => api.outage(name, true)} />
             : <Action label="⚡ Restore power" hint="The Node comes back and reports in" cmd="(simulation only)" onClick={() => api.outage(name, false)} />}
         </div>
@@ -441,8 +449,8 @@ function HallPanel({ events, onClose }: { events: K8sObject[]; onClose: () => vo
         ))}
       </ul>
       <h3>Latest decisions</h3>
-      {events.filter((e) => COMPONENTS[e.reportingComponent ?? '']).slice(0, 8).map((e) => (
-        <div key={e.metadata.uid} className="event"><i style={{ background: COMPONENTS[e.reportingComponent!].color }} />
+      {events.filter((e) => COMPONENTS[componentOf(e)]).slice(0, 8).map((e) => (
+        <div key={e.metadata.uid} className="event"><i style={{ background: COMPONENTS[componentOf(e)].color }} />
           <b>{e.reason}</b> {e.involvedObject?.name}: {explain(e) || e.message}</div>
       ))}
     </aside>

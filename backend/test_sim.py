@@ -211,3 +211,58 @@ def test_reset_restores_the_demo_without_reusing_ids():
     run(sim, t, 8)
     assert all(p.ready for p in sim.pods.values()) and not before & set(sim.pods)
     assert not any(n.cordoned for n in sim.nodes.values())
+
+
+def snap(sim, kind):
+    return [o for o in sim.snapshot().values() if o["kind"] == kind]
+
+
+def test_deployments_own_replicasets_which_own_pods():
+    sim = demo_cluster()
+    t = run(sim, 0, 6)
+    [rs1] = [r for r in snap(sim, "ReplicaSet") if r["metadata"]["ownerReferences"][0]["name"] == "payments"]
+    assert rs1["spec"]["replicas"] == 2 and rs1["status"]["readyReplicas"] == 2
+    owners = {p["metadata"]["ownerReferences"][0]["name"] for p in snap(sim, "Pod") if p["metadata"]["labels"]["app"] == "payments"}
+    assert owners == {rs1["metadata"]["name"]}
+    assert all(p.name.startswith(rs1["metadata"]["name"] + "-") for p in pods(sim, "payments"))
+    sim.release("shop", "payments")
+    t = run(sim, t, 20)
+    by_version = {r["metadata"]["labels"]["version"]: r for r in snap(sim, "ReplicaSet") if r["metadata"]["labels"]["app"] == "payments"}
+    assert by_version["v1"]["spec"]["replicas"] == 0 and by_version["v2"]["spec"]["replicas"] == 2  # old one kept for rollback
+    sim.rollback("shop", "payments")
+    run(sim, t, 20)
+    assert {p.name.rsplit("-", 1)[0] for p in pods(sim, "payments")} == {rs1["metadata"]["name"]}  # same template, same ReplicaSet
+
+
+def test_node_outage_waits_for_heartbeats_then_tolerations():
+    sim = demo_cluster()
+    t = run(sim, 0, 6)
+    victims = {p.uid for p in sim.pods.values() if p.node == "node-2"}
+    sim.set_node_outage("node-2", True)
+    t = run(sim, t, 1)
+    assert sim.nodes["node-2"].ready  # Kubernetes has not noticed yet
+    t = run(sim, t, 1.5)
+    [node] = [n for n in snap(sim, "Node") if n["metadata"]["name"] == "node-2"]
+    assert node["spec"]["taints"][0]["key"] == "node.kubernetes.io/unreachable"
+    assert all(not sim.pods[u].ready and sim.pods[u].deleting_at is None for u in victims)  # out of rotation, not yet evicted
+    run(sim, t, 3)
+    assert all(sim.pods[u].deleting_at is not None for u in victims)
+
+
+def test_scheduler_spreads_replicas_and_assigns_ips():
+    sim = demo_cluster()
+    run(sim, 0, 6)
+    assert len({p.node for p in pods(sim, "frontend")}) == 3
+    [eps] = [e for e in snap(sim, "EndpointSlice") if e["metadata"]["labels"]["kubernetes.io/service-name"] == "frontend"]
+    assert len(eps["endpoints"]) == 3 and all(e["conditions"]["ready"] and e["addresses"][0].startswith("10.244.") for e in eps["endpoints"])
+
+
+def test_traffic_only_flows_where_requests_arrive():
+    sim = demo_cluster()
+    t = run(sim, 0, 6)
+    rates = {(e["from"], e["to"]): e["rps"] for e in sim.traffic()}
+    assert rates[("shop/cart", "data/redis")] == 5 and rates[("shop/frontend", "shop/cart")] == 6
+    sim.sabotage("shop", "frontend", True)
+    run(sim, t, 4)
+    rates = {(e["from"], e["to"]): e["rps"] for e in sim.traffic()}
+    assert rates[("shop/frontend", "shop/cart")] == 0 and rates[("shop/cart", "data/redis")] == 0  # no customers get past the frontend

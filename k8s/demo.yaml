@@ -1,0 +1,174 @@
+# Kuebec live demo: a tiny shop that really runs on Kubernetes. Start it with k8s/up.sh, remove it with k8s/down.sh.
+#
+# Every Pod runs the same small Python program (k8s/workload.py, mounted from the "workload" ConfigMap). It serves HTTP on :8080, calls the services
+# it depends on, and logs one JSON line per call. Kuebec's live mode reads those lines to draw Cars:
+#   status 200 -> served, 500 -> answered with an error (something further down failed), 503 -> refused.
+# Labels: app.kubernetes.io/part-of=kubeverse-demo marks the Pods whose logs carry traffic; the
+# container must be named "workload". (The label keeps its old name so existing setups keep working.)
+apiVersion: v1
+kind: Namespace
+metadata: {name: shop}
+---
+apiVersion: v1
+kind: Namespace
+metadata: {name: data}
+---
+# ---------- shop ----------
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: frontend, namespace: shop}
+spec:
+  replicas: 3
+  selector: {matchLabels: {app: frontend}}
+  template:
+    metadata:
+      labels: {app: frontend, app.kubernetes.io/part-of: kubeverse-demo}
+    spec:
+      containers:
+        - name: workload
+          image: python:3.12-alpine
+          command: ["python", "-u", "/app/workload.py"]
+          env:
+            - {name: SERVICE, value: frontend}
+            - {name: CALLS, value: '[["cart", 2.0], ["checkout", 1.0]]'}
+          ports: [{containerPort: 8080}]
+          readinessProbe: {httpGet: {path: /healthz, port: 8080}, initialDelaySeconds: 2, periodSeconds: 2}
+          resources: {requests: {cpu: 10m, memory: 32Mi}, limits: {memory: 64Mi}}
+          volumeMounts: [{name: program, mountPath: /app}]
+      volumes: [{name: program, configMap: {name: workload}}]
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: cart, namespace: shop}
+spec:
+  replicas: 2
+  selector: {matchLabels: {app: cart}}
+  template:
+    metadata: {labels: {app: cart, app.kubernetes.io/part-of: kubeverse-demo}}
+    spec:
+      containers:
+        - name: workload
+          image: python:3.12-alpine
+          command: ["python", "-u", "/app/workload.py"]
+          env:
+            - {name: SERVICE, value: cart}
+            - {name: CALLS, value: '[["redis.data", 2.5]]'}
+          ports: [{containerPort: 8080}]
+          readinessProbe: {httpGet: {path: /healthz, port: 8080}, initialDelaySeconds: 2, periodSeconds: 2}
+          resources: {requests: {cpu: 10m, memory: 32Mi}, limits: {memory: 64Mi}}
+          volumeMounts: [{name: program, mountPath: /app}]
+      volumes: [{name: program, configMap: {name: workload}}]
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: checkout, namespace: shop}
+spec:
+  replicas: 2
+  selector: {matchLabels: {app: checkout}}
+  template:
+    metadata: {labels: {app: checkout, app.kubernetes.io/part-of: kubeverse-demo}}
+    spec:
+      containers:
+        - name: workload
+          image: python:3.12-alpine
+          command: ["python", "-u", "/app/workload.py"]
+          env:
+            - {name: SERVICE, value: checkout}
+            - {name: CALLS, value: '[["payments", 1.0], ["postgres.data", 1.5]]'}
+          ports: [{containerPort: 8080}]
+          readinessProbe: {httpGet: {path: /healthz, port: 8080}, initialDelaySeconds: 2, periodSeconds: 2}
+          resources: {requests: {cpu: 10m, memory: 32Mi}, limits: {memory: 64Mi}}
+          volumeMounts: [{name: program, mountPath: /app}]
+      volumes: [{name: program, configMap: {name: workload}}]
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: payments, namespace: shop}
+spec:
+  replicas: 2
+  selector: {matchLabels: {app: payments}}
+  template:
+    metadata: {labels: {app: payments, app.kubernetes.io/part-of: kubeverse-demo}}
+    spec:
+      containers:
+        - name: workload
+          image: python:3.12-alpine
+          command: ["python", "-u", "/app/workload.py"]
+          env: [{name: SERVICE, value: payments}]
+          ports: [{containerPort: 8080}]
+          readinessProbe: {httpGet: {path: /healthz, port: 8080}, initialDelaySeconds: 2, periodSeconds: 2}
+          resources: {requests: {cpu: 10m, memory: 32Mi}, limits: {memory: 64Mi}}
+          volumeMounts: [{name: program, mountPath: /app}]
+      volumes: [{name: program, configMap: {name: workload}}]
+---
+# ---------- data ----------
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: redis, namespace: data}
+spec:
+  replicas: 1
+  selector: {matchLabels: {app: redis}}
+  template:
+    metadata: {labels: {app: redis, app.kubernetes.io/part-of: kubeverse-demo}}
+    spec:
+      containers:
+        - name: workload
+          image: python:3.12-alpine
+          command: ["python", "-u", "/app/workload.py"]
+          env: [{name: SERVICE, value: redis}]
+          ports: [{containerPort: 8080}]
+          readinessProbe: {httpGet: {path: /healthz, port: 8080}, initialDelaySeconds: 2, periodSeconds: 2}
+          resources: {requests: {cpu: 10m, memory: 32Mi}, limits: {memory: 64Mi}}
+          volumeMounts: [{name: program, mountPath: /app}]
+      volumes: [{name: program, configMap: {name: workload}}]
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: postgres, namespace: data}
+spec:
+  replicas: 1
+  selector: {matchLabels: {app: postgres}}
+  template:
+    metadata: {labels: {app: postgres, app.kubernetes.io/part-of: kubeverse-demo}}
+    spec:
+      containers:
+        - name: workload
+          image: python:3.12-alpine
+          command: ["python", "-u", "/app/workload.py"]
+          env: [{name: SERVICE, value: postgres}]
+          ports: [{containerPort: 8080}]
+          readinessProbe: {httpGet: {path: /healthz, port: 8080}, initialDelaySeconds: 2, periodSeconds: 2}
+          resources: {requests: {cpu: 10m, memory: 32Mi}, limits: {memory: 64Mi}}
+          volumeMounts: [{name: program, mountPath: /app}]
+      volumes: [{name: program, configMap: {name: workload}}]
+---
+# ---------- Services: one per workload, port 8080 ----------
+apiVersion: v1
+kind: Service
+metadata: {name: frontend, namespace: shop}
+spec: {selector: {app: frontend}, ports: [{port: 8080}]}
+---
+apiVersion: v1
+kind: Service
+metadata: {name: cart, namespace: shop}
+spec: {selector: {app: cart}, ports: [{port: 8080}]}
+---
+apiVersion: v1
+kind: Service
+metadata: {name: checkout, namespace: shop}
+spec: {selector: {app: checkout}, ports: [{port: 8080}]}
+---
+apiVersion: v1
+kind: Service
+metadata: {name: payments, namespace: shop}
+spec: {selector: {app: payments}, ports: [{port: 8080}]}
+---
+apiVersion: v1
+kind: Service
+metadata: {name: redis, namespace: data}
+spec: {selector: {app: redis}, ports: [{port: 8080}]}
+---
+apiVersion: v1
+kind: Service
+metadata: {name: postgres, namespace: data}
+spec: {selector: {app: postgres}, ports: [{port: 8080}]}

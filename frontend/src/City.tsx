@@ -9,10 +9,11 @@ import {
 import { FacadeSign, Landmark, type LandmarkInfo, landmarkFor } from './landmarks'
 import { BUILDING, buildRoads, carTrip, type CityLayout, checkRoads, KERB, layoutCity, offsetPath, Path, ROAD_W } from './layout'
 import { Scenery } from './scenery'
-import { COMPONENTS, nameOf, roleOf } from './teach'
+import { COMPONENTS, componentOf, nameOf, roleOf } from './teach'
 import { textTexture, type TextLine } from './textures'
 import type { Theme } from './theme'
 import { routeKey, trafficColor, type RouteMetrics, type ServiceMetrics } from './Telemetry'
+import { admit, bendLimit, type CarAgent, newCar, stepCars } from './traffic'
 
 export interface HoverInfo { title: string; lines: string[]; x: number; y: number }
 type OnHover = (h: HoverInfo | null) => void
@@ -23,11 +24,16 @@ const UNIT = 1
 const UNIT_GAP = 1.45
 const UNIT_COLS = 6
 const UNIT_Z = 4.4
-const CAR_SPEED = 7 // world units per second
 const CAR_GROW = 2.2 // distance over which a Car grows as it leaves a Building and shrinks as it enters one
 const CAR_POOL = 40  // most Cars drawn on one Road at once (rush hour fills a Road bumper to bumper)
-const CAR_GAP = 2.1  // a Car keeps this distance behind the one ahead, so queues form instead of overlaps
-const ERROR_WAIT = 1.1 // seconds a Car waits at the door of an Impacted service before getting its error back
+const GRIP = 9       // how hard Cars may corner: bends below this radius slow them down
+// Isometric view: an orthographic camera looking down the (1, 1, 1) diagonal from this far away.
+const ISO = new THREE.Vector3(1, 1, 1).normalize()
+const CAM_DIST = 300
+const ISO_RIGHT = new THREE.Vector3(1, 0, -1).normalize(), ISO_UP = new THREE.Vector3(-1, 2, -1).normalize()
+const TAG_SCALE = 1 / (2 * Math.tan(Math.PI / 8)) // keeps tags the size they had under the old 45° perspective camera
+/** A pan that ends over a Building must not also select it. */
+const dragged = (e: ThreeEvent<MouseEvent>) => e.delta > 4
 const ORANGE = '#f97316' // an error response: the service answered, but could not do the job
 /** A Building's size follows its desired replica count: small when asked for 0, half again as big at 10. */
 export const sizeFor = (replicas: number) => 0.75 + 0.075 * Math.max(0, Math.min(10, replicas))
@@ -95,8 +101,14 @@ function Tag({ lines, border, position, size = 0.043, theme }: {
   const key = JSON.stringify(lines) + border + theme.mode
   const { texture, aspect } = useMemo(() => textTexture(lines, { bg: theme.labelBg, border }), [key]) // eslint-disable-line react-hooks/exhaustive-deps
   useEffect(() => () => texture.dispose(), [texture])
+  const ref = useRef<THREE.Sprite>(null)
+  // An orthographic camera ignores sizeAttenuation, so scale by the zoom to keep a constant on-screen size.
+  useFrame(({ camera, size: view }) => {
+    const k = (camera as THREE.OrthographicCamera).isOrthographicCamera ? (TAG_SCALE * view.height) / camera.zoom : 1
+    ref.current?.scale.set(size * aspect * k, size * k, 1)
+  })
   return (
-    <sprite position={position} scale={[size * aspect, size, 1]} center={[0.5, 0]} renderOrder={10}>
+    <sprite ref={ref} position={position} scale={[size * aspect, size, 1]} center={[0.5, 0]} renderOrder={10}>
       <spriteMaterial map={texture} depthTest={false} transparent sizeAttenuation={false} />
     </sprite>
   )
@@ -331,7 +343,7 @@ function Building({ dep, info, pods, pos, selected, onSelect, powerGrid, nodeCol
         <Landmark info={info} glow={glow} theme={theme} />
         {/* One invisible hit-box for hover/click instead of handlers on every part */}
         <mesh position={[0, info.height / 2, -0.5]} visible={false}
-          onClick={(e) => { e.stopPropagation(); onSelect() }}
+          onClick={(e) => { e.stopPropagation(); if (!dragged(e)) onSelect() }}
           onPointerOver={hover} onPointerMove={hover} onPointerOut={() => onHover(null)}>
           <boxGeometry args={[9, info.height, 6]} />
         </mesh>
@@ -357,9 +369,12 @@ function PowerStation({ node, pos, used, color, theme, onHover, selected, onSele
   selected: boolean; onSelect: () => void
 }) {
   const ready = nodeReady(node)
+  const unnoticed = ready && node.metadata.annotations?.['kubeverse.io/power-cut'] === 'true' // cut, heartbeats not yet missed
   const cordoned = !!node.spec?.unschedulable
   const drain: string = node.metadata.annotations?.['kubeverse.io/drain'] ?? ''
-  const capacity = Number(node.status.capacity.pods)
+  const capacity = Number(node.status?.capacity?.pods ?? 0)
+  // Real Nodes report ~110 Pod slots, so the meter shows at most 8 lights, lit in proportion.
+  const lights = Math.max(1, Math.min(8, capacity)), lit = capacity ? Math.ceil((used / capacity) * lights) : 0
   const name = node.metadata.name
   const night = theme.mode === 'night'
   const beacon = useRef<THREE.Mesh>(null)
@@ -371,7 +386,7 @@ function PowerStation({ node, pos, used, color, theme, onHover, selected, onSele
       const k = (t * 0.3 + i / 3) % 1
       c.position.y = 5 + k * 3.5
       c.scale.setScalar(0.5 + k * 1.1)
-      ;((c as THREE.Mesh).material as THREE.MeshStandardMaterial).opacity = ready ? 0.45 * (1 - k) : 0
+      ;((c as THREE.Mesh).material as THREE.MeshStandardMaterial).opacity = ready && !unnoticed ? 0.45 * (1 - k) : 0
     })
   })
   const wall = night ? '#7483a0' : '#ece8df'
@@ -380,7 +395,8 @@ function PowerStation({ node, pos, used, color, theme, onHover, selected, onSele
     e.stopPropagation()
     onHover({
       title: `⚡ Power Station ${name}`,
-      lines: ['A Node: a machine that runs Pods.', !ready ? 'POWER CUT: its Pods were evicted.' : cordoned ? `Under maintenance (cordoned): ${drain}.` : `Running ${used} of ${capacity} Pod slots.`,
+      lines: ['A Node: a machine that runs Pods.', !ready ? 'POWER CUT: Kubernetes marked it NotReady; its Pods are evicted.'
+        : unnoticed ? 'POWER CUT: Kubernetes has not noticed yet. It waits for missed heartbeats.' : cordoned ? `Under maintenance (cordoned): ${drain}.` : `Running ${used} of ${capacity} Pod slots.`,
         'Click for maintenance and power controls.'],
       ...at(e),
     })
@@ -398,10 +414,10 @@ function PowerStation({ node, pos, used, color, theme, onHover, selected, onSele
       <mesh position={[-1.2, 1.5, 1.6]} castShadow receiveShadow><boxGeometry args={[6.4, 3, 3.2]} /><meshStandardMaterial color={wall} /></mesh>
       <mesh position={[-1.2, 3.1, 1.6]}><boxGeometry args={[6.7, 0.22, 3.5]} /><meshStandardMaterial color={color} /></mesh>
       {/* Capacity meter: one light per Pod slot, lit when used */}
-      {Array.from({ length: capacity }, (_, i) => (
-        <mesh key={i} position={[-3.6 + i * 1.2, 0.95, 3.23]}>
-          <boxGeometry args={[0.85, 1.1, 0.06]} />
-          <meshBasicMaterial color={ready && i < used ? color : night ? '#1e293b' : '#94a3b8'} toneMapped={false} />
+      {Array.from({ length: lights }, (_, i) => (
+        <mesh key={i} position={[-4.4 + i * (8.4 / lights) + 4.2 / lights, 0.95, 3.23]}>
+          <boxGeometry args={[Math.min(0.85, 7.4 / lights), 1.1, 0.06]} />
+          <meshBasicMaterial color={ready && i < lit ? color : night ? '#1e293b' : '#94a3b8'} toneMapped={false} />
         </mesh>
       ))}
       {[[2.9, -1.9], [-0.4, -2.3]].map(([x, z]) => (
@@ -421,12 +437,13 @@ function PowerStation({ node, pos, used, color, theme, onHover, selected, onSele
       {[3.6, 4.8].map((x) => <mesh key={x} position={[x, 0.55, 2]} castShadow><boxGeometry args={[0.9, 1.1, 0.9]} /><meshStandardMaterial color={night ? '#55627d' : '#a8b0bc'} /></mesh>)}
       <FacadeSign text="POWER STATION" width={3.8} pos={[-1.2, 2.25, 3.23]} bg={ready ? color : '#7f1d1d'} theme={theme} />
       <mesh position={[0, 2.6, 0]} visible={false} onPointerOver={hover} onPointerMove={hover} onPointerOut={() => onHover(null)}
-        onClick={(e) => { e.stopPropagation(); onSelect() }}>
+        onClick={(e) => { e.stopPropagation(); if (!dragged(e)) onSelect() }}>
         <boxGeometry args={[12, 5.2, 9.5]} />
       </mesh>
       <Tag theme={theme} position={[-0.5, 7, 0]} border={ready ? color : RED} size={0.036}
         lines={[{ text: `⚡ ${name}`, px: 56, color: theme.labelFg },
-          !ready ? { text: 'POWER CUT', px: 40, color: RED }
+          !ready ? { text: 'POWER CUT · NotReady', px: 40, color: RED }
+            : unnoticed ? { text: 'POWER CUT · heartbeats stopping…', px: 40, color: RED }
             : cordoned ? { text: `MAINTENANCE · ${drain.startsWith('blocked') ? 'waiting on a budget' : drain}`, px: 40, color: night ? AMBER : '#b45309' }
               : { text: `Node · ${used}/${capacity} slots used`, px: 40, color: night ? '#cbd5e1' : '#334155' }]} />
     </group>
@@ -435,15 +452,10 @@ function PowerStation({ node, pos, used, color, theme, onHover, selected, onSele
 
 // ---------- Cars ----------
 
-interface CarAgent { s: number; slot: number; phase: 'out' | 'in' | 'wait' | 'back'; fate?: 'refused' | 'error'; until: number }
-
 /**
- * Cars are independent agents. Each leaves the caller in the right-hand lane, keeps its distance from
- * the Car ahead (so slow answers build a queue), and at the callee's door finds out what happens:
- *  - the service has ready Units  → it drives in and a Unit serves it (that Unit flashes);
- *  - it is Impacted (it answers, but something it needs is down) → it waits, then returns orange;
- *  - it has no ready Units → it is refused at once and returns red, hazards flashing.
- * Its fate is decided on arrival, from the live state, so Cars already on the road react to failures.
+ * Cars are independent drivers (see traffic.ts): they pull out of the caller as requests arrive, follow
+ * the Car ahead, slow for bends, and at the callee's door are served, refused (red) or answered with an
+ * error (orange). Fate is decided on arrival, from the live state, so Cars already on the road react to failures.
  */
 function Traffic({ edge, road, theme, accent, onHover, metric, endpoints }: {
   edge: Edge; road: THREE.Vector3[]; theme: Theme; accent: string; onHover: OnHover; metric?: RouteMetrics
@@ -451,51 +463,37 @@ function Traffic({ edge, road, theme, accent, onHover, metric, endpoints }: {
 }) {
   const targets = useRef(endpoints)
   targets.current = endpoints
-  const trips = useMemo(() => ({ ok: new Path(carTrip(road, false)), back: new Path(carTrip(road, true)) }), [road])
+  const trips = useMemo(() => {
+    const ok = new Path(carTrip(road, false)), back = new Path(carTrip(road, true))
+    return { ok, back, trip: { okLength: ok.length, backLength: back.length, door: ok.length - CAR_GROW,
+      limitOk: bendLimit(ok.pts, GRIP), limitBack: bendLimit(back.pts, GRIP) } }
+  }, [road])
   const cars = useRef<CarAgent[]>([])
-  const timer = useRef(0)
+  const credit = useRef(0) // requests waiting to leave as a Car
   const live = useRef(edge)
   live.current = edge
   const groups = useRef<(THREE.Group | null)[]>([])
   const paints = useRef<(THREE.MeshStandardMaterial | null)[]>([])
   const hazards = useRef<(THREE.Group | null)[]>([])
+  const brakes = useRef<(THREE.Group | null)[]>([])
   const tmp = useMemo(() => new THREE.Vector3(), [])
   const colors = useMemo(() => ({ ok: new THREE.Color(accent), refused: new THREE.Color(RED), error: new THREE.Color(ORANGE) }), [accent])
   useFrame(({ clock }, rawDt) => {
     const dt = Math.min(rawDt, 0.1) // a hidden tab must not dump a burst of Cars
     const now = clock.elapsedTime
     const e = live.current
-    const L = trips.ok.length, door = L - CAR_GROW
-    const n = Math.ceil(e.rps)
-    if (n > 0 && (timer.current -= dt) <= 0) {
-      const used = new Set(cars.current.map((c) => c.slot))
-      const slot = [...Array(CAR_POOL).keys()].find((i) => !used.has(i))
-      const room = !cars.current.some((c) => c.phase === 'out' && c.s < CAR_GAP) // the caller's exit is clear
-      if (slot !== undefined && room) cars.current.push({ s: 0, slot, phase: 'out', until: 0 })
-      timer.current = L / CAR_SPEED / n // about n Cars on the Road at once
+    // Arrivals at the request rate, jittered; a backlog waits (up to 3) while the caller's exit is blocked.
+    const used = new Set(cars.current.map((c) => c.slot))
+    const slot = [...Array(CAR_POOL).keys()].find((i) => !used.has(i))
+    const arrival = admit(credit.current, slot === undefined ? 0 : e.rps, dt, cars.current, Math.random)
+    credit.current = arrival.credit
+    if (arrival.leave && slot !== undefined) cars.current.push(newCar(slot, Math.random))
+    const steps = Math.ceil(dt * 60) // small steps keep the car-following stable
+    for (let k = 0; k < steps; k++) {
+      const r = stepCars(cars.current, dt / steps, now, trips.trip, e.healthy, !!e.errors)
+      for (let n = 0; n < r.served.length; n++) deliver(e.to, targets.current, now)
+      cars.current = r.cars
     }
-    // Outbound lane, front to back: each Car stops short of the one ahead.
-    let limit = Infinity
-    for (const c of cars.current.filter((c) => c.phase !== 'back').sort((a, b) => b.s - a.s)) {
-      if (c.phase === 'wait') {
-        if (now >= c.until) c.phase = 'back'
-      } else if (c.phase === 'in') {
-        c.s += CAR_SPEED * dt
-      } else {
-        c.s = Math.min(c.s + CAR_SPEED * dt, limit)
-        if (c.s >= door) {
-          if (!e.healthy) { c.phase = 'back'; c.fate = 'refused' }
-          else if (e.errors) { c.phase = 'wait'; c.fate = 'error'; c.until = now + ERROR_WAIT; c.s = door }
-          else c.phase = 'in'
-        }
-      }
-      limit = c.s - CAR_GAP
-    }
-    cars.current = cars.current.filter((c) => {
-      if (c.phase === 'back') c.s += CAR_SPEED * dt
-      if (c.phase === 'in' && c.s >= L) { deliver(e.to, targets.current, now); return false }
-      return !(c.phase === 'back' && c.s >= trips.back.length)
-    })
     const blink = Math.sin(now * 12) > 0
     groups.current.forEach((g, i) => {
       if (!g) return
@@ -508,13 +506,15 @@ function Traffic({ edge, road, theme, accent, onHover, metric, endpoints }: {
       g.scale.setScalar(1.15 * Math.max(0.01, Math.min(1, car.s / CAR_GROW, (trip.length - car.s) / CAR_GROW)))
       paints.current[i]?.color.copy(car.fate ? colors[car.fate] : colors.ok)
       if (hazards.current[i]) hazards.current[i]!.visible = !!car.fate && blink
+      if (brakes.current[i]) brakes.current[i]!.visible = car.a < -1.5 || (car.v < 0.3 && car.phase !== 'in')
     })
   })
   const [src, dst] = [edge.from.startsWith('ingress:') ? 'customers' : nameOf(edge.from), nameOf(edge.to)]
   const night = theme.mode === 'night'
   const story = (c?: CarAgent) => !c ? '' : c.fate === 'refused' ? `Refused: ${dst} has no ready Units to answer, so it turns straight back.`
     : c.fate === 'error' ? `${dst} answered with an error: something it depends on is down.`
-      : c.phase === 'in' ? `Being served by the next ready ${dst} Unit (round-robin).` : `On its way to ${dst}.`
+      : c.phase === 'in' ? `Being served by the next ready ${dst} Unit (round-robin).`
+        : c.v < 1 ? `Queuing for ${dst}: the Car ahead is waiting.` : `On its way to ${dst}.`
   return (
     <group>
       {Array.from({ length: CAR_POOL }, (_, i) => (
@@ -536,6 +536,11 @@ function Traffic({ edge, road, theme, accent, onHover, metric, endpoints }: {
           {night && [-0.18, 0.18].map((z) => (
             <mesh key={z} position={[0.56, 0.32, z]}><boxGeometry args={[0.04, 0.1, 0.12]} /><meshBasicMaterial color="#fef9c3" toneMapped={false} /></mesh>
           ))}
+          <group ref={(g) => { brakes.current[i] = g }} visible={false}>
+            {[-0.22, 0.22].map((z) => (
+              <mesh key={z} position={[-0.56, 0.22, z]}><boxGeometry args={[0.05, 0.08, 0.12]} /><meshBasicMaterial color="#dc2626" toneMapped={false} /></mesh>
+            ))}
+          </group>
           <group ref={(g) => { hazards.current[i] = g }} visible={false}>
             {[-0.22, 0.22].map((z) => (
               <mesh key={z} position={[-0.56, 0.35, z]}><boxGeometry args={[0.06, 0.12, 0.14]} /><meshBasicMaterial color="#fb923c" toneMapped={false} /></mesh>
@@ -578,7 +583,7 @@ function CityHall({ pos, theme, onHover, selected, onSelect }: {
       <mesh position={[0, 8.2, -0.6]}><sphereGeometry args={[1.5, 24, 12, 0, Math.PI * 2, 0, Math.PI / 2]} /><meshStandardMaterial color={accent} /></mesh>
       <mesh position={[0, 10, -0.6]}><cylinderGeometry args={[0.05, 0.05, 1.6, 6]} /><meshStandardMaterial color="#334155" /></mesh>
       <mesh position={[0, 3.2, -0.6]} visible={false} onPointerOver={hover} onPointerMove={hover} onPointerOut={() => onHover(null)}
-        onClick={(e) => { e.stopPropagation(); onSelect() }}>
+        onClick={(e) => { e.stopPropagation(); if (!dragged(e)) onSelect() }}>
         <boxGeometry args={[12, 9, 9]} />
       </mesh>
       <Tag theme={theme} position={[0, 11, -0.6]} border={accent} size={0.04}
@@ -606,7 +611,7 @@ function Messengers({ events, place }: { events: K8sObject[]; place: (e: K8sObje
       if (seen.current.has(e.metadata.uid)) continue
       seen.current.add(e.metadata.uid)
       const ends = place(e)
-      const color = COMPONENTS[e.reportingComponent ?? '']?.color
+      const color = COMPONENTS[componentOf(e)]?.color
       const free = flights.current.findIndex((f) => !f || clock.elapsedTime - f.t0 > FLIGHT_SECONDS)
       if (ends && color && free >= 0) flights.current[free] = { from: ends[0], to: ends[1], color: new THREE.Color(color), t0: clock.elapsedTime }
     }
@@ -710,39 +715,42 @@ function Lamps({ points, theme }: { points: THREE.Vector3[]; theme: Theme }) {
 
 interface Controls extends THREE.EventDispatcher<{ start: object }> { target: THREE.Vector3; update(): void }
 
+/** Isometric camera: the view direction never changes; flying moves the look-at point and the zoom. */
 function CameraRig({ focus, layout, homeTick }: { focus: THREE.Vector3 | null; layout: CityLayout; homeTick: number }) {
-  const camera = useThree((s) => s.camera) as THREE.PerspectiveCamera
-  const aspect = useThree((s) => s.size.width / s.size.height)
+  const view = useThree((s) => s.size)
   const controls = useThree((s) => s.controls) as unknown as Controls | null
   const flying = useRef(false)
-  const goal = useRef({ target: new THREE.Vector3(), cam: new THREE.Vector3() })
-  const fly = (target: THREE.Vector3, offset: THREE.Vector3) => {
+  const goal = useRef({ target: new THREE.Vector3(), zoom: 5 })
+  const fly = (target: THREE.Vector3, zoom: number) => {
     goal.current.target.copy(target)
-    goal.current.cam.copy(target).add(offset)
+    goal.current.zoom = zoom
     flying.current = true
   }
   const { x0, x1, z0, z1 } = layout.core
-  // Overview: back off far enough that the whole core fits the viewport width.
+  // Overview: zoom so the whole core (and the tallest Buildings on it) fits the viewport.
   useEffect(() => {
-    const span = Math.max(x1 - x0, (z1 - z0) * 1.5, 40)
-    const dist = (span * 0.62) / (Math.tan((camera.fov * Math.PI) / 360) * Math.min(aspect, 2))
-    fly(new THREE.Vector3((x0 + x1) / 2, 0, (z0 + z1) / 2 + 2), new THREE.Vector3(0, dist * 0.62, dist * 0.78))
+    const corners = [x0, x1].flatMap((x) => [z0, z1].flatMap((z) => [0, 14].map((y) => new THREE.Vector3(x, y, z))))
+    const span = (axis: THREE.Vector3) => { const d = corners.map((c) => c.dot(axis)); return Math.max(...d) - Math.min(...d) }
+    const zoom = 0.94 * Math.min(view.width / span(ISO_RIGHT), view.height / span(ISO_UP))
+    fly(new THREE.Vector3((x0 + x1) / 2, 0, (z0 + z1) / 2), zoom)
   }, [x0, x1, z0, z1, homeTick]) // eslint-disable-line react-hooks/exhaustive-deps
-  // Fly-to: look slightly right of the Building so it is not hidden behind the inspect panel.
-  useEffect(() => { if (focus) fly(focus.clone().add(new THREE.Vector3(5, 2, 0)), new THREE.Vector3(6, 19, 24)) }, [focus])
+  // Fly-to: look slightly right of the Building on screen so it is not hidden behind the inspect panel.
+  useEffect(() => { if (focus) fly(focus.clone().addScaledVector(ISO_RIGHT, 8).setY(2), view.height / 46) }, [focus]) // eslint-disable-line react-hooks/exhaustive-deps
   useEffect(() => {
     if (!controls) return
     const stop = () => { flying.current = false } // the user grabbed the camera
     controls.addEventListener('start', stop)
     return () => controls.removeEventListener('start', stop)
   }, [controls])
-  useFrame((_, dt) => {
+  useFrame(({ camera }, dt) => {
     if (!flying.current || !controls) return
     const k = Math.min(1, dt * 2.5)
     controls.target.lerp(goal.current.target, k)
-    camera.position.lerp(goal.current.cam, k)
+    camera.position.copy(controls.target).addScaledVector(ISO, CAM_DIST)
+    camera.zoom += (goal.current.zoom - camera.zoom) * k
+    camera.updateProjectionMatrix()
     controls.update()
-    if (camera.position.distanceTo(goal.current.cam) < 0.05) flying.current = false
+    if (controls.target.distanceTo(goal.current.target) < 0.05 && Math.abs(camera.zoom - goal.current.zoom) < 0.01) flying.current = false
   })
   return null
 }
@@ -761,7 +769,7 @@ export function City({ cluster, selected, onSelect, powerGrid, theme, onHover, s
   const nodeColors = Object.fromEntries(nodes.map((n, i) => [n.metadata.name, NODE_COLORS[i % NODE_COLORS.length]]))
   // Keyed on names and from→to pairs only: failures change rps/health, and the city must not rearrange.
   const layoutKey = [deployments.map(keyOf).sort(), nodes.map((n) => n.metadata.name), cluster.edges.map((e) => `${e.from}>${e.to}`).sort()].join('|')
-  const { layout, roads, obstacles, lamps } = useMemo(() => {
+  const { layout, roads, obstacles, lamps, keep } = useMemo(() => {
     const calls = cluster.edges.map((e) => ({ from: e.from, to: e.to }))
     const layout = layoutCity(deployments.map((d) => ({ namespace: d.metadata.namespace!, name: d.metadata.name })),
       nodes.map((n) => n.metadata.name), calls, calls.filter((c) => c.from.startsWith('ingress:')))
@@ -787,7 +795,14 @@ export function City({ cluster, selected, onSelect, powerGrid, theme, onHover, s
       ...(layout.hall ? [{ x: layout.hall.center.x, z: layout.hall.center.z, rad: 11 }] : []),
       ...Object.values(roads).flatMap((r) => r.filter((_, i) => i % 2 === 0).map((p) => ({ x: p.x, z: p.z, rad: ROAD_W / 2 + KERB + 1.2 }))),
     ]
-    return { layout, roads, obstacles, lamps }
+    // What Scenery must never hide from the isometric camera: the Buildings' rooms inside each District
+    // (its edge padding may be hidden), City Hall, Power Stations and City Gates.
+    const box = (c: THREE.Vector3, r: number) => ({ x0: c.x - r, x1: c.x + r, z0: c.z - r, z1: c.z + r })
+    const keep = [
+      ...layout.districts.map((d) => ({ x0: d.x0 + 3, x1: d.x1 - 3, z0: d.z0 + 3, z1: d.z1 - 3 })),
+      ...lots.filter((l) => !layout.lots[l.key]).map((l) => box(l.center, 8)),
+    ]
+    return { layout, roads, obstacles, lamps, keep }
   }, [layoutKey]) // eslint-disable-line react-hooks/exhaustive-deps
   const edges = cluster.edges.filter((e) => roads[`${e.from}>${e.to}`])
   const focus = !selected ? null : selected === 'city-hall' ? layout.hall?.center ?? null
@@ -805,13 +820,16 @@ export function City({ cluster, selected, onSelect, powerGrid, theme, onHover, s
     const station = (n?: string) => lift(n ? layout.stations[n]?.center : undefined, 6)
     const io = e.involvedObject
     if (!io) return null
-    const podApp = (name: string) => Object.values(objects).find((o) => o.kind === 'Pod' && o.metadata.name === name)?.metadata.labels?.app
-      ?? name.replace(/-\d+$/, '')
-    const building = (app: string) => lift(layout.lots[`${io.namespace}/${app}`]?.center, 4)
+    const podApp = (name: string) => Object.values(objects).find((o) => o.kind === 'Pod' && o.metadata.name === name)?.metadata.labels?.app ?? name
+    // A ReplicaSet (frontend-7c5d9b8f4d) or Pod (frontend-7c5d9b8f4d-x2kqp, postgres-0) belongs to the
+    // workload whose name is its longest prefix.
+    const owner = (name: string) => Object.values(objects).filter((o) => isWorkload(o) && o.metadata.namespace === io.namespace &&
+      (name === o.metadata.name || name.startsWith(`${o.metadata.name}-`))).sort((a, b) => b.metadata.name.length - a.metadata.name.length)[0]?.metadata.name
+    const building = (name: string) => lift(layout.lots[`${io.namespace}/${owner(name) ?? name}`]?.center, 4)
     const target = io.kind === 'Node' ? station(io.name) : io.kind === 'Pod' ? building(podApp(io.name)) : building(io.name)
-    const component = e.reportingComponent
+    const component = componentOf(e)
     let from = hall, to = target
-    if (component === 'kubelet') { from = station(e.reportingInstance || undefined); to = io.kind === 'Node' ? hall : target }
+    if (component === 'kubelet') { from = station(e.reportingInstance || e.source?.host || undefined); to = io.kind === 'Node' ? hall : target }
     if (e.reason === 'Scheduled') to = station(/ to (\S+)$/.exec(e.message ?? '')?.[1])
     return from && to ? [from, to] : null
   }, [layout, objects])
@@ -820,16 +838,18 @@ export function City({ cluster, selected, onSelect, powerGrid, theme, onHover, s
     !p.metadata.deletionTimestamp && p.status?.containerStatuses?.[0]?.ready).map((p) => p.metadata.uid)
 
   return (
-    <Canvas shadows camera={{ position: [0, 60, 80], fov: 45, near: 1, far: 900 }} onPointerMissed={() => onSelect(null)}>
+    <Canvas shadows orthographic camera={{ position: ISO.clone().multiplyScalar(CAM_DIST).toArray(), zoom: 5, near: 1, far: 1200 }}
+      onPointerMissed={() => onSelect(null)}>
       <color attach="background" args={[theme.sky]} />
-      <fog attach="fog" args={[theme.sky, ...theme.fog]} />
+      {/* fog by distance beyond the look-at point, so only the far edge of the ground fades */}
+      <fog attach="fog" args={[theme.sky, CAM_DIST + theme.fog[0] - 30, CAM_DIST + theme.fog[1]]} />
       <ambientLight intensity={theme.ambient} />
       <hemisphereLight args={[theme.sky, theme.ground, theme.ambient * 0.5]} />
       <directionalLight position={[30, 45, 25]} intensity={theme.sun} color={theme.sunColor} castShadow
         shadow-mapSize={[2048, 2048]} shadow-camera-left={-80} shadow-camera-right={80} shadow-camera-top={80} shadow-camera-bottom={-80} shadow-camera-far={220}
         shadow-bias={-0.0004} shadow-normalBias={0.04} />
       <Ground layout={layout} theme={theme} />
-      {ready && <Scenery core={layout.core} districts={layout.districts} obstacles={obstacles} theme={theme} />}
+      {ready && <Scenery core={layout.core} districts={layout.districts} obstacles={obstacles} keep={keep} theme={theme} />}
       {ready && <Lamps points={lamps} theme={theme} />}
       {edges.map((e) => (
         <Road key={`${e.from}>${e.to}`} pts={roads[`${e.from}>${e.to}`]} edge={e} theme={theme}
@@ -870,7 +890,10 @@ export function City({ cluster, selected, onSelect, powerGrid, theme, onHover, s
           accent={metric ? trafficColor(metric) : e.from.startsWith('ingress:') ? CUSTOMER : landmarkFor(nameOf(e.from)).accent}
           metric={metric} endpoints={endpoints(e.to)} />
       })}
-      <OrbitControls makeDefault maxPolarAngle={Math.PI / 2.15} minDistance={10} maxDistance={170} />
+      {/* Isometric: no rotation. Drag (or one finger) pans, wheel (or pinch) zooms towards the cursor. */}
+      <OrbitControls makeDefault enableRotate={false} screenSpacePanning zoomToCursor minZoom={1.5} maxZoom={60}
+        mouseButtons={{ LEFT: THREE.MOUSE.PAN, MIDDLE: THREE.MOUSE.DOLLY, RIGHT: THREE.MOUSE.PAN }}
+        touches={{ ONE: THREE.TOUCH.PAN, TWO: THREE.TOUCH.DOLLY_PAN }} />
       <CameraRig focus={focus} layout={layout} homeTick={homeTick} />
     </Canvas>
   )

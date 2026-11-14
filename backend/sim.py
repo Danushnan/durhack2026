@@ -3,8 +3,10 @@
 Pure module: no asyncio, no clock. Call tick(now) and read the watch events it returns.
 Objects are serialised in (trimmed) Kubernetes shapes so a real cluster can replace this later.
 """
+from collections import Counter
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+import hashlib
 import itertools
 import math
 
@@ -26,17 +28,21 @@ HPA_DOWNSCALE_WINDOW_SECONDS = 20.0
 # shortcut: real CrashLoopBackOff grows 10s -> 5min; compressed to 1s -> 8s so a demo can watch it.
 BACKOFF_CAP_SECONDS = 8.0
 MAX_REPLICAS = 10
+# shortcut: node-monitor-grace-period is 40s and the default NoExecute toleration 300s; compressed for the demo.
+NODE_GRACE_SECONDS = 1.5     # no kubelet heartbeat for this long -> the node controller marks the Node NotReady
+TOLERATION_SECONDS = 2.0     # Pods tolerate an unreachable Node this long before they are evicted
+NAME_ALPHABET = "bcdfghjklmnpqrstvwxz2456789"  # what Kubernetes uses for generated name suffixes
 
 # Which part of Kubernetes reports each event (Event.reportingComponent).
 COMPONENT = {
     "SuccessfulCreate": "replicaset-controller", "SuccessfulDelete": "replicaset-controller",
+    "TaintManagerEviction": "taint-eviction-controller",
     "ScalingReplicaSet": "deployment-controller", "DeploymentRollback": "deployment-controller",
     "ProgressDeadlineExceeded": "deployment-controller",
     "Scheduled": "default-scheduler", "FailedScheduling": "default-scheduler",
     "Started": "kubelet", "BackOff": "kubelet", "Killing": "kubelet",
     "NodeNotSchedulable": "kubelet", "NodeSchedulable": "kubelet",
     "NodeNotReady": "node-controller", "NodeReady": "node-controller",
-    "TaintManagerEviction": "taint-eviction-controller",
     "SuccessfulRescale": "horizontal-pod-autoscaler",
 }
 
@@ -45,14 +51,28 @@ def iso(t: float) -> str:
     return datetime.fromtimestamp(t, timezone.utc).isoformat()
 
 
+def suffix(seed: str, n: int) -> str:
+    """A stable generated-name suffix, like the pod-template-hash in a ReplicaSet's name."""
+    h, out = int(hashlib.sha256(seed.encode()).hexdigest(), 16), ""
+    for _ in range(n):
+        h, i = divmod(h, len(NAME_ALPHABET))
+        out += NAME_ALPHABET[i]
+    return out
+
+
 @dataclass
 class Node:
     name: str
     capacity: int
-    ready: bool = True
+    index: int = 0                 # picks this Node's Pod IP range
+    powered: bool = True           # its kubelet is alive and sending heartbeats
+    heartbeat: float = 0.0
+    ready: bool = True             # the Ready condition, as the node controller last judged it
+    unreachable_since: float | None = None   # when the unreachable NoExecute taint was added
     cordoned: bool = False         # unschedulable: no new Pods (kubectl cordon / drain)
     draining: bool = False
     blocked: str = ""              # why the drain is waiting, if it is
+    next_ip: int = 2
 
 
 @dataclass
@@ -85,6 +105,10 @@ class Deployment:
     stalled: bool = False
     max_unavailable: int | None = None                # PodDisruptionBudget, if any
     hpa: Autoscaler | None = None
+    replica_sets: dict[str, int] = field(default_factory=dict)  # version -> desired replicas of its ReplicaSet
+
+    def rs_name(self, version):
+        return f"{self.name}-{suffix(f'{self.namespace}/{self.name}/{version}', 10)}"
 
 
 @dataclass
@@ -104,6 +128,7 @@ class Pod:
     deleting_at: float | None = None
     version: str = "v1"
     claim: str | None = None      # StatefulSet Pods keep their PersistentVolumeClaim
+    ip: str | None = None         # assigned when the Pod lands on a Node
 
 
 @dataclass
@@ -132,7 +157,7 @@ class Simulator:
 
     # ---------- setup ----------
     def add_node(self, name, capacity):
-        self.nodes[name] = Node(name, capacity)
+        self.nodes[name] = Node(name, capacity, index=len(self.nodes) + 1)
 
     def add_deployment(self, ns, name, replicas, calls=(), kind="Deployment", max_unavailable=None, hpa=None):
         key = f"{ns}/{name}"
@@ -157,9 +182,7 @@ class Simulator:
         dep = self.deployments.get(f"{ns}/{name}")
         if not dep:
             return False
-        dep.replicas = max(0, min(MAX_REPLICAS, replicas))
-        if dep.kind == "Deployment":
-            self._event(dep, "ScalingReplicaSet", f"Scaled {name} to {dep.replicas}")
+        dep.replicas = max(0, min(MAX_REPLICAS, replicas))  # the Deployment controller scales its ReplicaSet
         return True
 
     def sabotage(self, ns, name, enabled) -> bool:
@@ -200,18 +223,11 @@ class Simulator:
         dep.progress_at, dep.progress_sig, dep.stalled = self.now, (), False
 
     def set_node_outage(self, name, enabled) -> bool:
+        """Cut or restore a Node's power. Kubernetes is not told: it notices when the heartbeats stop."""
         node = self.nodes.get(name)
         if not node:
             return False
-        node.ready = not enabled
-        if enabled:
-            self._node_event(name, "NodeNotReady", f"Node {name} status is now: NodeNotReady", True)
-            # shortcut: real eviction waits ~5 min (tolerationSeconds); here it is immediate.
-            for pod in list(self.pods.values()):
-                if pod.node == name and pod.deleting_at is None:
-                    self._terminate(pod, "TaintManagerEviction", f"Marking for deletion Pod {pod.namespace}/{pod.name}", True)
-        else:
-            self._node_event(name, "NodeReady", f"Node {name} status is now: NodeReady", False)
+        node.powered = not enabled
         return True
 
     def drain(self, name, enabled) -> bool:
@@ -242,14 +258,17 @@ class Simulator:
     def tick(self, now: float) -> list[dict]:
         self.now = now
         for pod in list(self.pods.values()):
-            self._step_pod(pod)
+            self._step_pod(pod)          # each kubelet runs its Node's Pods
+        self._node_lifecycle()
         for dep in self.deployments.values():
             if dep.hpa:
                 self._autoscale(dep)
             if dep.kind == "StatefulSet":
                 self._reconcile_set(dep)
             else:
-                self._reconcile(dep)
+                self._reconcile(dep)     # the Deployment controller sizes ReplicaSets...
+                for version in dep.replica_sets:
+                    self._sync_rs(dep, version)  # ...and the ReplicaSet controller makes Pods match
         for node in self.nodes.values():
             if node.draining:
                 self._drain_step(node)
@@ -258,9 +277,10 @@ class Simulator:
 
     def _step_pod(self, pod: Pod):
         dep = self.deployments[f"{pod.namespace}/{pod.deployment}"]
+        if pod.node is not None and not self.nodes[pod.node].powered:
+            return  # its kubelet is dead: nothing on that Node changes, and nobody can confirm a deletion
         if pod.deleting_at is not None:
-            # A Pod on a dead Node cannot confirm it stopped, so it stays Terminating until the Node returns.
-            if self.now >= pod.deleting_at and (pod.node is None or self.nodes[pod.node].ready):
+            if self.now >= pod.deleting_at:
                 del self.pods[pod.uid]
             return
         if pod.node is None or self.now < pod.next_at:
@@ -287,47 +307,65 @@ class Simulator:
                 and (include_deleting or p.deleting_at is None)]
 
     def _reconcile(self, dep: Deployment):
-        live = self._pods_of(dep)
-        current = [p for p in live if p.version == dep.version]
-        old = [p for p in live if p.version != dep.version]
-        if not old:
-            for _ in range(dep.replicas - len(live)):
-                self._create(dep)
-            if len(live) > dep.replicas:
-                # Kubernetes prefers removing unscheduled, then not-ready, then newest pods.
-                live.sort(key=lambda p: (p.node is not None, p.ready, -p.created))
-                for pod in live[: len(live) - dep.replicas]:
-                    self._terminate(pod, "Killing", f"Stopping container in pod {pod.name} (scale down)")
-            return
-        self._roll(dep, current, old)
+        """Deployment controller: one ReplicaSet per Pod template (version). Outside a rollout the current
+        ReplicaSet is sized to the Deployment; during one, `_roll` moves replicas from old to new."""
+        sets = dep.replica_sets
+        sets.setdefault(dep.version, 0)
+        olds = sorted((v for v in sets if v != dep.version and sets[v] > 0), key=lambda v: int(v[1:]))
+        if olds:
+            self._roll(dep, olds)
+        elif sets[dep.version] != dep.replicas:
+            self._scale_rs(dep, dep.version, dep.replicas)
 
-    def _roll(self, dep, current, old):
-        """One step of a rolling update: add new-version Pods within the surge allowance, and remove
-        old ones only while enough Pods stay ready. A new version that never becomes ready stalls here,
-        with the old version still serving."""
-        surge = math.ceil(dep.replicas * MAX_SURGE)
-        min_ready = dep.replicas - math.floor(dep.replicas * MAX_UNAVAILABLE)
-        new_total = min(dep.replicas, dep.replicas + surge - len(old))
-        if new_total > len(current):
-            for _ in range(new_total - len(current)):
-                self._create(dep)
-            self._event(dep, "ScalingReplicaSet", f"Scaled up replica set {dep.name}-{dep.version} to {new_total}")
-        ready = sum(p.ready for p in current + old)
-        for pod in sorted(old, key=lambda p: (p.ready, p.node is not None, -p.created)):
-            if pod.ready and ready - 1 < min_ready:
-                break
-            ready -= pod.ready
-            old.remove(pod)
-            self._terminate(pod, "Killing", f"Stopping container in pod {pod.name} (rolling update)")
-            self._event(dep, "ScalingReplicaSet",
-                        f"Scaled down replica set {dep.name}-{pod.version} to {sum(p.version == pod.version for p in old)}")
-        sig = (sum(p.ready for p in current), len(old))
+    def _roll(self, dep, olds):
+        """One step of a rolling update, as the Deployment controller does it: scale the new ReplicaSet up
+        within maxSurge, then scale old ones down only while maxUnavailable allows. A new version that never
+        becomes ready stalls here, with the old version still serving."""
+        sets, new, r = dep.replica_sets, dep.version, dep.replicas
+        surge = math.ceil(r * MAX_SURGE)
+        min_available = r - math.floor(r * MAX_UNAVAILABLE)
+        room = r + surge - sum(sets.values())
+        if sets[new] < r and room > 0:
+            self._scale_rs(dep, new, min(r, sets[new] + room))
+        ready = Counter(p.version for p in self._pods_of(dep) if p.ready)
+        # Unready old Pods go first: removing them costs no availability.
+        budget = sum(sets.values()) - min_available - max(0, sets[new] - ready[new])
+        for v in olds:
+            cleanup = min(budget, max(0, sets[v] - ready[v]))
+            if cleanup > 0:
+                self._scale_rs(dep, v, sets[v] - cleanup)
+                budget -= cleanup
+        spare = sum(ready.values()) - min_available
+        for v in olds:
+            down = min(spare, sets[v])
+            if down > 0:
+                self._scale_rs(dep, v, sets[v] - down)
+                spare -= down
+        sig = (ready[new], sum(sets[v] for v in olds))
         if sig != dep.progress_sig:
             dep.progress_sig, dep.progress_at = sig, self.now
         elif not dep.stalled and self.now - dep.progress_at > PROGRESS_DEADLINE_SECONDS:
             dep.stalled = True
             self._event(dep, "ProgressDeadlineExceeded",
-                        f"ReplicaSet {dep.name}-{dep.version} has timed out progressing", True)
+                        f"ReplicaSet \"{dep.rs_name(new)}\" has timed out progressing.", True)
+
+    def _scale_rs(self, dep, version, replicas):
+        before = dep.replica_sets.get(version, 0)
+        dep.replica_sets[version] = replicas
+        self._event(dep, "ScalingReplicaSet", f"Scaled {'up' if replicas > before else 'down'} replica set "
+                                              f"{dep.rs_name(version)} from {before} to {replicas}")
+
+    def _sync_rs(self, dep, version):
+        """ReplicaSet controller: create or delete Pods until the count matches. It prefers deleting
+        unscheduled, then not-ready, then the newest Pods."""
+        want = dep.replica_sets[version]
+        pods = [p for p in self._pods_of(dep) if p.version == version]
+        for _ in range(want - len(pods)):
+            self._create(dep, version)
+        pods.sort(key=lambda p: (p.node is not None, p.ready, -p.created))
+        for pod in pods[: max(0, len(pods) - want)]:
+            self._rs_event(dep, version, "SuccessfulDelete", f"Deleted pod: {pod.name}")
+            self._terminate(pod, "Killing", "Stopping container app")
 
     def _reconcile_set(self, dep: Deployment):
         """StatefulSet: Pods are name-0, name-1, … created in order, each only once the previous is ready,
@@ -354,11 +392,11 @@ class Simulator:
                 self._terminate(pod, "Killing", f"Stopping container in pod {name} (scale down)")
                 return  # highest ordinal first, one at a time; its claim (and data) is kept
 
-    def _create(self, dep):
+    def _create(self, dep, version):
         uid = f"pod-{next(self._ids)}"
-        pod = Pod(dep.namespace, dep.name, f"{dep.name}-{uid[4:]:0>5}", uid, self.now, version=dep.version)
+        pod = Pod(dep.namespace, dep.name, f"{dep.rs_name(version)}-{suffix(uid, 5)}", uid, self.now, version=version)
         self.pods[uid] = pod
-        self._event(dep, "SuccessfulCreate", f"Created pod: {pod.name}")
+        self._rs_event(dep, version, "SuccessfulCreate", f"Created pod: {pod.name}")
 
     def _autoscale(self, dep):
         hpa = dep.hpa
@@ -381,6 +419,27 @@ class Simulator:
             self._event(dep, "SuccessfulRescale",
                         f"New size: {hpa.desired}; reason: pods metric requests_per_second {direction} target")
 
+    def _node_lifecycle(self):
+        """Node controller: a Node whose kubelet stops sending heartbeats is marked NotReady and tainted
+        unreachable (its Pods leave their Services' endpoints). Pods tolerate that for a while, then the
+        taint-eviction controller evicts them. They stay Terminating until the Node can confirm."""
+        for node in self.nodes.values():
+            if node.powered:
+                node.heartbeat = self.now
+            if node.ready and self.now - node.heartbeat > NODE_GRACE_SECONDS:
+                node.ready, node.unreachable_since = False, self.now
+                self._node_event(node.name, "NodeNotReady", f"Node {node.name} status is now: NodeNotReady", True)
+                for pod in self.pods.values():
+                    if pod.node == node.name:
+                        pod.ready = False
+            elif not node.ready and node.powered:
+                node.ready, node.unreachable_since = True, None
+                self._node_event(node.name, "NodeReady", f"Node {node.name} status is now: NodeReady", False)
+            if not node.ready and self.now - node.unreachable_since >= TOLERATION_SECONDS:
+                for pod in self.pods.values():
+                    if pod.node == node.name and pod.deleting_at is None:
+                        self._terminate(pod, "TaintManagerEviction", f"Marking for deletion Pod {pod.namespace}/{pod.name}", True)
+
     def _drain_step(self, node):
         """Evict every Pod on a draining Node, unless that would break its PodDisruptionBudget."""
         node.blocked = ""
@@ -399,10 +458,13 @@ class Simulator:
         for pod in sorted(self.pods.values(), key=lambda p: p.created):
             if pod.node is not None or pod.deleting_at is not None:
                 continue
+            # Filter: Nodes without a NoSchedule/NoExecute taint (cordoned or unreachable) and with a free slot.
             load = {n: 0 for n, node in self.nodes.items() if node.ready and not node.cordoned}
+            same = dict.fromkeys(load, 0)
             for p in self.pods.values():
                 if p.node in load:
                     load[p.node] += 1
+                    same[p.node] += p.namespace == pod.namespace and p.deployment == pod.deployment
             free = [n for n in load if load[n] < self.nodes[n].capacity]
             if not free:
                 if pod.state != "Unschedulable":
@@ -410,7 +472,10 @@ class Simulator:
                     self._event_pod(pod, "FailedScheduling",
                                     "0/%d nodes are available: insufficient capacity" % len(self.nodes), True)
                 continue
-            pod.node = min(free, key=lambda n: (load[n], n))
+            # Score: spread a workload's replicas across Nodes, then prefer the least loaded.
+            pod.node = min(free, key=lambda n: (same[n], load[n], n))
+            node = self.nodes[pod.node]
+            pod.ip, node.next_ip = f"10.244.{node.index}.{node.next_ip}", node.next_ip % 250 + 2
             pod.state, pod.next_at = "ContainerCreating", self.now + POD_START_SECONDS
             self._event_pod(pod, "Scheduled", f"Successfully assigned {pod.namespace}/{pod.name} to {pod.node}")
 
@@ -422,9 +487,11 @@ class Simulator:
     # ---------- events ----------
     def _event(self, dep, reason, message, warning=False, component=None):
         kind = "StatefulSet" if dep.kind == "StatefulSet" else (
-            "ReplicaSet" if reason in ("SuccessfulCreate", "SuccessfulDelete") else
             "HorizontalPodAutoscaler" if reason == "SuccessfulRescale" else "Deployment")
         self._push(kind, dep.namespace, dep.name, reason, message, warning, component)
+
+    def _rs_event(self, dep, version, reason, message):
+        self._push("ReplicaSet", dep.namespace, dep.rs_name(version), reason, message, False)
 
     def _event_pod(self, pod, reason, message, warning=False):
         component = COMPONENT.get(reason)
@@ -454,12 +521,17 @@ class Simulator:
         namespaces = sorted({d.namespace for d in self.deployments.values()})
         objs += [{"kind": "Namespace", "metadata": {"name": ns, "uid": f"ns-{ns}"}} for ns in namespaces]
         for n in self.nodes.values():
-            meta = {"name": n.name, "uid": f"node-{n.name}"}
+            meta = {"name": n.name, "uid": f"node-{n.name}", "annotations": {}}
             if n.cordoned:
-                meta["annotations"] = {"kubeverse.io/drain": "blocked: " + n.blocked if n.blocked
-                                       else "draining" if n.draining else "drained"}
+                meta["annotations"]["kubeverse.io/drain"] = ("blocked: " + n.blocked if n.blocked
+                                                             else "draining" if n.draining else "drained")
+            if not n.powered:
+                meta["annotations"]["kubeverse.io/power-cut"] = "true"  # the simulator knows; Kubernetes only sees silence
+            taints = ([{"key": "node.kubernetes.io/unschedulable", "effect": "NoSchedule"}] if n.cordoned else []) + (
+                [{"key": "node.kubernetes.io/unreachable", "effect": "NoExecute", "timeAdded": iso(n.unreachable_since)}]
+                if not n.ready else [])
             objs.append({
-                "kind": "Node", "metadata": meta, "spec": {"unschedulable": n.cordoned},
+                "kind": "Node", "metadata": meta, "spec": {"unschedulable": n.cordoned, "taints": taints},
                 "status": {"capacity": {"pods": str(n.capacity)},
                            "conditions": [{"type": "Ready", "status": "True" if n.ready else "False"}]},
             })
@@ -489,6 +561,20 @@ class Simulator:
                 previous = next((v for v in reversed(d.history) if v != d.version), None)
                 if previous:
                     annotations["kubeverse.io/previous-version"] = previous
+                for v, want in d.replica_sets.items():
+                    mine = [p for p in pods if p.version == v]
+                    rs_labels = {**labels, "version": v, "pod-template-hash": d.rs_name(v).rsplit("-", 1)[1]}
+                    objs.append({
+                        "kind": "ReplicaSet",
+                        "metadata": {"name": d.rs_name(v), "namespace": d.namespace, "uid": f"rs-{d.uid}-{v}",
+                                     "labels": rs_labels,
+                                     "annotations": {"deployment.kubernetes.io/revision": str(
+                                         max(i + 1 for i, h in enumerate(d.history) if h == v))},
+                                     "ownerReferences": [{"kind": "Deployment", "name": d.name, "uid": d.uid, "controller": True}]},
+                        "spec": {"replicas": want, "selector": {"matchLabels": rs_labels},
+                                 "template": {"metadata": {"labels": rs_labels}}},
+                        "status": {"replicas": len(mine), "readyReplicas": sum(p.ready for p in mine)},
+                    })
                 rolling = len(updated) < len(live) or len(updated) < d.replicas or sum(p.ready for p in updated) < d.replicas
                 progressing = ({"type": "Progressing", "status": "False", "reason": "ProgressDeadlineExceeded"} if d.stalled and rolling
                                else {"type": "Progressing", "status": "True",
@@ -506,6 +592,17 @@ class Simulator:
                 "kind": "Service",
                 "metadata": {"name": d.name, "namespace": d.namespace, "uid": f"svc-{d.uid}"},
                 "spec": {"selector": {"app": self.services[key]}},
+            })
+            # The EndpointSlice controller lists the Service's Pods; kube-proxy only routes to ready ones.
+            objs.append({
+                "kind": "EndpointSlice",
+                "metadata": {"name": f"{d.name}-{suffix(d.uid, 5)}", "namespace": d.namespace, "uid": f"eps-{d.uid}",
+                             "labels": {"kubernetes.io/service-name": d.name}},
+                "addressType": "IPv4",
+                "endpoints": [{"addresses": [p.ip], "nodeName": p.node, "targetRef": {"kind": "Pod", "name": p.name},
+                               "conditions": {"ready": p.ready, "serving": p.ready, "terminating": p.deleting_at is not None}}
+                              for p in sorted(pods, key=lambda p: p.name) if p.ip],
+                "ports": [{"port": 8080, "protocol": "TCP"}],
             })
             if d.max_unavailable is not None:
                 healthy = sum(p.ready for p in live)
@@ -557,13 +654,19 @@ class Simulator:
             state = {"waiting": {"reason": p.state}}
         else:
             state = {"waiting": {"reason": "Pending"}}
+        dep = self.deployments[f"{p.namespace}/{p.deployment}"]
+        owner = ({"kind": "StatefulSet", "name": dep.name, "uid": dep.uid} if dep.kind == "StatefulSet"
+                 else {"kind": "ReplicaSet", "name": dep.rs_name(p.version), "uid": f"rs-{dep.uid}-{p.version}"})
         meta = {"name": p.name, "namespace": p.namespace, "uid": p.uid,
-                "labels": {"app": p.deployment, "version": p.version}, "creationTimestamp": iso(p.created)}
-        if p.version in self.deployments[f"{p.namespace}/{p.deployment}"].buggy:
+                "labels": {"app": p.deployment, "version": p.version}, "creationTimestamp": iso(p.created),
+                "ownerReferences": [{**owner, "controller": True}]}
+        if dep.kind == "Deployment":
+            meta["labels"]["pod-template-hash"] = owner["name"].rsplit("-", 1)[1]
+        if p.version in dep.buggy:
             meta["annotations"] = {"kubeverse.io/buggy-release": "true"}
         if p.deleting_at is not None:
             meta["deletionTimestamp"] = iso(p.deleting_at)
-        spec = {"nodeName": p.node}
+        spec = {"nodeName": p.node, "containers": [{"name": "app", "image": f"{p.deployment}:{p.version}"}]}
         if p.claim:
             spec["volumes"] = [{"name": "data", "persistentVolumeClaim": {"claimName": p.claim}}]
         return {
@@ -571,15 +674,19 @@ class Simulator:
             "status": {
                 # Real phase semantics: CrashLoopBackOff pods are still phase Running.
                 "phase": "Pending" if p.state in (None, "Unschedulable", "ContainerCreating") else "Running",
-                "conditions": [{"type": "Ready", "status": "True" if p.ready else "False"}],
+                "podIP": p.ip, "hostIP": p.node and f"192.168.0.{self.nodes[p.node].index + 10}",
+                "conditions": [{"type": t, "status": "True" if ok else "False"} for t, ok in (
+                    ("PodScheduled", p.node is not None), ("ContainersReady", p.ready), ("Ready", p.ready))],
                 "containerStatuses": [{"name": "app", "ready": p.ready, "restartCount": p.restarts,
                                        "state": state}],
             },
         }
 
     def traffic(self) -> list[dict]:
-        """Request flows. `healthy`: the target has ready Pods to answer at all. `errors`: it answers,
-        but with errors, because something it depends on (directly or further down) is down."""
+        """Request flows. Demand starts at the Ingress and flows down the call graph: a service only calls
+        what it needs while it is serving requests itself, in the proportions of the demo's healthy rates.
+        `healthy`: the target has ready Pods to answer at all. `errors`: it answers, but with errors,
+        because something it depends on (directly or further down) is down."""
         def ready(key):
             d = self.deployments[key]
             return sum(p.ready for p in self.pods.values() if p.namespace == d.namespace and p.deployment == d.name)
@@ -588,15 +695,31 @@ class Simulator:
             return any(dst in down or (dst not in seen and impacted(dst, (*seen, key)))
                        for src, dst, _ in self.calls if src == key)
         rush = self.now < self.rush_until
-        load = RUSH_RPS / INGRESS_RPS if rush else 1.0  # internal calls rise with customer traffic
-        edges = []
-        for src, dst, rps in self.calls:
-            edges.append({"from": src, "to": dst, "rps": round(rps * load, 2) if ready(src) else 0.0,
-                          "healthy": dst not in down, "errors": dst not in down and impacted(dst)})
+        customers = RUSH_RPS if rush else INGRESS_RPS
+        # Each call's share of its caller's inbound requests, from the healthy base rates.
+        base_in = Counter()
+        for ing in self.ingresses:
+            base_in[ing.service] += INGRESS_RPS
+        for _, dst, rps in self.calls:
+            base_in[dst] += rps
+        inbound, rates = Counter({ing.service: customers for ing in self.ingresses}), {}
+        for _ in range(len(self.deployments)):  # one pass per call-graph level (bounded, so cycles stop)
+            for src, dst, rps in self.calls:
+                if src in down:
+                    rates[src, dst] = 0.0
+                elif base_in[src]:
+                    rates[src, dst] = round(inbound[src] * rps / base_in[src], 2)
+                else:  # nobody calls it: it generates its own work (a worker, a cron job)
+                    rates[src, dst] = rps * (customers / INGRESS_RPS)
+            inbound = Counter({ing.service: customers for ing in self.ingresses})
+            for (src, dst), rps in rates.items():
+                inbound[dst] += rps
+        edges = [{"from": src, "to": dst, "rps": rates[src, dst],
+                  "healthy": dst not in down, "errors": dst not in down and impacted(dst)}
+                 for src, dst, _ in self.calls]
         # Customers arrive through each Ingress; it only works while its Service has ready Pods.
         for ing in self.ingresses:
-            edges.append({"from": f"ingress:{ing.namespace}/{ing.name}", "to": ing.service,
-                          "rps": RUSH_RPS if rush else INGRESS_RPS,
+            edges.append({"from": f"ingress:{ing.namespace}/{ing.name}", "to": ing.service, "rps": customers,
                           "healthy": ing.service not in down, "errors": ing.service not in down and impacted(ing.service)})
         return edges
 

@@ -1,6 +1,6 @@
 import { memo, useLayoutEffect, useMemo, useRef } from 'react'
 import * as THREE from 'three'
-import type { District, Rect } from './layout'
+import { type District, heightCap, type Rect } from './layout'
 import type { Theme } from './theme'
 
 /** Deterministic RNG so Port Kube looks the same on every load. */
@@ -24,15 +24,19 @@ const outside = (r: Rect, x: number, z: number) =>
 const inAny = (ds: District[], x: number, z: number, m: number) => ds.some((d) => x > d.x0 - m && x < d.x1 + m && z > d.z0 - m && z < d.z1 + m)
 
 /**
- * Scatter decorative Scenery around the city: a varied skyline behind and beside it (box, round and
- * stepped towers in mixed colours) that rises with distance, apartments, warehouses and houses nearer
- * in, and trees and ponds everywhere there is room, including between the services on the Districts.
+ * Scatter decorative Scenery around the city: a ring of houses, shops and apartment blocks lining every
+ * District (so the services sit in a neighbourhood), a varied skyline further out (box, round and stepped
+ * towers in mixed colours) that rises with distance, warehouses, and trees and ponds wherever there is
+ * room. Nothing is taller than `heightCap` allows, so no Scenery ever hides a service (`keep`).
  */
-export function buildScenery(core: Rect, districts: District[], obstacles: Obstacle[]): SceneryModel {
+export function buildScenery(core: Rect, districts: District[], obstacles: Obstacle[], keep: Rect[]): SceneryModel {
   const m: SceneryModel = { walls: [], glass: [], rounds: [], bands: [], rings: [], caps: [], roofs: [], trunks: [], crowns: [], ponds: [], gables: [] }
   const r = rng(20261114)
   const solids: Obstacle[] = [...obstacles]
   const free = (x: number, z: number, rad: number) => solids.every((s) => Math.hypot(s.x - x, s.z - z) > s.rad + rad)
+  // Also keep the camera's side of the city (in front of its centre line, looking down the diagonal) low-rise.
+  const cx = (core.x0 + core.x1) / 2, cz = (core.z0 + core.z1) / 2
+  const cap = (x: number, z: number) => Math.min(heightCap(keep, x, z) - 0.5, x - cx + z - cz > 0 ? 9 : Infinity)
   const sample = (reach: number) => ({
     x: core.x0 - reach + r() * (core.x1 - core.x0 + 2 * reach),
     z: core.z0 - reach + r() * (core.z1 - core.z0 + 2 * reach),
@@ -45,13 +49,45 @@ export function buildScenery(core: Rect, districts: District[], obstacles: Obsta
     m.caps.push({ x, y: base + h + 0.15, z, w: w * 0.75, h: 0.4, d: d * 0.75, rot: a, tone })
   }
 
-  // Skyline: behind and beside the city only, so nothing tall stands between the camera and the services.
+  // The neighbourhood: buildings lining each District's edge, facing it. Low in front (the camera's side),
+  // taller behind, where they cannot hide anything.
+  for (const dist of districts) {
+    const ring = { x0: dist.x0 - 5.5, x1: dist.x1 + 5.5, z0: dist.z0 - 5.5, z1: dist.z1 + 5.5 }
+    const w = ring.x1 - ring.x0, d = ring.z1 - ring.z0
+    for (let u = r() * 3; u < 2 * (w + d); u += 6 + r() * 1.5) {
+      // Walk the perimeter: top edge, right, bottom, left. `a` turns each building to face the District.
+      const [x, z, a] = u < w ? [ring.x0 + u, ring.z0, 0] : u < w + d ? [ring.x1, ring.z0 + u - w, Math.PI / 2]
+        : u < 2 * w + d ? [ring.x1 - (u - w - d), ring.z1, 0] : [ring.x0, ring.z1 - (u - 2 * w - d), Math.PI / 2]
+      const top = cap(x, z), jitter = (r() - 0.5) * 0.12
+      if (top < 2.6 || inAny(districts, x, z, 2.5) || !free(x, z, 2.9)) continue
+      solids.push({ x, z, rad: 2.9 })
+      const style = r()
+      if (top > 9 && style < 0.55) {
+        // apartment block
+        boxTower(r() < 0.3 ? m.glass : m.walls, x, z, 4.6 + r() * 1.2, 3.6 + r() * 0.8, Math.min(top - 0.5, 6 + r() * 12), a + jitter)
+      } else if (top > 4.2 && style < 0.8) {
+        // corner shop or terrace: flat roof with a parapet
+        const h = 2.6 + r() * Math.min(1.2, top - 4.2)
+        m.walls.push({ x, y: h / 2, z, w: 4.4 + r(), h, d: 3.4 + r() * 0.6, rot: a + jitter, tone: r() })
+        m.caps.push({ x, y: h + 0.15, z, w: 4.6, h: 0.3, d: 3.6, rot: a + jitter, tone: r() })
+      } else {
+        // house with a pyramid roof (0.8 × its width tall), sized to fit under the cap
+        const s = Math.min(2.4 + r() * 0.8, (top - 1.4) / 0.8), h = 1.4 + r() * 0.6
+        if (s < 1.6) continue
+        m.walls.push({ x, y: h / 2, z, w: s, h, d: s * (0.9 + r() * 0.3), rot: a + jitter, tone: r() })
+        m.roofs.push({ x, y: h + 0.4 * s, z, w: s, h: s, d: s, rot: a + jitter, tone: r() })
+      }
+    }
+  }
+
+  // Skyline: further out, rising with distance, never taller than the height cap allows.
   for (let tries = 0, made = 0; tries < 1400 && made < 64; tries++) {
     const { x, z } = sample(70)
     const dist = outside(core, x, z)
-    if (dist < 9 || z > core.z1 - 6 || inAny(districts, x, z, 4) || !free(x, z, 4.8)) continue
+    if (dist < 9 || inAny(districts, x, z, 4) || !free(x, z, 4.8)) continue
+    const h = Math.min(34, 5 + dist * 0.34 + r() * 8, cap(x, z))
+    if (h < 5) continue
     made++
-    const h = Math.min(34, 5 + dist * 0.34 + r() * 8)
     const style = r()
     solids.push({ x, z, rad: 4.4 })
     if (style < 0.22) {
@@ -82,7 +118,7 @@ export function buildScenery(core: Rect, districts: District[], obstacles: Obsta
   for (let tries = 0, made = 0; tries < 500 && made < 10; tries++) {
     const { x, z } = sample(40)
     const dist = outside(core, x, z)
-    if (dist < 5 || dist > 36 || inAny(districts, x, z, 3) || !free(x, z, 5)) continue
+    if (dist < 5 || dist > 36 || inAny(districts, x, z, 3) || !free(x, z, 5) || cap(x, z) < 4.2) continue
     made++
     const w = 7 + r() * 3, d = 4.5 + r() * 1.5, h = 2.6 + r(), a = r() * Math.PI
     solids.push({ x, z, rad: 5 })
@@ -92,7 +128,7 @@ export function buildScenery(core: Rect, districts: District[], obstacles: Obsta
   for (let tries = 0, made = 0; tries < 600 && made < 28; tries++) {
     const { x, z } = sample(38)
     const dist = outside(core, x, z)
-    if (dist < 4 || dist > 34 || inAny(districts, x, z, 2) || !free(x, z, 2.8)) continue
+    if (dist < 4 || dist > 34 || inAny(districts, x, z, 2) || !free(x, z, 2.8) || cap(x, z) < 4.6) continue
     made++
     const w = 2.3 + r() * 1.1, h = 1.6 + r() * 0.9, a = r() * Math.PI
     solids.push({ x, z, rad: 2.6 })
@@ -177,10 +213,10 @@ const PALETTES = {
 }
 
 // memo: the city re-renders on every watch batch; Scenery only depends on the layout and theme.
-export const Scenery = memo(function Scenery({ core, districts, obstacles, theme }: {
-  core: Rect; districts: District[]; obstacles: Obstacle[]; theme: Theme
+export const Scenery = memo(function Scenery({ core, districts, obstacles, keep, theme }: {
+  core: Rect; districts: District[]; obstacles: Obstacle[]; keep: Rect[]; theme: Theme
 }) {
-  const model = useMemo(() => buildScenery(core, districts, obstacles), [core, districts, obstacles])
+  const model = useMemo(() => buildScenery(core, districts, obstacles, keep), [core, districts, obstacles, keep])
   const night = theme.mode === 'night'
   const mats = useMemo(() => ({
     wall: new THREE.MeshStandardMaterial({ roughness: 0.9 }),
