@@ -126,6 +126,17 @@ i { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin
 .action { display: flex; flex-direction: column; gap: 2px; text-align: left; font-weight: 600; }
 .action small { font-weight: normal; font-size: 10.5px; }
 .action.bad small { color: inherit; opacity: 0.8; }
+.action code { font: 9.5px/1.35 ui-monospace, Menlo, monospace; color: var(--muted); overflow-wrap: break-word; margin-top: 3px; font-weight: normal; }
+.inspect td:first-child { white-space: nowrap; }
+.desired { display: grid; gap: 4px; font-size: 12.5px; }
+.desired > div { display: flex; gap: 10px; align-items: baseline; }
+.desired > div > span { color: var(--muted); width: 54px; flex: none; }
+.desired b { display: flex; flex-wrap: wrap; gap: 4px 12px; }
+.desired .now { margin: 4px 0 0; font-size: 12px; font-weight: 600; }
+.ver { white-space: nowrap; font-weight: 600; }
+.endpoints { margin: 8px 0 0; font-size: 12px; }
+.endpoints code, .inspect h3 code { font-family: ui-monospace, Menlo, monospace; }
+.inspect td small i { width: 8px; height: 8px; border-radius: 50%; margin-right: 3px; }
 .inspect table { width: 100%; border-collapse: collapse; font-size: 12px; }
 .inspect td { padding: 4px; border-bottom: 1px solid var(--line); vertical-align: middle; }
 .inspect td small { display: block; font-size: 10px; }
@@ -143,3 +154,13 @@ i { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin
   .actions { grid-template-columns: 1fr; }
   .inspect { top: auto; bottom: 64px; max-height: 55vh; }
 }
+
+.brand h1 small { font-size: 11px; font-weight: 600; color: var(--muted); margin-left: 4px; }
+.badge { font-size: 11px; padding: 2px 8px; border-radius: 999px; border: 1px solid var(--amber); color: var(--amber); }
+.services hr { border: 0; border-top: 1px solid var(--line); margin: 4px 2px; }
+.note { margin: 8px 0 0; padding: 7px 9px; border-radius: 8px; background: color-mix(in srgb, var(--accent) 10%, transparent); font-size: 12px; line-height: 1.5; }
+.note code { font-family: ui-monospace, Menlo, monospace; font-size: 11px; color: var(--muted); }
+.actions.two { grid-template-columns: repeat(2, 1fr); }
+.components { list-style: none; padding: 0; margin: 4px 0; font-size: 12px; line-height: 1.6; }
+.components i, .inspect .event i { width: 9px; height: 9px; border-radius: 50%; }
+.toast { bottom: 64px; left: 50%; transform: translateX(-50%); max-width: min(560px, calc(100vw - 24px)); border-color: var(--red); padding: 9px 34px 9px 12px; line-height: 1.45; z-index: 25; }
