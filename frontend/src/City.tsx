@@ -12,6 +12,7 @@ import { Scenery } from './scenery'
 import { nameOf, roleOf } from './teach'
 import { textTexture, type TextLine } from './textures'
 import type { Theme } from './theme'
+import { routeKey, trafficColor, type RouteMetrics, type ServiceMetrics } from './Telemetry'
 
 export interface HoverInfo { title: string; lines: string[]; x: number; y: number }
 type OnHover = (h: HoverInfo | null) => void
@@ -119,12 +120,14 @@ function Ground({ layout, theme }: { layout: CityLayout; theme: Theme }) {
 
 // ---------- Roads: one per call between two services ----------
 
-function Road({ pts, edge, emphasis, theme }: { pts: THREE.Vector3[]; edge: Edge; emphasis: 'normal' | 'dim' | 'strong'; theme: Theme }) {
+function Road({ pts, edge, emphasis, theme, measured }: {
+  pts: THREE.Vector3[]; edge: Edge; emphasis: 'normal' | 'dim' | 'strong'; theme: Theme; measured?: string // telemetry colour wins when present
+}) {
   const asphalt = useMemo(() => ribbon(pts, ROAD_W, 0.012), [pts])
   // Failing roads sit a hair higher so red wins where two roads share a stretch.
   const line = useMemo(() => ribbon(pts, emphasis === 'strong' ? 0.34 : 0.2, edge.healthy ? 0.02 : 0.026), [pts, emphasis, edge.healthy])
   useEffect(() => () => { asphalt.dispose(); line.dispose() }, [asphalt, line])
-  const color = !edge.healthy ? RED : edge.rps === 0 ? '#94a3b8' : theme.roadGlow
+  const color = measured ?? (!edge.healthy ? RED : edge.rps === 0 ? '#94a3b8' : theme.roadGlow)
   return (
     <group>
       <mesh geometry={asphalt} receiveShadow><meshStandardMaterial color={theme.street} side={THREE.DoubleSide} /></mesh>
@@ -195,15 +198,16 @@ function tagFor(dep: K8sObject, info: LandmarkInfo, state: ServiceState[string] 
   return { lines: [title, { text: `${info.title} · ${ready}/${want} ready`, px: 40, color }], border: HEALTH_COLOR[health] }
 }
 
-function Building({ dep, info, pods, pos, selected, onSelect, powerGrid, nodeColors, theme, onHover, state }: {
+function Building({ dep, info, pods, pos, selected, onSelect, powerGrid, nodeColors, theme, onHover, state, metric }: {
   dep: K8sObject; info: LandmarkInfo; pods: K8sObject[]; pos: THREE.Vector3; selected: boolean; onSelect: () => void
   powerGrid: boolean; nodeColors: Record<string, string>; theme: Theme; onHover: OnHover; state?: ServiceState[string]
+  metric?: ServiceMetrics
 }) {
   const health = deploymentHealth(dep)
   const desired: number = dep.spec.replicas
   const sorted = [...pods].sort((a, b) => (a.metadata.creationTimestamp ?? '').localeCompare(b.metadata.creationTimestamp ?? ''))
   const total = Math.max(desired, sorted.length)
-  const glow = state?.chain && health === 'healthy' ? AMBER : HEALTH_COLOR[health]
+  const glow = metric ? trafficColor(metric, metric.anomaly) : state?.chain && health === 'healthy' ? AMBER : HEALTH_COLOR[health]
   const role = roleOf(dep.metadata.name)
   const hover = (e: ThreeEvent<PointerEvent>) => {
     e.stopPropagation()
@@ -316,8 +320,8 @@ interface CarAgent { s: number; fail: boolean; slot: number }
  * shrinks into the callee (success) or makes a U-turn at its door and drives home (failure).
  * A failure only affects Cars spawned after it, so nothing on the Road jumps when health changes.
  */
-function Traffic({ edge, road, theme, accent, onHover }: {
-  edge: Edge; road: THREE.Vector3[]; theme: Theme; accent: string; onHover: OnHover
+function Traffic({ edge, road, theme, accent, onHover, metric }: {
+  edge: Edge; road: THREE.Vector3[]; theme: Theme; accent: string; onHover: OnHover; metric?: RouteMetrics
 }) {
   const trips = useMemo(() => ({ ok: new Path(carTrip(road, false)), fail: new Path(carTrip(road, true)) }), [road])
   const cars = useRef<CarAgent[]>([])
@@ -364,7 +368,12 @@ function Traffic({ edge, road, theme, accent, onHover }: {
           onPointerOver={(e) => {
             e.stopPropagation()
             const fail = cars.current.find((c) => c.slot === i)?.fail
-            onHover({ title: `🚗 Request: ${src} → ${dst}`, lines: [fail ? `Failed: ${dst} has no working Units, so the car turns back.` : 'On its way; it will be served.', `${live.current.rps} requests/second on this road.`], ...at(e) })
+            onHover({
+              title: `🚗 Request: ${src} → ${dst}`,
+              lines: metric ? [`${metric.requests} requests in 10 seconds`, `${Math.round(metric.latency_ms)} ms average · ${(metric.error_rate * 100).toFixed(1)}% errors`]
+                : [fail ? `Failed: ${dst} has no working Units, so the car turns back.` : 'On its way; it will be served.', `${live.current.rps} requests/second on this road.`],
+              ...at(e),
+            })
           }}
           onPointerOut={() => onHover(null)}>
           <mesh position={[0, 0.3, 0]} castShadow><boxGeometry args={[1.1, 0.35, 0.6]} /><meshStandardMaterial ref={(m) => { paints.current[i] = m }} color={accent} /></mesh>
@@ -452,7 +461,8 @@ function CameraRig({ focus, layout, homeTick }: { focus: THREE.Vector3 | null; l
 
 // ---------- the City ----------
 
-export function City({ cluster, selected, onSelect, powerGrid, theme, onHover, states, homeTick }: {
+export function City({ cluster, selected, onSelect, powerGrid, theme, onHover, states, homeTick, serviceMetrics, routeMetrics, replay }: {
+  serviceMetrics: Record<string, ServiceMetrics>; routeMetrics: Record<string, RouteMetrics>; replay: boolean
   cluster: ClusterState; selected: string | null; onSelect: (key: string | null) => void
   powerGrid: boolean; theme: Theme; onHover: OnHover; states: ServiceState; homeTick: number
 }) {
@@ -507,6 +517,7 @@ export function City({ cluster, selected, onSelect, powerGrid, theme, onHover, s
       {ready && <Lamps points={lamps} theme={theme} />}
       {edges.map((e) => (
         <Road key={`${e.from}>${e.to}`} pts={roads[`${e.from}>${e.to}`]} edge={e} theme={theme}
+          measured={routeMetrics[routeKey(e.from, e.to)] ? trafficColor(routeMetrics[routeKey(e.from, e.to)]) : undefined}
           emphasis={!selected ? 'normal' : e.from === selected || e.to === selected ? 'strong' : 'dim'} />
       ))}
       {nodes.map((n) => layout.stations[n.metadata.name] && (
@@ -520,14 +531,17 @@ export function City({ cluster, selected, onSelect, powerGrid, theme, onHover, s
         return (
           <Building key={dep.metadata.uid} dep={dep} info={landmarkFor(dep.metadata.name)} pos={lot.center}
             selected={selected === key} onSelect={() => onSelect(key)} powerGrid={powerGrid} nodeColors={nodeColors}
-            theme={theme} onHover={onHover} state={states[key]}
+            theme={theme} onHover={onHover} state={states[key]} metric={serviceMetrics[key]}
             pods={pods.filter((p) => p.metadata.namespace === dep.metadata.namespace && p.metadata.labels?.app === dep.metadata.name)} />
         )
       })}
-      {edges.map((e) => (
-        <Traffic key={`${e.from}>${e.to}`} edge={e} road={roads[`${e.from}>${e.to}`]} theme={theme} onHover={onHover}
-          accent={landmarkFor(nameOf(e.from)).accent} />
-      ))}
+      {edges.map((e) => {
+        const metric = routeMetrics[routeKey(e.from, e.to)]
+        if (replay && !metric) return null // replaying history: only routes with recorded traffic get Cars
+        const edge = metric ? { ...e, rps: metric.rps, healthy: metric.error_rate < 0.1 } : e
+        return <Traffic key={`${e.from}>${e.to}`} edge={edge} road={roads[`${e.from}>${e.to}`]} theme={theme} onHover={onHover}
+          accent={metric ? trafficColor(metric) : landmarkFor(nameOf(e.from)).accent} metric={metric} />
+      })}
       <OrbitControls makeDefault maxPolarAngle={Math.PI / 2.15} minDistance={10} maxDistance={170} />
       <CameraRig focus={focus} layout={layout} homeTick={homeTick} />
     </Canvas>

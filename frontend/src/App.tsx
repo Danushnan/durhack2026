@@ -7,6 +7,7 @@ import {
 import { landmarkFor } from './landmarks'
 import { downServices, explain, impactChain, nameOf, roleOf } from './teach'
 import { THEMES, useThemeMode } from './theme'
+import { routeKey, Telemetry, useTelemetry } from './Telemetry'
 
 export default function App() {
   const cluster = useCluster()
@@ -17,6 +18,11 @@ export default function App() {
   const [sidebar, setSidebar] = useState(false)
   const [feedOpen, setFeedOpen] = useState(false)
   const [homeTick, setHomeTick] = useState(0)
+  const [analyticsOpen, setAnalyticsOpen] = useState(false)
+  const [replayAt, setReplayAt] = useState<number | null>(null)
+  const telemetry = useTelemetry(replayAt)
+  const services = telemetry.status === 'ready' ? Object.fromEntries(telemetry.services.map((row) => [row.service, row])) : {}
+  const routes = telemetry.status === 'ready' ? Object.fromEntries(telemetry.routes.map((row) => [routeKey(row.caller, row.service), row])) : {}
   const [mode, setMode] = useThemeMode()
   const theme = THEMES[mode]
 
@@ -38,7 +44,8 @@ export default function App() {
   return (
     <div className={`app ${mode}`}>
       <City cluster={cluster} selected={selected} onSelect={setSelected} powerGrid={powerGrid} theme={theme}
-        onHover={setHover} states={states} homeTick={homeTick} />
+        onHover={setHover} states={states} homeTick={homeTick}
+        serviceMetrics={services} routeMetrics={routes} replay={replayAt !== null} />
 
       <header className="hud brand">
         <h1>Port Kube</h1>
@@ -54,11 +61,20 @@ export default function App() {
         <button aria-pressed={powerGrid} className={powerGrid ? 'on' : ''} title="Power Grid: colour each Unit by the Node it runs on"
           onClick={() => setPowerGrid(!powerGrid)}>⚡</button>
         <button aria-expanded={help} className={help ? 'on' : ''} title="How this city works" onClick={() => setHelp(!help)}>?</button>
+        <button aria-expanded={analyticsOpen} className={analyticsOpen ? 'on' : ''} title="Network analytics"
+          aria-label="Network analytics" onClick={() => {
+            if (analyticsOpen) setReplayAt(null)
+            setAnalyticsOpen(!analyticsOpen)
+          }}>▥</button>
       </nav>
 
       <Banner deployments={deployments} states={states} outages={outages} onPick={setSelected} />
 
       {help && <Help onClose={() => setHelp(false)} />}
+      {analyticsOpen && <Telemetry snapshot={telemetry} at={replayAt} onSeek={setReplayAt} onClose={() => {
+        setReplayAt(null)
+        setAnalyticsOpen(false)
+      }} />}
 
       <aside className={`hud services ${sidebar ? 'open' : ''}`} aria-label="Services">
         <button className="toggle" aria-expanded={sidebar} title={sidebar ? 'Collapse' : 'Show service names'}

@@ -9,7 +9,7 @@ where one service calls the other, and requests are Cars driving those Roads. Br
 ```bash
 # 1. Simulated Cluster (FastAPI, port 8000)
 cd backend
-python3 -m venv .venv && .venv/bin/pip install fastapi 'uvicorn[standard]' pytest
+python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
 .venv/bin/uvicorn main:app --port 8000
 
 # 2. City (Vite, port 5173 — proxies /api and /ws to 8000)
@@ -43,3 +43,27 @@ Timings are compressed for the demo (see `shortcut:` comments in `backend/sim.py
 
 The backend streams Kubernetes-shaped watch events (`ADDED`/`MODIFIED`/`DELETED`) over `/ws`, so a real cluster
 could replace `sim.py` without frontend changes.
+
+## TigerData network analytics
+
+Copy `backend/.env.example` to `backend/.env` and put your Tiger Cloud PostgreSQL connection
+string on the `TIGERDATA_DATABASE_URL` line. Use the URI from Tiger Console, including its TLS settings.
+The local file is ignored by Git. The database role needs permission to create the
+`kubeverse_requests` hypertable and its index and to insert and query rows.
+
+On Windows, start the backend from the repository root in PowerShell after saving the file:
+
+```powershell
+Set-Location backend
+.\.venv\Scripts\python.exe -m pip install -r requirements.txt
+.\.venv\Scripts\python.exe run.py
+```
+
+Use `run.py` on Windows so Uvicorn uses the selector event loop required by Psycopg.
+
+Open **Network analytics** (▥) in the city's view controls. Let healthy simulated traffic
+accumulate for about 20 seconds, then sabotage **payments**. The panel shows request counts,
+latency, error rates, latency anomalies and possible propagation from Payments back through
+Checkout and Frontend. Expand a path to see its time buckets, and scrub the slider to replay
+network measurements. The slider covers the current backend run. The city layout and Kubernetes
+resource controls continue to use the live simulation.
