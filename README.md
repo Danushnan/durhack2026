@@ -59,6 +59,32 @@ $env:KUBEVERSE_CONTEXT = 'docker-desktop'
 
 Live cluster mode is read-only. The demo script below uses the simulator.
 
+#### Live demo on macOS (Docker Desktop)
+
+1. In Docker Desktop, open **Settings → Kubernetes**, enable it, and wait until it shows as running
+   (`kubectl --context docker-desktop get nodes` lists your Nodes).
+2. Deploy the demo shop: real Pods that call each other over HTTP and log every request.
+   ```bash
+   ./k8s/up.sh            # remove it later with ./k8s/down.sh
+   ```
+3. Start the backend against the cluster (instead of the simulator command above), and the frontend as usual:
+   ```bash
+   cd backend
+   KUBEVERSE_CONTEXT=docker-desktop .venv/bin/python -m uvicorn main:app --port 8000
+   ```
+4. Break and heal things with real `kubectl` and watch the city react within a few seconds:
+   ```bash
+   kubectl -n shop scale deploy/payments --replicas=0     # payments DOWN: red Cars; checkout and frontend Impacted, orange Cars
+   kubectl -n shop scale deploy/payments --replicas=2     # it heals
+   kubectl -n shop delete pod -l app=cart --wait=false    # Pods replaced by the ReplicaSet controller
+   kubectl -n shop scale deploy/frontend --replicas=5     # the Building grows, new Units warm up before taking traffic
+   kubectl drain desktop-worker --ignore-daemonsets --delete-emptydir-data   # Units move to the other Node
+   kubectl uncordon desktop-worker
+   ```
+
+Every demo Pod runs `k8s/workload.py`: it answers on port 8080, calls the services listed in its `CALLS`, and
+logs one JSON line per call (`200` served, `500` answered with an error, `503` refused), which becomes a Car.
+
 ## Demo script
 
 1. Press **?** for a short explainer of the city and of how Kubernetes thinks (desired vs actual state).
@@ -76,19 +102,32 @@ Live cluster mode is read-only. The demo script below uses the simulator.
 7. The database (`postgres`, the Archive) is a **StatefulSet**: Demolish `postgres-0` and the same name returns with the
    same **storage tank**. Cut its Power Station's power and it is *not* copied elsewhere; it waits until power returns.
 8. Click a **Power Station** (a Node): **Maintenance** (`kubectl drain`) moves Units out gently, never breaking a
-   service's disruption budget; **Cut power** is the sudden version. Toggle **⚡ Power Grid** to colour Units by Node.
-9. **⟲** resets the city; **🌙 / ☀️** switches night and day; **⌂** returns the camera to the overview. The ticker at
+   service's disruption budget; **Cut power** is the sudden version: Kubernetes only notices once the heartbeats stop,
+   marks the Node NotReady, takes its Units out of rotation, and evicts them when their toleration runs out.
+   Toggle **⚡ Power Grid** to colour Units by Node.
+9. The city is drawn isometrically: drag to pan, scroll or pinch to zoom.
+   **⟲** resets the city; **🌙 / ☀️** switches night and day; **⌂** returns the camera to the overview. The ticker at
    the bottom explains each thing Kubernetes does; click it for the full list.
 
 ## Simulated cases
 
-Scheduling with per-Node capacity (FailedScheduling → Pending), container start-up, readiness (running before ready),
-CrashLoopBackOff with exponential back-off, graceful termination, Deployment reconcile (scale up/down, self-healing),
-rolling updates with the default 25% maxSurge/maxUnavailable, progress deadline and rollback, an Ingress routing
-customers to frontend, a HorizontalPodAutoscaler on requests per second per Pod, a StatefulSet with ordered Pods and
-PersistentVolumeClaims, PodDisruptionBudgets with `kubectl drain`, Node NotReady eviction (Pods stay Terminating until
-the Node returns), and error propagation to callers of an impacted service. In live mode (a real cluster) the city is
-read-only.
+The controller chain is the real one: the Deployment controller owns one ReplicaSet per Pod template (named with its
+`pod-template-hash`, old ones kept at 0 for roll back), and the ReplicaSet controller creates and deletes the Pods
+(`ownerReferences` link them). The scheduler filters out tainted Nodes (cordoned: `unschedulable:NoSchedule`,
+dead: `unreachable:NoExecute`) and full ones (FailedScheduling → Pending), then spreads a workload's replicas across
+Nodes. Pods get IPs; each Service has an EndpointSlice listing its Pods, and only ready ones receive requests.
+
+Also simulated: container start-up, readiness (running before ready), CrashLoopBackOff with exponential back-off,
+graceful termination, scale up/down and self-healing, rolling updates with the default 25% maxSurge/maxUnavailable,
+progress deadline and rollback, an Ingress routing customers to frontend, a HorizontalPodAutoscaler on requests per
+second per Pod, a StatefulSet with ordered Pods and PersistentVolumeClaims, PodDisruptionBudgets with `kubectl drain`,
+the Node lifecycle (missed heartbeats → NotReady and an unreachable taint → Pods out of rotation → eviction after their
+toleration; they stay Terminating until the Node returns), and error propagation to callers of an impacted service.
+Traffic flows from the Ingress down the call graph: a service only calls its dependencies while requests reach it.
+In live mode (a real cluster) the city is read-only.
+
+Not simulated: CPU and memory requests (Nodes have Pod slots instead), liveness probes, DaemonSets, Jobs, NetworkPolicies
+and ConfigMaps/Secrets.
 Timings are compressed for the demo (see `shortcut:` comments in `backend/sim.py`).
 
 Both modes stream Kubernetes-shaped updates (`ADDED`/`MODIFIED`/`DELETED`) over `/ws`.

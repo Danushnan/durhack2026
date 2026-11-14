@@ -9,12 +9,14 @@ A model of a Kubernetes cluster's resources and their behaviour, standing in for
 _Avoid_: Mock, fake cluster, backend
 
 **Namespace**, **Deployment**, **Pod**, **Service**, **Node**:
-Used with their standard Kubernetes meanings; these are the only resource kinds Kuebec represents.
+Used with their standard Kubernetes meanings; these are the resource kinds Kuebec draws. The Simulated Cluster also
+streams the ReplicaSets, EndpointSlices, StatefulSets, Ingresses, HorizontalPodAutoscalers, PodDisruptionBudgets and
+PersistentVolumeClaims behind them, in their real shapes.
 
 ## City (visual language)
 
 **City**:
-The whole 3D scene, named Port Kube; one City represents one cluster.
+The whole 3D scene, named Port Kube, seen isometrically; one City represents one cluster.
 _Avoid_: World, map, scene
 
 **District**:
@@ -38,7 +40,7 @@ The two-lane route between two Buildings, representing one service calling anoth
 _Avoid_: Street, lane, path, connection, link
 
 **Car**:
-A moving object on a Road representing a request from the calling service to the one it needs. At the door it is served (it drives in), refused (it turns back red: nobody is ready to answer) or answered with an error (it waits, then turns back orange: the service needed something that is down).
+A moving object on a Road representing requests from the calling service to the one it needs. Cars leave as requests arrive, follow the Car ahead, slow for bends and queue behind a stopped Car (brake lights on). At the door it is served (it drives in), refused (it turns back red: nobody is ready to answer) or answered with an error (it waits, then turns back orange: the service needed something that is down).
 _Avoid_: Vehicle, packet, particle
 
 **Power Station**:
@@ -78,7 +80,7 @@ An optional overlay that tints each Unit by the Power Station (Node) its Pod run
 _Avoid_: Node view, infrastructure layer
 
 **Scenery**:
-Decorative towers, houses, warehouses, trees, ponds and street lamps that fill out the City; they represent nothing in the cluster.
+Decorative towers, houses, shops, warehouses, trees, ponds and street lamps that fill out the City and line every District; they represent nothing in the cluster, and are never tall enough to hide a service from the camera.
 _Avoid_: Filler, background buildings
 
 **Impacted**:

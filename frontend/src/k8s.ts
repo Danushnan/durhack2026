@@ -12,6 +12,7 @@ export interface K8sObject {
     annotations?: Record<string, string>
     creationTimestamp?: string
     deletionTimestamp?: string
+    ownerReferences?: { kind: string; name: string; uid: string; controller?: boolean }[]
   }
   spec?: any
   status?: any
@@ -23,6 +24,7 @@ export interface K8sObject {
   lastTimestamp?: string
   reportingComponent?: string // which part of Kubernetes reported the event
   reportingInstance?: string  // e.g. the Node, for kubelet events
+  source?: { component?: string; host?: string } // older event fields, still common on real clusters
 }
 
 /** healthy: the target has ready Pods to answer. errors: it answers, but with errors, because something it needs is down. */
