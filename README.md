@@ -4,21 +4,60 @@ Port Kube is a 3D city that renders a (simulated) Kubernetes cluster live. Names
 (Deployment) is a distinct landmark Building, its Pods are Units on plots out front, a Road joins two Buildings only
 where one service calls the other, and requests are Cars driving those Roads. Break things and watch the control loop heal them. See `GLOSSARY.md` for the vocabulary.
 
-## Run (two terminals)
+## Run the demo
+
+Install Python and Node.js, then open two terminals at the repository root.
+The simulator provides the workloads, traffic and interactive failure controls.
+Docker and Kubernetes are optional.
+
+**Terminal 1 — backend**
+
+Windows PowerShell:
+
+```powershell
+cd backend
+python -m venv .venv
+.\.venv\Scripts\python.exe -m pip install -r requirements.txt
+$env:KUBEVERSE_MODE = 'sim'
+.\.venv\Scripts\python.exe run.py
+```
+
+macOS or Linux:
 
 ```bash
-# 1. Simulated Cluster (FastAPI, port 8000)
 cd backend
-python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
-.venv/bin/uvicorn main:app --port 8000
+python3 -m venv .venv
+.venv/bin/python -m pip install -r requirements.txt
+KUBEVERSE_MODE=sim .venv/bin/python -m uvicorn main:app --port 8000
+```
 
-# 2. City (Vite, port 5173 — proxies /api and /ws to 8000)
+**Terminal 2 — frontend**
+
+```bash
 cd frontend
-npm install
+npm ci
 npm run dev
 ```
 
-Open http://localhost:5173. Tests: `cd backend && .venv/bin/pytest`.
+In PowerShell, use `npm.cmd` in place of `npm` if script execution is disabled.
+Open [http://127.0.0.1:5173](http://127.0.0.1:5173). If Vite prints a different port,
+use the address it prints. Keep both terminals open and press **Ctrl+C** in each
+to stop the demo.
+
+### Use a running Kubernetes cluster
+
+Install `kubectl` and check the context you want to display. For Docker Desktop
+on Windows, run these commands from the `backend` folder in place of the simulator
+startup commands:
+
+```powershell
+kubectl --context docker-desktop get nodes
+Remove-Item Env:KUBEVERSE_MODE -ErrorAction SilentlyContinue
+$env:KUBEVERSE_CONTEXT = 'docker-desktop'
+.\.venv\Scripts\python.exe run.py
+```
+
+Live cluster mode is read-only. The demo script below uses the simulator.
 
 ## Demo script
 
@@ -41,8 +80,7 @@ Scheduling with per-Node capacity (FailedScheduling → Pending), container star
 back-off, graceful termination, Deployment reconcile (scale up/down, self-healing), Node NotReady eviction.
 Timings are compressed for the demo (see `shortcut:` comments in `backend/sim.py`).
 
-The backend streams Kubernetes-shaped watch events (`ADDED`/`MODIFIED`/`DELETED`) over `/ws`, so a real cluster
-could replace `sim.py` without frontend changes.
+Both modes stream Kubernetes-shaped updates (`ADDED`/`MODIFIED`/`DELETED`) over `/ws`.
 
 ## TigerData network analytics
 
@@ -55,7 +93,7 @@ On Windows, start the backend from the repository root in PowerShell after savin
 
 ```powershell
 Set-Location backend
-.\.venv\Scripts\python.exe -m pip install -r requirements.txt
+$env:KUBEVERSE_MODE = 'sim'
 .\.venv\Scripts\python.exe run.py
 ```
 
