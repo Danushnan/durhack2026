@@ -3,7 +3,7 @@ import { Edges, OrbitControls, OrthographicCamera, PerspectiveCamera } from '@re
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef } from 'react'
 import * as THREE from 'three'
 import {
-  type ClusterState, type Edge, type K8sObject, deploymentHealth, describePod, HEALTH_COLOR, isWorkload,
+  type ClusterState, type Edge, type K8sObject, deploymentHealth, describePod, HEALTH_COLOR, isWorkload, notDeployed,
   keyOf, NODE_COLORS, nodeReady, podsOf, podStatus, rolloutOf, STATUS_COLOR, versionColor,
 } from './k8s'
 import { FacadeSign, Landmark, type LandmarkInfo, landmarkFor } from './landmarks'
@@ -12,7 +12,7 @@ import { Scenery } from './scenery'
 import { COMPONENTS, componentOf, nameOf, roleOf } from './teach'
 import { textTexture, type TextLine } from './textures'
 import type { Theme } from './theme'
-import { type Affected, describeFlow, type Flow, rates, type serviceFlow, SIGNAL, signalOf } from './health'
+import { type Affected, describeFlow, type Flow, rates, SERIOUS, type serviceFlow, SIGNAL, signalOf } from './health'
 import { admit, bendLimit, type CarAgent, newCar, stepCars } from './traffic'
 
 export interface HoverInfo { title: string; lines: string[]; x: number; y: number }
@@ -301,7 +301,8 @@ function tagFor(dep: K8sObject, info: LandmarkInfo, state: ServiceState[string] 
   const night = theme.mode === 'night'
   const amber = night ? AMBER : '#b45309', red = night ? '#f87171' : '#dc2626', green = night ? '#4ade80' : '#15803d' // text needs more contrast on the light tag
   // Line 2: the Pods (are copies running and ready?).
-  const pods: TextLine = state?.down ? { text: `PODS DOWN · ${ready}/${want} ready`, px: 40, color: red }
+  const pods: TextLine = notDeployed(dep) ? { text: 'NOT DEPLOYED · in architecture.json', px: 40, color: red }
+    : state?.down ? { text: `PODS DOWN · ${ready}/${want} ready`, px: 40, color: red }
     : rollout.stalled ? { text: `⚠ ${rollout.version} STUCK · old version serving`, px: 40, color: amber }
       : rollout.rolling && Object.keys(rollout.byVersion).length > 1
         ? { text: `ROLLING OUT ${rollout.version} · ${rollout.byVersion[rollout.version]?.ready ?? 0}/${want} ready`, px: 40, color: amber }
@@ -390,7 +391,7 @@ function Building({ dep, info, pods, pos, selected, onSelect, powerGrid, nodeCol
   return (
     <group position={pos}>
       {selected && <Pad w={17} d={17} r={3.5} position={[0, 0.008, -0.6]} color={info.accent} opacity={0.4} />}
-      {state?.affected && <Alarm color={state.affected.color} strong={state.affected.rank >= 3} />}
+      {state?.affected && <Alarm color={state.affected.color} strong={state.affected.rank >= SERIOUS} />}
       <group ref={body} position={[0, 0, -2]} scale={size}>
         <Landmark info={info} glow={glow} theme={theme} />
         {/* One invisible hit-box for hover/click instead of handlers on every part */}
@@ -834,11 +835,14 @@ export function City({ cluster, selected, onSelect, powerGrid, theme, onHover, s
   const nodes = all.filter((o) => o.kind === 'Node').sort((a, b) => a.metadata.name.localeCompare(b.metadata.name))
   const nodeColors = Object.fromEntries(nodes.map((n, i) => [n.metadata.name, NODE_COLORS[i % NODE_COLORS.length]]))
   // Keyed on names and from→to pairs only: failures change rps/health, and the city must not rearrange.
-  const layoutKey = [deployments.map(keyOf).sort(), nodes.map((n) => n.metadata.name), cluster.edges.map((e) => `${e.from}>${e.to}`).sort()].join('|')
+  // Live: only declared calls (architecture.json, env vars) place Buildings, so a call first seen in the logs adds a Road, never a reshuffle.
+  const declared = cluster.edges.filter((e) => e.declared ?? true).map((e) => `${e.from}>${e.to}`).sort()
+  const layoutKey = [deployments.map(keyOf).sort(), nodes.map((n) => n.metadata.name), declared, cluster.edges.map((e) => `${e.from}>${e.to}`).sort()].join('|')
   const { layout, roads, obstacles, lamps, keep } = useMemo(() => {
     const calls = cluster.edges.map((e) => ({ from: e.from, to: e.to }))
+    const placed = calls.filter((_, i) => cluster.edges[i].declared ?? true)
     const layout = layoutCity(deployments.map((d) => ({ namespace: d.metadata.namespace!, name: d.metadata.name })),
-      nodes.map((n) => n.metadata.name), calls, calls.filter((c) => c.from.startsWith('ingress:')))
+      nodes.map((n) => n.metadata.name), placed, placed.filter((c) => c.from.startsWith('ingress:')))
     const roads = buildRoads(layout, calls)
     if (import.meta.env.DEV) checkRoads(layout, roads)
     const lots = [...Object.values(layout.lots), ...Object.values(layout.stations), ...Object.values(layout.gates), ...(layout.hall ? [layout.hall] : [])]

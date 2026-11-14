@@ -110,8 +110,10 @@ logs one JSON line per call (`200` served, `500` answered with an error, `503` r
 9. Request health is shown apart from Pod health. A Building glows (and each Road's edges are coloured) by its
    requests: healthy, slow (≥ 300 ms), errors (≥ 1% answered with an error), refused (nobody answered) or idle; its Units
    show its Pods. Each tag has a Pods line and a requests line. A pulsing ring (with a light beam when serious) marks every
-   Building that needs attention, and the **overview** (bottom left) gives requests/s, latency and the failing share, and
-   lists the affected services. Hover a Road for its numbers; **◧** opens the legend with the thresholds.
+   Building that needs attention, and the **overview** (bottom left) gives total requests/s in, latency, the failing share,
+   counts of healthy, degraded (ring only: slow, missing Pods) and failed (ring and beam: down, refusing, errors, impacted)
+   services, and lists the affected ones. A Building's inspect panel shows its **recent errors**: failed requests from the
+   Pods' logs (live mode) and Kubernetes warnings. Hover a Road for its numbers; **◧** opens the legend with the thresholds.
 10. The city is isometric by default: drag to pan, scroll or pinch to zoom. **3D** switches to a free 3D view (drag to
    orbit, right-drag to pan); **ISO** switches back.
    **⟲** resets the city; **🌙 / ☀️** switches night and day; **⌂** returns the camera to the overview. The ticker at
@@ -145,7 +147,8 @@ latency from load per ready Pod and spreads failures to callers by how often the
 In live mode, Roads are the union of the calls each app declares (an `architecture.json` manifest such as
 `minishop/architecture.json`, or a workload's `CALLS`/`DEPENDENCIES` env var), the calls seen since the backend started,
 and the last five seconds of logs. A known call keeps its Road at 0 req/s when traffic stops, so the topology never
-disappears. Log lines may report `latency_ms`, `duration_ms` or `duration_seconds`; a call counts as refused only when
+disappears. Only declared calls place Buildings, so a call first seen in the logs adds a Road without rearranging the city,
+and a manifest component missing from its (existing) namespace is still drawn, marked **Not deployed**. Log lines may report `latency_ms`, `duration_ms` or `duration_seconds`; a call counts as refused only when
 the caller got no HTTP answer (a 504, a plain 503, or an exception such as a connection error), and as an error when the
 callee answered with one (e.g. MiniShop's 402 payment declines, which leave every Pod Ready).
 

@@ -95,6 +95,16 @@ _Avoid_: Status, uptime, app health
 A service that needs attention, for any reason: Down, refusing or failing requests, Impacted, slow, or missing Pods. It wears a pulsing ring and is listed in the overview.
 _Avoid_: Alerting, red, unhealthy
 
+**Healthy**, **Degraded**, **Failed** (overview counts):
+How many services need no attention, are Affected with a ring only (slow, missing Pods), or with a ring and a light beam
+(Down, refusing, answering with errors, or Impacted). "Degraded" is used only for this count, never for one service.
+_Avoid_: Warning, critical
+
+**Not deployed**:
+Live mode: a component listed in an architecture manifest (`minishop/architecture.json`) that the cluster does not run.
+Its Building and Roads are still drawn, so the architecture never shrinks.
+_Avoid_: Missing, ghost, placeholder
+
 ## Interactions
 
 **Demolish**:

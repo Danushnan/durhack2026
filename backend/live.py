@@ -7,6 +7,7 @@ import time
 from pathlib import Path
 
 WINDOW_MS = 5000
+MAX_FAILURES = 200
 # Architecture manifests (like minishop/architecture.json) declare each app's dependencies, so its
 # Roads exist before the first request and stay when traffic stops.
 MANIFESTS = sorted(Path(__file__).resolve().parent.parent.glob("*/architecture.json"))
@@ -27,6 +28,8 @@ class LiveCluster:
         self.traffic_namespaces = set()
         self.declared = set()   # (from, to) pairs the workloads say they call
         self.learned = set()    # (from, to) pairs seen in logs since the backend started
+        self.failures = []      # recent failed requests (newest last), deduped across overlapping log polls
+        self.seen = set()
 
     def refresh(self):
         raw = kubectl(
@@ -67,6 +70,17 @@ class LiveCluster:
             elif kind == "Deployment":
                 item["spec"] = {"replicas": item["spec"].get("replicas", 1)}
             current[meta["uid"]] = item
+        # A manifest component missing from its (existing) namespace still gets its Building, so the
+        # architecture never shrinks: an undeployed service is shown as such, with its Roads.
+        present = {f'{item["metadata"]["namespace"]}/{item["metadata"]["name"]}'
+                   for item in current.values() if item["kind"] == "Deployment"}
+        namespaces = {item["metadata"]["name"] for item in current.values() if item["kind"] == "Namespace"}
+        for namespace, name, _ in manifest_components():
+            if namespace in namespaces and f"{namespace}/{name}" not in present:
+                uid = f"manifest:{namespace}/{name}"
+                current[uid] = {"kind": "Deployment", "metadata": {
+                    "uid": uid, "name": name, "namespace": namespace,
+                    "annotations": {"kubeverse.io/not-deployed": "true"}}, "spec": {"replicas": 0}, "status": {}}
 
         changes = [
             {"type": "MODIFIED" if uid in self.objects else "ADDED", "object": item}
@@ -98,6 +112,20 @@ class LiveCluster:
             samples += parse_samples(logs, namespace)
         edges = summarize(samples, buildings, self.declared | self.learned, time.time() * 1000)
         self.learned |= {(e["from"], e["to"]) for e in edges if e["requests"]}
+        def ident(f):
+            return f["at"], f["from"], f["to"], f["id"], f["status"], f["detail"]
+        # The --since=5s polls overlap, so the same log line arrives several times.
+        for sample in sorted(samples, key=lambda x: x["at"]):
+            if sample["outcome"] != "ok" and ident(sample) not in self.seen:
+                self.seen.add(ident(sample))
+                self.failures.append(sample)
+        self.failures = self.failures[-MAX_FAILURES:]
+        self.seen = {ident(f) for f in self.failures}
+        for e in edges:
+            # Only declared calls shape the layout, so a call first seen in the logs cannot move Buildings.
+            e["declared"] = (e["from"], e["to"]) in self.declared
+            e["recent_errors"] = [{k: f[k] for k in ("at", "status", "outcome", "detail")}
+                                  for f in self.failures if (f["from"], f["to"]) == (e["from"], e["to"])][-5:]
         return edges
 
     def initial_events(self):
@@ -138,6 +166,18 @@ def service_key(target, namespace):
     return f"{parts[1] if len(parts) > 1 else namespace}/{parts[0]}"
 
 
+def manifest_components():
+    """(namespace, deployment, dependencies) for every component of every architecture manifest."""
+    out = []
+    for manifest in MANIFESTS:
+        try:
+            spec = json.loads(manifest.read_text())
+            out += [(spec["namespace"], c["deployment"], list(c.get("dependencies", []))) for c in spec["components"]]
+        except (OSError, ValueError, KeyError, TypeError):
+            logging.getLogger(__name__).warning("Ignoring unreadable architecture manifest %s", manifest)
+    return out
+
+
 def declared_calls(resources):
     """Dependencies the workloads declare: a CALLS (JSON [[target, rps]]) or DEPENDENCIES (space-separated)
     container env var, as the demo workloads use, plus every architecture manifest's dependency list."""
@@ -155,14 +195,7 @@ def declared_calls(resources):
                 except (ValueError, TypeError):
                     targets = []
                 calls |= {(f"{namespace}/{name}", service_key(t, namespace)) for t in targets}
-    for manifest in MANIFESTS:
-        try:
-            spec = json.loads(manifest.read_text())
-            namespace = spec["namespace"]
-            calls |= {(f"{namespace}/{c['deployment']}", f"{namespace}/{d}")
-                      for c in spec["components"] for d in c.get("dependencies", [])}
-        except (OSError, ValueError, KeyError, TypeError):
-            logging.getLogger(__name__).warning("Ignoring unreadable architecture manifest %s", manifest)
+    calls |= {(f"{namespace}/{name}", f"{namespace}/{d}") for namespace, name, deps in manifest_components() for d in deps}
     return calls
 
 
@@ -192,7 +225,9 @@ def parse_samples(logs, namespace):
         try:
             sample = json.loads(line)
             out.append({"from": f'{namespace}/{sample["source"]}', "to": service_key(sample["target"], namespace),
-                        "at": sample["timestamp_ms"], "outcome": outcome(sample),
+                        "at": sample["timestamp_ms"], "outcome": outcome(sample), "status": int(sample["status"]),
+                        "id": sample.get("request_id") or sample.get("pod"),
+                        "detail": " ".join(str(sample[k]) for k in ("operation", "route", "error") if sample.get(k)),
                         # Checkout's orders.transaction timer spans the whole checkout (payment call
                         # included), so it says nothing about how fast PostgreSQL is.
                         "latency": None if sample.get("operation") == "orders.transaction" else latency(sample)})

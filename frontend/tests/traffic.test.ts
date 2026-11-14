@@ -122,7 +122,7 @@ test('partial error rates: about that share of Cars come back orange', () => {
 })
 
 test('health signals: refused beats errors beats slow; idle when quiet', async () => {
-  const { affected, combine, overview, serviceFlow, signalOf, SLOW_MS } = await import('../src/health.ts')
+  const { affected, combine, overview, serviceFlow, signalOf, SLOW_MS, tally } = await import('../src/health.ts')
   assert.equal(signalOf({ rps: 0, healthy: true }), 'idle')
   assert.equal(signalOf({ rps: 0, healthy: false }), 'refused')
   assert.equal(signalOf({ rps: 5, error_rate: 0.2, latency_ms: SLOW_MS * 2 }), 'errors')
@@ -139,4 +139,9 @@ test('health signals: refused beats errors beats slow; idle when quiet', async (
   assert.equal(affected({ ready: 1, want: 1, signal: 'errors', basis: 'sent' })?.label, 'Errors in the calls it makes')
   assert.equal(overview([{ from: 'gate', to: 'a', rps: 10, error_rate: 0.1 }, { from: 'a', to: 'b', rps: 10 }]).failing, 0.1)
   assert.equal(affected({ ready: 2, want: 2, signal: 'ok' }), null)
+  assert.equal(affected({ ready: 0, want: 0, signal: 'idle', missing: true })?.label, 'Not deployed')
+  // Counts cut where the city draws a beam: slow / missing Pods are degraded; impacted, errors, down are failed.
+  assert.deepEqual(tally([null, affected({ ready: 2, want: 2, signal: 'slow' }), affected({ ready: 1, want: 2, signal: 'ok' }),
+    affected({ ready: 2, want: 2, signal: 'ok', impactedBy: 'payments' }), affected({ ready: 2, want: 2, signal: 'errors' }),
+    affected({ ready: 0, want: 2, signal: 'idle' })]), { healthy: 1, degraded: 2, failed: 3 })
 })
