@@ -5,44 +5,77 @@ export const LOT = 14
 export const STREET_W = 3
 export const DRIVEWAY_X = 4.5 // lot-local x of each Building's driveway (Units sit to its left)
 const LANE = 0.6
+const RING_SIDE = 1  // Scenery columns either side of the service districts
+const RING_BACK = 2  // downtown rows behind
+const RING_FRONT = 1 // row in front (Power Stations and suburbs)
 
 export interface Lot { key: string; col: number; row: number; center: THREE.Vector3 }
+export type SceneryZone = 'downtown' | 'midrise' | 'suburb' | 'park'
+export interface SceneryLot { col: number; row: number; center: THREE.Vector3; zone: SceneryZone }
 export interface District { name: string; x0: number; x1: number; z0: number; z1: number }
 export interface CityLayout {
-  lots: Record<string, Lot>
+  lots: Record<string, Lot>          // service lots by "ns/name"
+  stations: Record<string, Lot>      // Power Station lots by node name
+  scenery: SceneryLot[]
   districts: District[]
-  streetsX: number[] // x of each north-south street
-  streetsZ: number[] // z of each east-west street
+  streetsX: number[]
+  streetsZ: number[]
   extent: { x0: number; x1: number; z0: number; z1: number }
+  focus: THREE.Vector3               // centre of the service districts
 }
 
-/** Districts left to right, each a block of lots 2 wide. Pure and deterministic. */
-export function layoutCity(deployments: { namespace: string; name: string }[]): CityLayout {
+/** Service districts in the middle, ringed by Scenery and Power Stations. Pure and deterministic. */
+export function layoutCity(deployments: { namespace: string; name: string }[], nodes: string[]): CityLayout {
   const namespaces = [...new Set(deployments.map((d) => d.namespace))].sort()
   const lots: CityLayout['lots'] = {}
   const raw: { name: string; c0: number; c1: number; rows: number }[] = []
-  let col = 0, maxRows = 1
+  let svcCols = 0, svcRows = 1
   for (const ns of namespaces) {
     const deps = deployments.filter((d) => d.namespace === ns).sort((a, b) => a.name.localeCompare(b.name))
     const cols = Math.min(2, deps.length)
     const rows = Math.ceil(deps.length / cols)
     deps.forEach((d, i) => {
-      const c = col + (i % cols), r = Math.floor(i / cols)
+      const c = RING_SIDE + svcCols + (i % cols), r = RING_BACK + Math.floor(i / cols)
       lots[`${ns}/${d.name}`] = { key: `${ns}/${d.name}`, col: c, row: r, center: new THREE.Vector3() }
     })
-    raw.push({ name: ns, c0: col, c1: col + cols, rows })
-    col += cols
-    maxRows = Math.max(maxRows, rows)
+    raw.push({ name: ns, c0: RING_SIDE + svcCols, c1: RING_SIDE + svcCols + cols, rows })
+    svcCols += cols
+    svcRows = Math.max(svcRows, rows)
   }
-  // Centre the city on the origin.
-  const ox = (col * LOT) / 2, oz = (maxRows * LOT) / 2
-  for (const lot of Object.values(lots)) lot.center.set((lot.col + 0.5) * LOT - ox, 0, (lot.row + 0.5) * LOT - oz)
+  const cols = svcCols + 2 * RING_SIDE, rows = svcRows + RING_BACK + RING_FRONT
+  const ox = (cols * LOT) / 2, oz = (rows * LOT) / 2
+  const centre = (c: number, r: number) => new THREE.Vector3((c + 0.5) * LOT - ox, 0, (r + 0.5) * LOT - oz)
+  for (const lot of Object.values(lots)) lot.center.copy(centre(lot.col, lot.row))
+
+  // Power Stations along the front row, starting under the service districts.
+  const front = rows - 1
+  const stations: CityLayout['stations'] = {}
+  ;[...nodes].sort().forEach((n, i) => {
+    const c = Math.min(cols - 1, RING_SIDE + i)
+    stations[n] = { key: n, col: c, row: front, center: centre(c, front) }
+  })
+
+  const taken = new Set([...Object.values(lots), ...Object.values(stations)].map((l) => `${l.col},${l.row}`))
+  const scenery: SceneryLot[] = []
+  for (let r = 0; r < rows; r++) {
+    for (let c = 0; c < cols; c++) {
+      if (taken.has(`${c},${r}`)) continue
+      const inServiceArea = r >= RING_BACK && r < RING_BACK + svcRows && c >= RING_SIDE && c < RING_SIDE + svcCols
+      const zone: SceneryZone = inServiceArea ? 'park' : r < RING_BACK ? 'downtown' : r === front ? 'suburb' : 'midrise'
+      scenery.push({ col: c, row: r, center: centre(c, r), zone })
+    }
+  }
+
   return {
-    lots,
-    districts: raw.map((d) => ({ name: d.name, x0: d.c0 * LOT - ox, x1: d.c1 * LOT - ox, z0: -oz, z1: d.rows * LOT - oz })),
-    streetsX: Array.from({ length: col + 1 }, (_, i) => i * LOT - ox),
-    streetsZ: Array.from({ length: maxRows + 1 }, (_, i) => i * LOT - oz),
+    lots, stations, scenery,
+    districts: raw.map((d) => ({
+      name: d.name, x0: d.c0 * LOT - ox, x1: d.c1 * LOT - ox, z0: RING_BACK * LOT - oz, z1: (RING_BACK + d.rows) * LOT - oz,
+    })),
+    streetsX: Array.from({ length: cols + 1 }, (_, i) => i * LOT - ox),
+    streetsZ: Array.from({ length: rows + 1 }, (_, i) => i * LOT - oz),
     extent: { x0: -ox, x1: ox, z0: -oz, z1: oz },
+    focus: new THREE.Vector3(
+      (RING_SIDE + svcCols / 2) * LOT - ox, 0, (RING_BACK + svcRows / 2) * LOT - oz),
   }
 }
 
