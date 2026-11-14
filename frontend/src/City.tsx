@@ -7,7 +7,7 @@ import {
   keyOf, NODE_COLORS, nodeReady, podsOf, podStatus, rolloutOf, STATUS_COLOR, versionColor,
 } from './k8s'
 import { FacadeSign, Landmark, type LandmarkInfo, landmarkFor } from './landmarks'
-import { BUILDING, buildRoads, carTrip, type CityLayout, checkRoads, KERB, layoutCity, offsetPath, Path, ROAD_W } from './layout'
+import { BUILDING, buildRoads, carTrip, type CityLayout, checkRoads, KERB, layoutCity, offsetPath, Path, roadJunctions, ROAD_W } from './layout'
 import { Scenery } from './scenery'
 import { COMPONENTS, componentOf, nameOf, roleOf } from './teach'
 import { textTexture, type TextLine } from './textures'
@@ -26,7 +26,7 @@ export type ServiceState = Record<string, {
 /** Isometric (fixed angle, orthographic) or free 3D (perspective, orbit). */
 export type ViewMode = 'iso' | '3d'
 /** A Road's traffic: the call, with measured rates and latency. */
-export type RoadFlow = Edge & Flow & { measured?: boolean } // measured: TigerData rows replaced the live rates
+export type RoadFlow = Edge & Flow & { measured?: boolean } // measured: PostgreSQL rows replaced the live rates
 
 const UNIT = 1
 const UNIT_GAP = 1.45
@@ -870,6 +870,7 @@ export function City({ cluster, selected, onSelect, powerGrid, theme, onHover, s
     ]
     return { layout, roads, obstacles, lamps, keep }
   }, [layoutKey]) // eslint-disable-line react-hooks/exhaustive-deps
+  const junctions = useMemo(() => roadJunctions(roads), [roads])
   const edges = flows.filter((e) => roads[`${e.from}>${e.to}`])
   const focus = !selected ? null : selected === 'city-hall' ? layout.hall?.center ?? null
     : selected.startsWith('node:') ? layout.stations[selected.slice(5)]?.center ?? null : layout.lots[selected]?.center ?? null
@@ -924,6 +925,28 @@ export function City({ cluster, selected, onSelect, powerGrid, theme, onHover, s
       {edges.map((e) => (
         <Road key={`${e.from}>${e.to}`} pts={roads[`${e.from}>${e.to}`]} edge={e} theme={theme} onHover={onHover}
           emphasis={!selected ? 'normal' : e.from === selected || e.to === selected ? 'strong' : 'dim'} />
+      ))}
+      {junctions.map(({ x, z }) => (
+        <group key={`${x}:${z}`} position={[x, 0.045, z]}>
+          <mesh rotation-x={-Math.PI / 2} receiveShadow>
+            <circleGeometry args={[ROAD_W * 0.86, 48]} />
+            <meshStandardMaterial color={theme.street} roughness={0.95} />
+          </mesh>
+          <mesh rotation-x={-Math.PI / 2} position-y={0.005}>
+            <circleGeometry args={[0.76, 32]} />
+            <meshStandardMaterial color={theme.district} />
+          </mesh>
+          <mesh rotation-x={-Math.PI / 2} position-y={0.008}>
+            <ringGeometry args={[0.76, 0.85, 32]} />
+            <meshBasicMaterial color={theme.laneMark} />
+          </mesh>
+          {Array.from({ length: 12 }, (_, i) => (
+            <mesh key={i} rotation-x={-Math.PI / 2} position-y={0.008}>
+              <ringGeometry args={[2.16, 2.23, 4, 1, i * Math.PI / 6, Math.PI / 13]} />
+              <meshBasicMaterial color={theme.laneMark} />
+            </mesh>
+          ))}
+        </group>
       ))}
       {nodes.map((n) => layout.stations[n.metadata.name] && (
         <PowerStation key={n.metadata.uid} node={n} pos={layout.stations[n.metadata.name].center} used={podsOn(n.metadata.name)}

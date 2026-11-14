@@ -47,7 +47,7 @@ export default function App() {
   const sim = cluster.connected && !cluster.context // simulator-only actions are hidden when watching a real cluster
   const rush = all.some((o) => o.kind === 'Ingress' && o.status?.['kubeverse.io/rush-hour'])
 
-  // Every Road's traffic. With TigerData, its measured rows win (and are all there is during replay).
+  // Every Road's traffic. With PostgreSQL, its measured rows win (and are all there is during replay).
   const flows: RoadFlow[] = cluster.edges.map((e) => {
     const m = routes[routeKey(e.from, e.to)]
     return m ? { ...e, rps: m.rps, latency_ms: m.latency_ms, measured: true,
@@ -58,7 +58,7 @@ export default function App() {
     const k = keyOf(d)
     const chain = down.has(k) ? null : impactChain(k, cluster.edges, down)
     const flow = serviceFlow(k, flows)
-    if (flow.signal === 'ok' && services[k]?.anomaly) flow.signal = 'slow' // TigerData: far slower than its own baseline
+    if (flow.signal === 'ok' && services[k]?.anomaly) flow.signal = 'slow' // PostgreSQL: far slower than its own baseline
     const ready = d.status?.readyReplicas ?? 0, want = d.spec?.replicas ?? 0
     return [k, { down: down.has(k), chain, flow, affected: affected({ ready, want, signal: flow.signal, basis: flow.basis, impactedBy: chain ? nameOf(chain[chain.length - 1]) : null }) }]
   }))

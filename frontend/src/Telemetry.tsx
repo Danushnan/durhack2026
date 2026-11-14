@@ -30,6 +30,7 @@ type Snapshot =
       latest: string
       services: ServiceMetrics[]
       routes: RouteMetrics[]
+      actions?: { id: string; observed_at: number; action: string; target: string | null; requested_value: unknown; succeeded: boolean }[]
       incidents: { service: string; changed_at: string; path: string[]; timeline: (Measurement & { bucket: string })[] }[]
     }
 
@@ -69,16 +70,16 @@ export function Telemetry({ snapshot, at, onSeek, onClose }: {
   snapshot: Snapshot; at: number | null; onSeek: (at: number | null) => void; onClose: () => void
 }) {
   const message = {
-    disabled: 'Set TIGERDATA_DATABASE_URL in backend/.env and restart the backend.',
-    connecting: 'Connecting to TigerData…',
+    disabled: 'Set KUBEVERSE_DATABASE_URL and run in simulator mode to enable analytics.',
+    connecting: 'Connecting to PostgreSQL…',
     waiting: 'Waiting for the first request measurements…',
-    unavailable: 'TigerData queries are temporarily unavailable. Retrying…',
+    unavailable: 'PostgreSQL queries are temporarily unavailable. Retrying…',
   }
   return (
     <aside className="hud telemetry" aria-label="Network analytics">
       <button className="close" onClick={onClose} aria-label="Close network analytics">×</button>
       <h2>Network analytics</h2>
-      <p className="muted">Simulated request telemetry · TigerData</p>
+      <p className="muted">Simulated request telemetry · PostgreSQL</p>
       {snapshot.status !== 'ready' ? <p role="status">{message[snapshot.status]}</p> : <>
         <div className="telemetry-time">
           <label htmlFor="telemetry-time">Network at {clock(snapshot.at)}</label>
@@ -101,6 +102,21 @@ export function Telemetry({ snapshot, at, onSeek, onClose }: {
         {snapshot.services.filter((row) => row.anomaly).map((row) =>
           <p key={row.service} className="red">{nameOf(row.service)} latency anomaly · {Math.round(row.latency_ms)} ms vs {Math.round(row.baseline_ms!)} ms baseline</p>
         )}
+        {!!snapshot.actions?.length && <>
+          <h3>Recent demo actions</h3>
+          <ul>{snapshot.actions.map((action) => {
+            const timestamp = action.observed_at * 1000
+            const label = action.action === 'sabotage' && action.requested_value === false
+              ? 'repair' : action.action.replaceAll('_', ' ')
+            return <li key={action.id}>
+              <button onClick={() => onSeek(timestamp)}>
+                {clock(new Date(timestamp).toISOString())} · {label}
+                {action.target ? ` · ${nameOf(action.target)}` : ''}
+                {!action.succeeded ? ' · failed' : ''}
+              </button>
+            </li>
+          })}</ul>
+        </>}
         <h3>Possible failure propagation</h3>
         {snapshot.incidents.length === 0 && <p className="muted">No incident detected in the last two minutes.</p>}
         {snapshot.incidents.map((incident) => (

@@ -149,26 +149,30 @@ disappears. Log lines may report `latency_ms`, `duration_ms` or `duration_second
 the caller got no HTTP answer (a 504, a plain 503, or an exception such as a connection error), and as an error when the
 callee answered with one (e.g. MiniShop's 402 payment declines, which leave every Pod Ready).
 
-## TigerData network analytics
+## PostgreSQL network analytics
 
-Copy `backend/.env.example` to `backend/.env` and put your Tiger Cloud PostgreSQL connection
-string on the `TIGERDATA_DATABASE_URL` line. Use the URI from Tiger Console, including its TLS settings.
-The local file is ignored by Git. The database role needs permission to create the
-`kubeverse_requests` hypertable and its index and to insert and query rows.
+Create a PostgreSQL database and set its connection URI in `backend/.env`:
 
-On Windows, start the backend from the repository root in PowerShell after saving the file:
-
-```powershell
-Set-Location backend
-$env:KUBEVERSE_MODE = 'sim'
-.\.venv\Scripts\python.exe run.py
+```dotenv
+KUBEVERSE_DATABASE_URL=postgresql://USER:PASSWORD@127.0.0.1:5432/kubeverse
 ```
 
-Use `run.py` on Windows so Uvicorn uses the selector event loop required by Psycopg.
+Install the updated backend requirements and restart KubeVerse. The database
+role needs permission to create tables and indexes in its schema and read and
+write telemetry rows. Keep the connection URI private.
 
-Open **Network analytics** (▥) in the city's view controls. Let healthy simulated traffic
-accumulate for about 20 seconds, then sabotage **payments**. The panel shows request counts,
-latency, error rates, latency anomalies and possible propagation from Payments back through
-Checkout and Frontend. Expand a path to see its time buckets, and scrub the slider to replay
-network measurements. The slider covers the current backend run. The city layout and Kubernetes
-resource controls continue to use the live simulation.
+Simulator mode writes to `kubeverse_requests` and powers **Network analytics**.
+Live mode writes to `live_runs`, `live_requests`, and `resource_changes`.
+Use pgAdmin or psql to inspect the tables. For example:
+
+```sql
+SELECT to_timestamp(observed_at) AS observed_time, caller, service, latency_ms, failed
+FROM kubeverse_requests ORDER BY observed_at DESC LIMIT 20;
+```
+
+Existing SQLite files are kept locally. Their rows are not imported automatically.
+
+Simulator history also records sessions in `runs`, control attempts in `demo_actions`,
+observed routes in `service_routes`, and resource snapshots every 30 seconds in
+`resource_checkpoints`. Click a recent action in Network analytics to jump to its
+time in the traffic replay. Resource checkpoints are stored for inspection.

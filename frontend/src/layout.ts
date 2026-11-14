@@ -176,6 +176,36 @@ export function buildRoads(layout: CityLayout, calls: Call[]): Record<string, TH
   return out
 }
 
+// Find crossings between distinct routes in the ground plane.
+export function roadJunctions(roads: Record<string, THREE.Vector3[]>): THREE.Vector3[] {
+  const paths = Object.values(roads)
+  const junctions: THREE.Vector3[] = []
+  for (const [index, path] of paths.entries()) {
+    for (const other of paths.slice(index + 1)) {
+      for (let i = 1; i < path.length; i++) {
+        const a = path[i - 1], b = path[i]
+        const dx = b.x - a.x, dz = b.z - a.z
+        for (let j = 1; j < other.length; j++) {
+          const c = other[j - 1], d = other[j]
+          const ex = d.x - c.x, ez = d.z - c.z
+          const cross = dx * ez - dz * ex
+          // Nearly parallel roads do not form a crossing.
+          if (Math.abs(cross) <= 0.2 * Math.hypot(dx, dz) * Math.hypot(ex, ez)) continue
+          const x = c.x - a.x, z = c.z - a.z
+          const t = (x * ez - z * ex) / cross
+          const u = (x * dz - z * dx) / cross
+          if (t < 0 || t > 1 || u < 0 || u > 1) continue
+          const point = a.clone().lerp(b, t)
+          if (!junctions.some((existing) => existing.distanceToSquared(point) < ROAD_W ** 2)) {
+            junctions.push(point)
+          }
+        }
+      }
+    }
+  }
+  return junctions
+}
+
 /** Shift a polyline sideways (positive = to the right of travel). */
 export function offsetPath(pts: THREE.Vector3[], d: number): THREE.Vector3[] {
   return pts.map((p, i) => {

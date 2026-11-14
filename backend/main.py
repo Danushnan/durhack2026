@@ -3,6 +3,7 @@ import logging
 import os
 import subprocess
 import time
+import psycopg
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -11,8 +12,9 @@ from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel, Field
 
 from live import discover
+from live_history import LiveHistory
 from sim import MAX_REPLICAS, demo_cluster
-from telemetry import TigerTelemetry, router, stop_task
+from telemetry import PostgreSQLTelemetry, router, stop_task
 
 TICK_SECONDS = 0.5
 sim = demo_cluster()
@@ -53,8 +55,19 @@ async def lifespan(app):
             raise RuntimeError(f"Kubernetes context unavailable: {context}")
     if live is None:
         sim.tick(time.time())
-    dsn = os.environ.get("TIGERDATA_DATABASE_URL")
-    app.state.telemetry = TigerTelemetry(dsn, sim) if dsn and live is None else None
+    dsn = os.getenv("KUBEVERSE_DATABASE_URL")
+    if live and dsn:
+        live.history = await asyncio.to_thread(LiveHistory, dsn, live.context)
+        initial = [event for event in live.initial_events() if event.get("object")]
+        await asyncio.to_thread(live.history.record, live.samples, initial)
+    app.state.telemetry = PostgreSQLTelemetry(dsn, sim) if dsn and live is None else None
+    app.state.telemetry_disabled_reason = (
+        "Simulator analytics are disabled in live Kubernetes mode" if live
+        else "KUBEVERSE_DATABASE_URL is missing or empty" if not dsn
+        else None
+    )
+    if app.state.telemetry_disabled_reason:
+        logging.getLogger("uvicorn.error").info(app.state.telemetry_disabled_reason)
     task = asyncio.create_task(loop())
     ingestion = asyncio.create_task(app.state.telemetry.ingest()) if app.state.telemetry is not None else None
     try:
@@ -63,6 +76,10 @@ async def lifespan(app):
         await stop_task(task)
         if ingestion is not None:
             await stop_task(ingestion)
+            try:
+                await asyncio.to_thread(app.state.telemetry.finish)
+            except (psycopg.Error, OSError):
+                logger.warning("Could not close simulator history run")
 
 
 app = FastAPI(title="Kuebec Cluster", lifespan=lifespan)
@@ -86,7 +103,9 @@ def require_simulator():
         raise HTTPException(409, "Live Kubernetes mode is read-only")
 
 
-def ok(found: bool):
+def ok(found: bool, action: str, target=None, value=None):
+    if app.state.telemetry is not None:
+        app.state.telemetry.record_action(action, target, value, found)
     if not found:
         raise HTTPException(404, "not found")
     return {"ok": True}
@@ -101,21 +120,21 @@ class Toggle(BaseModel):
 
 
 @app.delete("/api/namespaces/{ns}/pods/{name}")
-def demolish(ns: str, name: str):
+async def demolish(ns: str, name: str):
     require_simulator()
-    return ok(sim.delete_pod(ns, name))
+    return ok(sim.delete_pod(ns, name), "delete_pod", f"{ns}/{name}")
 
 
 @app.put("/api/namespaces/{ns}/deployments/{name}/scale")
-def scale(ns: str, name: str, body: Scale):
+async def scale(ns: str, name: str, body: Scale):
     require_simulator()
-    return ok(sim.scale(ns, name, body.replicas))
+    return ok(sim.scale(ns, name, body.replicas), "scale", f"{ns}/{name}", body.replicas)
 
 
 @app.put("/api/namespaces/{ns}/deployments/{name}/sabotage")
-def sabotage(ns: str, name: str, body: Toggle):
+async def sabotage(ns: str, name: str, body: Toggle):
     require_simulator()
-    return ok(sim.sabotage(ns, name, body.enabled))
+    return ok(sim.sabotage(ns, name, body.enabled), "sabotage", f"{ns}/{name}", body.enabled)
 
 
 class Release(BaseModel):
@@ -123,36 +142,43 @@ class Release(BaseModel):
 
 
 @app.post("/api/namespaces/{ns}/deployments/{name}/release")
-def release(ns: str, name: str, body: Release):
+async def release(ns: str, name: str, body: Release):
     require_simulator()
-    return ok(sim.release(ns, name, body.buggy))
+    return ok(sim.release(ns, name, body.buggy), "release", f"{ns}/{name}", body.buggy)
 
 
 @app.post("/api/namespaces/{ns}/deployments/{name}/rollback")
-def rollback(ns: str, name: str):
+async def rollback(ns: str, name: str):
     require_simulator()
-    return ok(sim.rollback(ns, name))
+    return ok(sim.rollback(ns, name), "rollback", f"{ns}/{name}")
 
 
 @app.put("/api/nodes/{name}/drain")
-def drain(name: str, body: Toggle):
+async def drain(name: str, body: Toggle):
     require_simulator()
-    return ok(sim.drain(name, body.enabled))
+    return ok(sim.drain(name, body.enabled), "drain", name, body.enabled)
 
 
 @app.put("/api/rush-hour")
-def rush_hour(body: Toggle):
+async def rush_hour(body: Toggle):
     require_simulator()
-    return ok(sim.rush_hour(body.enabled))
+    return ok(sim.rush_hour(body.enabled), "rush_hour", None, body.enabled)
 
 
 @app.post("/api/reset")
-def reset():
+async def reset():
     require_simulator()
-    return ok(sim.reset())
+    return ok(sim.reset(), "reset")
 
 
 @app.put("/api/nodes/{name}/outage")
-def outage(name: str, body: Toggle):
+async def outage(name: str, body: Toggle):
     require_simulator()
-    return ok(sim.set_node_outage(name, body.enabled))
+    return ok(sim.set_node_outage(name, body.enabled), "node_outage", name, body.enabled)
+
+
+@app.get("/api/traces/{request_id}")
+async def trace(request_id: str):
+    if not live or not live.history:
+        raise HTTPException(404, "Live request history unavailable")
+    return {"request_id": request_id, "hops": await asyncio.to_thread(live.history.trace, request_id)}

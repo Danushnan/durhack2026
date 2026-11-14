@@ -2,9 +2,12 @@
 
 import json
 import logging
+import psycopg
 import subprocess
 import time
 from pathlib import Path
+
+from live_history import event_id
 
 WINDOW_MS = 5000
 # Architecture manifests (like minishop/architecture.json) declare each app's dependencies, so its
@@ -24,6 +27,8 @@ class LiveCluster:
         self.context = context
         self.objects = {}
         self.edges = []
+        self.history = None
+        self.samples = []
         self.traffic_namespaces = set()
         self.declared = set()   # (from, to) pairs the workloads say they call
         self.learned = set()    # (from, to) pairs seen in logs since the backend started
@@ -76,6 +81,11 @@ class LiveCluster:
                        for uid, item in self.objects.items() if uid not in current)
         self.objects = current
         edges = self.traffic()
+        if self.history:
+            try:
+                self.history.record(self.samples, changes)
+            except (psycopg.Error, OSError):
+                logging.getLogger(__name__).warning("Could not save live telemetry")
         if edges != self.edges:
             self.edges = edges
             changes.append({"type": "TRAFFIC", "edges": edges})
@@ -96,6 +106,7 @@ class LiveCluster:
                 logging.getLogger(__name__).debug("Could not read demo logs in %s", namespace)
                 continue
             samples += parse_samples(logs, namespace)
+        self.samples = samples
         edges = summarize(samples, buildings, self.declared | self.learned, time.time() * 1000)
         self.learned |= {(e["from"], e["to"]) for e in edges if e["requests"]}
         return edges
@@ -191,7 +202,16 @@ def parse_samples(logs, namespace):
     for line in logs.splitlines():
         try:
             sample = json.loads(line)
-            out.append({"from": f'{namespace}/{sample["source"]}', "to": service_key(sample["target"], namespace),
+            if not isinstance(sample.get("timestamp_ms"), (int, float)):
+                continue
+            out.append({"event_id": event_id(namespace, line),
+                        "request_id": sample.get("request_id") or sample.get("trace_id"),
+                        "pod": sample.get("source_pod") or sample.get("pod"),
+                        "method": sample.get("method"),
+                        "route": (sample.get("route") or "").partition("?")[0] or None,
+                        "status": sample.get("status"),
+                        "error_kind": sample.get("error"),
+                        "from": f'{namespace}/{sample["source"]}', "to": service_key(sample["target"], namespace),
                         "at": sample["timestamp_ms"], "outcome": outcome(sample),
                         # Checkout's orders.transaction timer spans the whole checkout (payment call
                         # included), so it says nothing about how fast PostgreSQL is.
