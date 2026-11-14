@@ -76,8 +76,8 @@ export const CARS_PER_REQUEST = 0.09
  * Requests waiting to leave as Cars accrue at the request rate; up to 3 wait while the caller's exit is
  * blocked (that backlog is a full Road). Returns the new backlog and whether a Car leaves now (jittered spacing).
  */
-export function admit(credit: number, rps: number, dt: number, cars: CarAgent[], rand: () => number) {
-  credit = Math.min(3, credit + rps * CARS_PER_REQUEST * dt)
+export function admit(credit: number, rps: number, dt: number, cars: CarAgent[], rand: () => number, density = CARS_PER_REQUEST) {
+  credit = Math.min(3, credit + rps * density * dt)
   const leave = credit >= 1 && exitClear(cars)
   return { credit: leave ? credit - (0.6 + 0.8 * rand()) : credit, leave }
 }

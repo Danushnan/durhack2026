@@ -71,7 +71,7 @@ button.small { padding: 2px 8px; font-size: 11px; }
 .telemetry details { margin: 6px 0; }
 .telemetry summary { cursor: pointer; }
 
-.banner { top: 12px; left: 50%; transform: translateX(-50%); max-width: min(640px, calc(100vw - 340px));
+.banner { top: 82px; left: 72px; max-width: min(640px, max(240px, calc(100vw - 570px)));
   border-color: var(--red); line-height: 1.5; padding: 8px 14px; }
 
 .help { top: 60px; right: 12px; width: 380px; max-width: calc(100vw - 24px); max-height: calc(100vh - 140px); overflow: auto; line-height: 1.5; }
@@ -150,7 +150,7 @@ i { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin
 .tooltip b { display: block; margin-bottom: 2px; }
 
 @media (max-width: 800px) {
-  .banner { top: 60px; max-width: calc(100vw - 24px); }
+  .banner { top: 82px; max-width: max(220px, calc(100vw - 570px)); }
   .actions { grid-template-columns: 1fr; }
   .inspect { top: auto; bottom: 64px; max-height: 55vh; }
 }
@@ -183,3 +183,35 @@ i { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin
 .flows td { padding: 4px; border-bottom: 1px solid var(--line); }
 .flows td:last-child { white-space: nowrap; }
 @media (max-width: 720px) { .overview { width: auto; right: 12px; bottom: 60px; } }
+
+/* Live measurements extend the existing HUD; the city remains the primary surface. */
+.source-status { display: block; color: var(--muted); font-size: 11px; overflow-wrap: anywhere; }
+.brand { flex-wrap: wrap; max-width: min(560px, calc(100vw - 330px)); }
+.brand .source-status { flex-basis: 100%; }
+.source-error { color: var(--amber); }
+.source-warning { color: var(--amber); }
+.live-overview { left: 72px; width: 320px; max-height: calc(100vh - 180px); overflow: auto; }
+.live-overview > .source-status { margin: 4px 0 8px; }
+.live-overview .tiles { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+.live-overview .tile { padding: 6px; }
+.live-overview .tile b { font-size: 16px; }
+.live-overview .affected { max-height: 12vh; }
+.live-overview summary { cursor: pointer; font-size: 12px; margin-top: 8px; }
+.live-overview td small { display: block; color: var(--muted); font-size: 10px; }
+.last-known { opacity: 0.65; }
+.measurement-state { color: var(--muted); font-size: 12px; line-height: 1.5; }
+.measurement-facts { margin: 12px 0; }
+.measurement-facts dt { max-width: 160px; }
+.live-measurements .tiles { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+@media (max-width: 720px) {
+  .brand { top: 8px; left: 8px; max-width: calc(100vw - 16px); right: 8px; }
+  .controls { top: 98px; right: 8px; max-width: calc(100vw - 16px); flex-wrap: wrap; }
+  .services { top: 150px; max-height: calc(100vh - 220px); }
+  .live-overview { left: 64px; right: 8px; bottom: 58px; width: auto; max-height: 32vh; }
+  .inspect { right: 8px; max-width: calc(100vw - 16px); bottom: 58px; max-height: 60vh; z-index: 22; }
+  .banner { top: 148px; left: 64px; max-width: calc(100vw - 72px); font-size: 11px; }
+  .live-measurements .tiles { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .facts { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
+  .facts dd { overflow-wrap: anywhere; }
+  .tooltip { max-width: 230px; }
+}

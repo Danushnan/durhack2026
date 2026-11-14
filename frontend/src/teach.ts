@@ -10,7 +10,7 @@ const ROLES: Record<string, { does: string; ifDown: string }> = {
   frontend: { does: 'The shop website customers browse.', ifDown: 'Customers cannot load the shop at all.' },
   cart: { does: 'Remembers what each customer has put in their basket.', ifDown: 'Customers cannot add items; baskets look empty.' },
   checkout: { does: 'Turns a basket into an order.', ifDown: 'Customers can browse but cannot buy anything.' },
-  payments: { does: "Charges the customer's card.", ifDown: 'Orders fail at the very last step: nobody can pay.' },
+  payments: { does: 'Authorises payments; MiniShop uses a simulated provider.', ifDown: 'Orders fail at the very last step: nobody can pay.' },
   postgres: { does: 'The database: the permanent record of every order.', ifDown: 'Checkout cannot save orders.' },
   redis: { does: 'A fast in-memory cache that holds basket data.', ifDown: 'The cart cannot read or save baskets.' },
   products: { does: 'The catalogue: product details, prices and stock.', ifDown: 'The shop shows no products, and baskets cannot price items.' },

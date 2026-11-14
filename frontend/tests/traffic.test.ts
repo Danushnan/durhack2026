@@ -73,6 +73,21 @@ test('rush hour puts clearly more Cars on a Road, up to what the exit lets out',
   assert.ok(leaving(2) > 0.1, 'a quiet Road still sees Cars')
 })
 
+test('quiet live activity can produce an illustration without changing simulator density or inventing idle traffic', () => {
+  const simulateRate = (rps: number, density?: number) => {
+    let credit = 0, departures = 0
+    for (let i = 0; i < 300; i++) {
+      const result = admit(credit, rps, 1 / 60, [], () => 0.5, density)
+      credit = result.credit
+      departures += Number(result.leave)
+    }
+    return departures
+  }
+  assert.ok(simulateRate(0.4, 1) >= 1)
+  assert.equal(simulateRate(0.4), 0)
+  assert.equal(simulateRate(0, 1), 0)
+})
+
 test('the demo city: no Road runs through another Building', async () => {
   const { buildRoads, checkRoads, layoutCity } = await import('../src/layout.ts')
   const deps = ['shop/frontend', 'shop/cart', 'shop/checkout', 'shop/payments', 'data/postgres', 'data/redis']

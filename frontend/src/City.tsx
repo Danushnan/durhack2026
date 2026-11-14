@@ -13,7 +13,8 @@ import { COMPONENTS, componentOf, nameOf, roleOf } from './teach'
 import { textTexture, type TextLine } from './textures'
 import type { Theme } from './theme'
 import { type Affected, describeFlow, type Flow, rates, type serviceFlow, SIGNAL, signalOf } from './health'
-import { admit, bendLimit, type CarAgent, newCar, stepCars } from './traffic'
+import { admit, bendLimit, type CarAgent, CARS_PER_REQUEST, newCar, stepCars } from './traffic'
+import { label, latencyText, type LiveServiceView } from './liveMetrics'
 
 export interface HoverInfo { title: string; lines: string[]; x: number; y: number }
 type OnHover = (h: HoverInfo | null) => void
@@ -22,6 +23,7 @@ export type ServiceState = Record<string, {
   down: boolean; chain: string[] | null
   flow: ReturnType<typeof serviceFlow>   // how its requests are going (separate from its Pods)
   affected: Affected | null              // why it needs attention, if it does
+  live?: LiveServiceView
 }>
 /** Isometric (fixed angle, orthographic) or free 3D (perspective, orbit). */
 export type ViewMode = 'iso' | '3d'
@@ -205,7 +207,8 @@ function Road({ pts, edge, emphasis, theme, onHover }: {
     const r = rates(edge), src = edge.from.startsWith('ingress:') ? 'customers' : nameOf(edge.from)
     onHover({ title: `🛣️ ${src} → ${nameOf(edge.to)} · ${signal.icon} ${signal.label}`, lines: [
       describeFlow(edge),
-      edge.rps > 0 ? `${(r.error * 100).toFixed(1)}% answered with an error · ${(r.refused * 100).toFixed(1)}% refused (nobody answered)` : 'This call is part of the app, so its Road stays while traffic is quiet.',
+      edge.rps > 0 ? `Observed aggregate calls · ${(r.error * 100).toFixed(1)}% HTTP response errors (4xx/5xx) · ${(r.refused * 100).toFixed(1)}% refused`
+        : 'Known dependency: declared or previously observed. No calls observed in the current traffic window; the Road stays.',
       `${signal.label}: ${signal.means}.`,
     ], ...at(e) })
   }
@@ -247,7 +250,7 @@ function Unit({ pod, target, powerGrid, nodeColor, onHover }: {
     }
   })
   const faint = status === 'Terminating' || status === 'Pending'
-  const version = pod.metadata.labels?.version ?? 'v1'
+  const version = pod.metadata.labels?.version
   const ring = useRef<THREE.Mesh>(null)
   useFrame(({ clock }) => {
     if (!ring.current) return
@@ -263,7 +266,7 @@ function Unit({ pod, target, powerGrid, nodeColor, onHover }: {
       : 'Not in rotation: receives no requests.'
   return (
     <group ref={ref} position={[target.x, 3, target.z]}
-      onPointerOver={(e) => { e.stopPropagation(); onHover({ title: `Unit ${pod.metadata.name} · ${version}`, lines: [describePod(pod), rotation, `Pod · ${status} · runs on ${pod.spec.nodeName ?? 'no Node yet'}`], ...at(e) }) }}
+      onPointerOver={(e) => { e.stopPropagation(); onHover({ title: `Unit ${pod.metadata.name}${version ? ` · ${version}` : ''}`, lines: [describePod(pod), rotation, `Pod · ${status} · runs on ${pod.spec.nodeName ?? 'no Node yet'}`], ...at(e) }) }}
       onPointerOut={() => onHover(null)}>
       <mesh ref={ring} rotation-x={-Math.PI / 2} position={[0, 0.06, 0]} visible={false}>
         <ringGeometry args={[0.72, 1.08, 28]} />
@@ -276,7 +279,7 @@ function Unit({ pod, target, powerGrid, nodeColor, onHover }: {
       <mesh position={[0, 0.98, 0]}>
         <boxGeometry args={[UNIT + 0.1, 0.12, UNIT + 0.1]} />
         {/* the cap shows the version, so a rolling update is visible as caps changing colour */}
-        <meshStandardMaterial color={versionColor(version)} transparent opacity={faint ? 0.4 : 1} />
+        <meshStandardMaterial color={versionColor(version ?? 'v1')} transparent opacity={faint ? 0.4 : 1} />
       </mesh>
     </group>
   )
@@ -298,6 +301,13 @@ function tagFor(dep: K8sObject, info: LandmarkInfo, state: ServiceState[string] 
   const ready = dep.status?.readyReplicas ?? 0, want = dep.spec.replicas
   const health = deploymentHealth(dep)
   const title: TextLine = { text: `${state?.affected ? `${state.affected.icon} ` : ''}${info.emoji} ${dep.metadata.name}`, px: 56, color: theme.labelFg }
+  if (state?.live) {
+    const live = state.live, m = live.metrics
+    return { lines: [title,
+      { text: `Infrastructure: ${label(live.infrastructure)} · ${m?.ready_replicas ?? ready}/${m?.desired_replicas ?? want} Ready`, px: 40, color: theme.labelFg },
+      { text: `App: ${label(live.application)} · ${label(live.availability)}${m?.p95_latency_ms == null ? '' : ` · p95 ${latencyText(m.p95_latency_ms)}`}`, px: 40, color: live.color }],
+      border: live.affected?.color ?? live.color }
+  }
   const night = theme.mode === 'night'
   const amber = night ? AMBER : '#b45309', red = night ? '#f87171' : '#dc2626', green = night ? '#4ade80' : '#15803d' // text needs more contrast on the light tag
   // Line 2: the Pods (are copies running and ready?).
@@ -360,17 +370,17 @@ function Tank({ claim, attached, index, accent, theme, onHover }: {
   )
 }
 
-function Building({ dep, info, pods, pos, selected, onSelect, powerGrid, nodeColors, theme, onHover, state, claims }: {
+function Building({ dep, info, pods, pos, selected, related, onSelect, powerGrid, nodeColors, theme, onHover, state, claims }: {
   dep: K8sObject; info: LandmarkInfo; pods: K8sObject[]; pos: THREE.Vector3; selected: boolean; onSelect: () => void
   powerGrid: boolean; nodeColors: Record<string, string>; theme: Theme; onHover: OnHover; state?: ServiceState[string]
-  claims: K8sObject[]
+  claims: K8sObject[]; related: boolean
 }) {
   const health = deploymentHealth(dep)
   const desired: number = dep.spec.replicas
   const sorted = [...pods].sort((a, b) => (a.metadata.creationTimestamp ?? '').localeCompare(b.metadata.creationTimestamp ?? ''))
   const total = Math.max(desired, sorted.length)
   // The Building glows with its request health; its Units show its Pod health.
-  const glow = state?.flow ? SIGNAL[state.flow.signal].color : HEALTH_COLOR[health]
+  const glow = state?.live?.color ?? (state?.flow ? SIGNAL[state.flow.signal].color : HEALTH_COLOR[health])
   const role = roleOf(dep.metadata.name)
   const hover = (e: ThreeEvent<PointerEvent>) => {
     e.stopPropagation()
@@ -378,8 +388,10 @@ function Building({ dep, info, pods, pos, selected, onSelect, powerGrid, nodeCol
     onHover({ title: `${info.emoji} ${info.title}: ${dep.metadata.name}`, lines: [
       role.does,
       ...(state?.affected ? [`${state.affected.icon} Needs attention: ${state.affected.label}`] : []),
+      ...(related ? ['Connected to the selection. Potential impact is not proof of measured failure.'] : []),
       `Pods: ${ready} of ${desired} ready${ready < desired ? ' (Kubernetes is fixing it)' : ''}`,
-      f ? `Requests ${f.basis}: ${describeFlow(f)} · ${SIGNAL[f.signal].icon} ${SIGNAL[f.signal].label}` : 'Requests: no measurements',
+      state?.live ? `Application: ${label(state.live.application)} · Telemetry: ${label(state.live.availability)} · p95 ${latencyText(state.live.metrics?.p95_latency_ms)}`
+        : f ? `Requests ${f.basis}: ${describeFlow(f)} · ${SIGNAL[f.signal].icon} ${SIGNAL[f.signal].label}` : 'Requests: no measurements',
       `If it stops: ${role.ifDown}`, 'Click to inspect',
     ], ...at(e) })
   }
@@ -390,7 +402,8 @@ function Building({ dep, info, pods, pos, selected, onSelect, powerGrid, nodeCol
   return (
     <group position={pos}>
       {selected && <Pad w={17} d={17} r={3.5} position={[0, 0.008, -0.6]} color={info.accent} opacity={0.4} />}
-      {state?.affected && <Alarm color={state.affected.color} strong={state.affected.rank >= 3} />}
+      {!selected && related && <Pad w={17} d={17} r={3.5} position={[0, 0.008, -0.6]} color={info.accent} opacity={0.16} />}
+      {state?.affected && <Alarm color={state.affected.color} strong={state.affected.rank >= 3 && state.live?.infrastructure !== 'scaled_down'} />}
       <group ref={body} position={[0, 0, -2]} scale={size}>
         <Landmark info={info} glow={glow} theme={theme} />
         {/* One invisible hit-box for hover/click instead of handlers on every part */}
@@ -509,9 +522,9 @@ function PowerStation({ node, pos, used, color, theme, onHover, selected, onSele
  * the Car ahead, slow for bends, and at the callee's door are served, refused (red) or answered with an
  * error (orange). Fate is decided on arrival, from the live state, so Cars already on the road react to failures.
  */
-function Traffic({ edge, road, theme, accent, onHover, endpoints }: {
+function Traffic({ edge, road, theme, accent, onHover, endpoints, paused, liveMode }: {
   edge: RoadFlow; road: THREE.Vector3[]; theme: Theme; accent: string; onHover: OnHover
-  endpoints: string[] // uids of the destination's ready Pods: the Service only sends requests to these
+  endpoints: string[]; paused: boolean; liveMode: boolean // Pod flashes illustrate distribution, not observed request routing
 }) {
   const targets = useRef(endpoints)
   targets.current = endpoints
@@ -524,6 +537,8 @@ function Traffic({ edge, road, theme, accent, onHover, endpoints }: {
   const credit = useRef(0) // requests waiting to leave as a Car
   const live = useRef(edge)
   live.current = edge
+  const pause = useRef(paused)
+  useLayoutEffect(() => { pause.current = paused }, [paused])
   const groups = useRef<(THREE.Group | null)[]>([])
   const paints = useRef<(THREE.MeshStandardMaterial | null)[]>([])
   const hazards = useRef<(THREE.Group | null)[]>([])
@@ -531,13 +546,20 @@ function Traffic({ edge, road, theme, accent, onHover, endpoints }: {
   const tmp = useMemo(() => new THREE.Vector3(), [])
   const colors = useMemo(() => ({ ok: new THREE.Color(accent), refused: new THREE.Color(RED), error: new THREE.Color(ORANGE) }), [accent])
   useFrame(({ clock }, rawDt) => {
+    if (pause.current) {
+      cars.current = []; credit.current = 0
+      groups.current.forEach((g) => { if (g) g.visible = false })
+      return
+    }
     const dt = Math.min(rawDt, 0.1) // a hidden tab must not dump a burst of Cars
     const now = clock.elapsedTime
     const e = live.current
     // Arrivals at the request rate, jittered; a backlog waits (up to 3) while the caller's exit is blocked.
     const used = new Set(cars.current.map((c) => c.slot))
     const slot = [...Array(CAR_POOL).keys()].find((i) => !used.has(i))
-    const arrival = admit(credit.current, slot === undefined ? 0 : e.rps, dt, cars.current, Math.random)
+    // MiniShop's manual traffic is much quieter than the simulator. Normalise only the illustration;
+    // measured rates are unchanged, and the same pool/exit limits still bound the rendering cost.
+    const arrival = admit(credit.current, slot === undefined ? 0 : e.rps, dt, cars.current, Math.random, liveMode ? 1 : CARS_PER_REQUEST)
     credit.current = arrival.credit
     if (arrival.leave && slot !== undefined) cars.current.push(newCar(slot, Math.random))
     const steps = Math.ceil(dt * 60) // small steps keep the car-following stable
@@ -563,10 +585,9 @@ function Traffic({ edge, road, theme, accent, onHover, endpoints }: {
   })
   const [src, dst] = [edge.from.startsWith('ingress:') ? 'customers' : nameOf(edge.from), nameOf(edge.to)]
   const night = theme.mode === 'night'
-  const story = (c?: CarAgent) => !c ? '' : c.fate === 'refused' ? `Refused: ${dst} has no ready Units to answer, so it turns straight back.`
-    : c.fate === 'error' ? `${dst} answered with an error: something it depends on is down.`
-      : c.phase === 'in' ? `Being served by the next ready ${dst} Unit (round-robin).`
-        : c.v < 1 ? `Queuing for ${dst}: the Car ahead is waiting.` : `On its way to ${dst}.`
+  const story = (c?: CarAgent) => !c ? '' : c.fate === 'refused' ? 'Illustrates the aggregate share of calls with no HTTP answer.'
+    : c.fate === 'error' ? 'Illustrates HTTP response errors, including business rejections. This does not establish a root cause.'
+      : 'Illustrates normalised aggregate activity; car count, travel time, queuing and Pod flashes are not request-level measurements.'
   return (
     <group>
       {Array.from({ length: CAR_POOL }, (_, i) => (
@@ -575,7 +596,7 @@ function Traffic({ edge, road, theme, accent, onHover, endpoints }: {
             e.stopPropagation()
             const car = cars.current.find((c) => c.slot === i)
             onHover({
-              title: `🚗 Request: ${src} → ${dst}`,
+              title: `🚗 Aggregate activity: ${src} → ${dst}`,
               lines: [story(car), `This Road: ${describeFlow(live.current)}.`],
               ...at(e),
             })
@@ -823,8 +844,8 @@ function CameraRig({ focus, layout, homeTick, mode }: { focus: THREE.Vector3 | n
 
 // ---------- the City ----------
 
-export function City({ cluster, selected, onSelect, powerGrid, theme, onHover, states, homeTick, flows, replay, mode }: {
-  flows: RoadFlow[]; replay: boolean; mode: ViewMode
+export function City({ cluster, selected, onSelect, powerGrid, theme, onHover, states, homeTick, flows, replay, mode, trafficPaused }: {
+  flows: RoadFlow[]; replay: boolean; mode: ViewMode; trafficPaused: boolean
   cluster: ClusterState; selected: string | null; onSelect: (key: string | null) => void
   powerGrid: boolean; theme: Theme; onHover: OnHover; states: ServiceState; homeTick: number
 }) {
@@ -871,6 +892,7 @@ export function City({ cluster, selected, onSelect, powerGrid, theme, onHover, s
     return { layout, roads, obstacles, lamps, keep }
   }, [layoutKey]) // eslint-disable-line react-hooks/exhaustive-deps
   const edges = flows.filter((e) => roads[`${e.from}>${e.to}`])
+  const related = new Set(flows.filter((e) => e.from === selected || e.to === selected).flatMap((e) => [e.from, e.to]))
   const focus = !selected ? null : selected === 'city-hall' ? layout.hall?.center ?? null
     : selected.startsWith('node:') ? layout.stations[selected.slice(5)]?.center ?? null : layout.lots[selected]?.center ?? null
   const podsOn = (node: string) => pods.filter((p) => p.spec.nodeName === node && !p.metadata.deletionTimestamp).length
@@ -944,8 +966,9 @@ export function City({ cluster, selected, onSelect, powerGrid, theme, onHover, s
         const lot = layout.lots[key]
         if (!lot) return null
         return (
-          <Building key={dep.metadata.uid} dep={dep} info={landmarkFor(dep.metadata.name)} pos={lot.center}
+          <Building key={key} dep={dep} info={landmarkFor(dep.metadata.name)} pos={lot.center}
             selected={selected === key} onSelect={() => onSelect(key)} powerGrid={powerGrid} nodeColors={nodeColors}
+            related={selected !== key && related.has(key)}
             theme={theme} onHover={onHover} state={states[key]}
             pods={podsOf(dep, pods)}
             claims={claims.filter((c) => c.metadata.namespace === dep.metadata.namespace && c.metadata.labels?.app === dep.metadata.name)} />
@@ -955,7 +978,7 @@ export function City({ cluster, selected, onSelect, powerGrid, theme, onHover, s
         if (replay && !e.measured) return null // replaying history: only routes with recorded traffic get Cars
         // A Car wears its caller's colour (customers: yellow taxis); how its request went shows at the door.
         return <Traffic key={`${e.from}>${e.to}`} edge={e} road={roads[`${e.from}>${e.to}`]} theme={theme} onHover={onHover}
-          accent={e.from.startsWith('ingress:') ? CUSTOMER : landmarkFor(nameOf(e.from)).accent} endpoints={endpoints(e.to)} />
+          accent={e.from.startsWith('ingress:') ? CUSTOMER : landmarkFor(nameOf(e.from)).accent} endpoints={endpoints(e.to)} paused={trafficPaused} liveMode={typeof cluster.context === 'string'} />
       })}
       {mode === 'iso'
         // Isometric: no rotation. Drag (or one finger) pans, wheel (or pinch) zooms towards the cursor.

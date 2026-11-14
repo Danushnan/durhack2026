@@ -1,4 +1,6 @@
 import { useEffect, useState } from 'react'
+import type { LiveMetricsSnapshot } from './liveMetrics'
+import { checkSnapshotFreshness, initialClusterState, reduceWatchMessage } from './watch'
 
 // Trimmed Kubernetes object shapes, as streamed by the backend's watch.
 export interface K8sObject {
@@ -28,13 +30,10 @@ export interface K8sObject {
 }
 
 /** healthy: the target has ready Pods to answer. errors: it answers, but with errors, because something it needs is down. */
-export interface Edge { from: string; to: string; rps: number; healthy: boolean; errors?: boolean }
-
-type WatchEvent =
-  | { type: 'ADDED' | 'MODIFIED' | 'DELETED'; object: K8sObject }
-  | { type: 'HEALTH'; stale: boolean; lastRefresh: number | null }
-  | { type: 'TRAFFIC'; edges: Edge[] }
-  | { type: 'SOURCE'; context: string | null } // null: the simulator; otherwise a live cluster's kubectl context
+export interface Edge {
+  from: string; to: string; rps: number; healthy: boolean; errors?: boolean
+  requests?: number; latency_ms?: number | null; error_rate?: number; refused_rate?: number
+}
 
 export interface ClusterState {
   objects: Record<string, K8sObject> // by uid
@@ -42,6 +41,12 @@ export interface ClusterState {
   connected: boolean
   context?: string | null // kubectl context when watching a real cluster (read-only); null/absent for the simulator
   stale?: boolean          // live mode: the last refresh from the cluster failed
+  lastRefresh?: number | null
+  awaitingSnapshot?: boolean
+  metrics?: LiveMetricsSnapshot
+  metricsReceivedAt?: number
+  metricsStale?: boolean
+  metricsError?: string
 }
 
 /** Deployments and StatefulSets are both drawn as Buildings. */
@@ -154,41 +159,32 @@ export const HEALTH_COLOR: Record<Health, string> = { healthy: '#22d3ee', degrad
 export const NODE_COLORS = ['#38bdf8', '#c084fc', '#4ade80', '#fb7185', '#fbbf24']
 
 export function useCluster(): ClusterState {
-  const [state, setState] = useState<ClusterState>({ objects: {}, edges: [], connected: false })
+  const [state, setState] = useState<ClusterState>(initialClusterState)
 
   useEffect(() => {
     let ws: WebSocket | undefined
     let retry: number
     let closed = false
     const connect = () => {
-      ws = new WebSocket(`${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/ws`)
-      ws.onopen = () => setState({ objects: {}, edges: [], connected: true }) // server resends everything
-      ws.onmessage = (msg) => {
-        const batch: WatchEvent[] = JSON.parse(msg.data)
-        setState((s) => {
-          const objects = { ...s.objects }
-          let edges = s.edges
-          let { context, stale } = s
-          for (const ev of batch) {
-            if (ev.type === 'SOURCE') context = ev.context
-            else if (ev.type === 'HEALTH') stale = ev.stale
-            else if (ev.type === 'TRAFFIC') edges = ev.edges
-            else if (ev.type === 'DELETED') delete objects[ev.object.metadata.uid]
-            else objects[ev.object.metadata.uid] = ev.object
-          }
-          return { objects, edges, context, stale, connected: true }
-        })
+      const socket = new WebSocket(`${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/ws?telemetry=1`)
+      ws = socket
+      socket.onopen = () => { if (!closed && ws === socket) setState((s) => ({ ...s, connected: true, awaitingSnapshot: true })) }
+      socket.onmessage = (msg) => {
+        if (!closed && ws === socket) setState((s) => reduceWatchMessage(s, msg.data))
       }
-      ws.onclose = () => {
-        if (closed) return
+      socket.onerror = () => socket.close()
+      socket.onclose = () => {
+        if (closed || ws !== socket) return
         setState((s) => ({ ...s, connected: false }))
         retry = window.setTimeout(connect, 1000)
       }
     }
     retry = window.setTimeout(connect, 0)
+    const watchdog = window.setInterval(() => setState(checkSnapshotFreshness), 1000)
     return () => {
       closed = true
       clearTimeout(retry)
+      clearInterval(watchdog)
       ws?.close()
     }
   }, [])
