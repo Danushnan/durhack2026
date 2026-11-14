@@ -19,22 +19,64 @@ sim = demo_cluster()
 live = None
 logger = logging.getLogger(__name__)
 clients: set[WebSocket] = set()
+telemetry_clients: set[WebSocket] = set()
+send_locks: dict[WebSocket, asyncio.Lock] = {}
+
+
+def discard_client(ws):
+    clients.discard(ws)
+    telemetry_clients.discard(ws)
+    send_locks.pop(ws, None)
+
+
+async def send_batch(ws, batch):
+    async with send_locks[ws]:
+        await asyncio.wait_for(ws.send_json(batch), timeout=2)
+
+
+async def broadcast(batch, metrics=None):
+    async def deliver(ws):
+        payload = batch + [metrics] if metrics is not None and ws in telemetry_clients else batch
+        if payload:
+            try:
+                await send_batch(ws, payload)
+            except Exception:
+                discard_client(ws)
+    await asyncio.gather(*(deliver(ws) for ws in list(clients)))
 
 
 async def loop():
-    while True:
-        try:
-            batch = await asyncio.to_thread(live.refresh) if live else sim.tick(time.time())
-        except (OSError, subprocess.SubprocessError, ValueError):
-            logger.warning("Could not refresh Kubernetes context %s", live.context)
+    pending = {}
+    try:
+        while True:
             batch = []
-        if batch:
-            for ws in list(clients):
-                try:
-                    await ws.send_json(batch)
-                except Exception:
-                    clients.discard(ws)
-        await asyncio.sleep(2 if live else TICK_SECONDS)
+            if live:
+                for name, refresh in (("resources", live.refresh_resources), ("logs", live.collect_logs)):
+                    task = pending.get(name)
+                    if task is not None and task.done():
+                        try:
+                            batch.extend(task.result())
+                        except (OSError, subprocess.SubprocessError, ValueError, KeyError, TypeError) as exc:
+                            reason = f"Could not refresh Kubernetes {name} ({type(exc).__name__})"
+                            logger.warning("%s in context %s", reason, live.context)
+                            if name == "resources":
+                                live.telemetry.resource_failed(reason)
+                        pending.pop(name)
+                    if name not in pending:
+                        pending[name] = asyncio.create_task(asyncio.to_thread(refresh))
+                now = time.time()
+                batch.extend(live.update_traffic())
+                batch.append(live.telemetry.health_event(now))
+                metrics = live.telemetry.snapshot(now)
+            else:
+                batch = sim.tick(time.time())
+                metrics = None
+            await broadcast(batch, metrics)
+            await asyncio.sleep(2 if live else TICK_SECONDS)
+    finally:
+        for task in pending.values():
+            task.cancel()
+        await asyncio.gather(*pending.values(), return_exceptions=True)
 
 
 @asynccontextmanager
@@ -49,9 +91,11 @@ async def lifespan(app):
         except (OSError, subprocess.SubprocessError):
             if context:
                 raise
-        if context and live is None:
+        if (context or os.getenv("KUBEVERSE_MODE") == "live") and live is None:
             raise RuntimeError(f"Kubernetes context unavailable: {context}")
     if live is None:
+        if os.getenv("KUBEVERSE_MODE") != "sim":
+            logger.warning("No Kubernetes source discovered; starting the simulator (SOURCE context=null)")
         sim.tick(time.time())
     dsn = os.environ.get("TIGERDATA_DATABASE_URL")
     app.state.telemetry = TigerTelemetry(dsn, sim) if dsn and live is None else None
@@ -72,13 +116,26 @@ app.include_router(router)
 @app.websocket("/ws")
 async def watch(ws: WebSocket):
     await ws.accept()
-    await ws.send_json(live.initial_events() if live else sim.initial_events())
-    clients.add(ws)
+    send_locks[ws] = asyncio.Lock()
+    if ws.query_params.get("telemetry") == "1":
+        telemetry_clients.add(ws)
     try:
+        # Register under the same lock used by broadcasts, so the initial
+        # snapshot always precedes updates even when a refresh finishes here.
+        async with send_locks[ws]:
+            clients.add(ws)
+            initial = live.initial_events() if live else sim.initial_events()
+            if live:
+                initial.append(live.telemetry.health_event(time.time()))
+                if ws in telemetry_clients:
+                    initial.append(live.telemetry.snapshot(time.time()))
+            await asyncio.wait_for(ws.send_json(initial), timeout=2)
         while True:
             await ws.receive_text()  # we never expect messages; this just detects disconnect
     except WebSocketDisconnect:
-        clients.discard(ws)
+        pass
+    finally:
+        discard_client(ws)
 
 
 def require_simulator():

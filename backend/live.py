@@ -2,14 +2,20 @@
 
 import json
 import logging
+import os
 import subprocess
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
+
+from live_telemetry import LiveTelemetry, iso
 
 WINDOW_MS = 5000
 # Architecture manifests (like minishop/architecture.json) declare each app's dependencies, so its
 # Roads exist before the first request and stay when traffic stops.
 MANIFESTS = sorted(Path(__file__).resolve().parent.parent.glob("*/architecture.json"))
+
+logger = logging.getLogger(__name__)
 
 
 def kubectl(*args):
@@ -27,8 +33,24 @@ class LiveCluster:
         self.traffic_namespaces = set()
         self.declared = set()   # (from, to) pairs the workloads say they call
         self.learned = set()    # (from, to) pairs seen in logs since the backend started
+        self.log_pods = ()
+        self.log_cursors = {}
+        self.recovered_restarts = {}
+        self.recovery_started = {}
+        self.recovery_gaps = {}
+        self.telemetry = LiveTelemetry(
+            context, namespace=os.getenv("KUBEVERSE_TELEMETRY_NAMESPACE", "minishop"),
+            window_seconds=float(os.getenv("KUBEVERSE_TELEMETRY_WINDOW_SECONDS", "10")),
+            stale_seconds=float(os.getenv("KUBEVERSE_TELEMETRY_STALE_SECONDS", "10")),
+            error_threshold=float(os.getenv("KUBEVERSE_TELEMETRY_ERROR_THRESHOLD", "0.1")),
+            latency_threshold_ms=float(os.getenv("KUBEVERSE_TELEMETRY_LATENCY_THRESHOLD_MS", "1000")),
+        )
 
     def refresh(self):
+        """Compatibility entry point; the server schedules resources/logs separately."""
+        return self.refresh_resources() + self.collect_logs() + self.update_traffic()
+
+    def refresh_resources(self):
         raw = kubectl(
             "--context", self.context, "--request-timeout=5s", "get",
             "namespaces,nodes,deployments,replicasets,pods,services,events",
@@ -50,6 +72,23 @@ class LiveCluster:
 
         owners = {item["metadata"]["uid"]: controller(item) for item in resources
                   if item["kind"] == "ReplicaSet"}
+        deployment_names = {item["metadata"]["uid"]: item["metadata"]["name"]
+                            for item in resources if item["kind"] == "Deployment"}
+        log_pods = []
+        for item in resources:
+            meta = item["metadata"]
+            if item["kind"] != "Pod" or meta.get("labels", {}).get("app.kubernetes.io/part-of") != "kubeverse-demo":
+                continue
+            deployment = deployment_names.get(owners.get(controller(item)))
+            if deployment is None or not any(c["name"] == "workload" for c in item.get("spec", {}).get("containers", [])):
+                continue
+            status = next((c for c in item.get("status", {}).get("containerStatuses", []) if c["name"] == "workload"), {})
+            pod_ready = next((c["status"] == "True" for c in item.get("status", {}).get("conditions", [])
+                              if c.get("type") == "Ready"), status.get("ready", False))
+            log_pods.append({"uid": meta["uid"], "name": meta["name"], "namespace": meta["namespace"],
+                             "deployment": deployment, "service": f'{meta["namespace"]}/{deployment}',
+                             "ready": status.get("ready", False) and pod_ready, "deleting": bool(meta.get("deletionTimestamp")),
+                             "restarts": status.get("restartCount", 0)})
         current = {}
         for item in resources:
             kind = item["kind"]
@@ -75,33 +114,101 @@ class LiveCluster:
         changes.extend({"type": "DELETED", "object": item}
                        for uid, item in self.objects.items() if uid not in current)
         self.objects = current
+        self.log_pods = tuple(log_pods)
+        self.telemetry.set_resources(
+            {f'{item["metadata"]["namespace"]}/{item["metadata"]["name"]}': item
+             for item in current.values() if item["kind"] == "Deployment"}, log_pods, time.time())
+        return changes
+
+    def collect_logs(self):
+        """One shared collection feeds service measurements and legacy traffic."""
+        pods = self.log_pods
+        active = {pod["uid"] for pod in pods}
+        self.log_cursors = {uid: cursor for uid, cursor in self.log_cursors.items() if uid in active}
+        self.recovered_restarts = {uid: count for uid, count in self.recovered_restarts.items() if uid in active}
+        self.recovery_started = {uid: state for uid, state in self.recovery_started.items() if uid in active}
+        self.recovery_gaps = {uid: until for uid, until in self.recovery_gaps.items()
+                              if uid in active and until > time.time()}
+        for pod in pods:
+            if pod.get("restarts", 0) > self.recovered_restarts.get(pod["uid"], 0):
+                previous = self.recovery_started.get(pod["uid"])
+                if previous is None or previous[0] != pod["restarts"]:
+                    self.recovery_started[pod["uid"]] = (pod["restarts"], time.time())
+                    if pod["restarts"] - self.recovered_restarts.get(pod["uid"], 0) > 1:
+                        self.recovery_gaps[pod["uid"]] = time.time() + self.telemetry.window_seconds + 2
+
+        def read_pod(pod):
+            now = time.time()
+            since = max(now - self.telemetry.window_seconds - 2, self.log_cursors.get(pod["uid"], 0) - 2)
+            args = ("--context", self.context, "--request-timeout=5s", "-n", pod["namespace"],
+                    "logs", pod["name"], "-c", "workload", "--timestamps=true",
+                    f"--since-time={iso(since)}", "--tail=10000")
+            logs, recovery_error, recovered = [], None, False
+            if pod.get("restarts", 0) > self.recovered_restarts.get(pod["uid"], 0):
+                if now - self.recovery_started[pod["uid"]][1] > self.telemetry.window_seconds + 2:
+                    # Unrecoverable prior-container records have left the live
+                    # window. A healthy current stream may become complete again.
+                    recovered = True
+                else:
+                    try:
+                        logs.append(kubectl(*args, "--previous=true"))
+                        recovered = True
+                    except (OSError, subprocess.SubprocessError) as exc:
+                        recovery_error = f'Previous logs unavailable for {pod["namespace"]}/{pod["name"]} ({type(exc).__name__})'
+                        logger.warning(recovery_error)
+            try:
+                logs.append(kubectl(*args))
+            except (OSError, subprocess.SubprocessError) as exc:
+                reason = f'Log collection failed for {pod["namespace"]}/{pod["name"]} ({type(exc).__name__})'
+                logger.warning(reason)
+                return pod, now, since, logs, reason, recovered, False
+            if self.recovery_gaps.get(pod["uid"], 0) > now:
+                recovery_error = f'Multiple restarts observed for {pod["namespace"]}/{pod["name"]}; only latest previous container is recoverable'
+            return pod, now, since, logs, recovery_error, recovered, True
+
+        # Bounded parallel reads keep a multi-replica shop usable on a laptop.
+        with ThreadPoolExecutor(max_workers=4) as pool:
+            futures = [pool.submit(read_pod, pod) for pod in pods]
+            for future in as_completed(futures):
+                pod, now, since, streams, error, recovered, current_ok = future.result()
+                # Ingest separately: current/previous overlap must share event IDs,
+                # rather than receiving different occurrence ordinals.
+                for logs in streams:
+                    self.telemetry.ingest_logs(logs, pod, time.time())
+                truncated = any(len(logs.splitlines()) >= 10000 for logs in streams)
+                if truncated:
+                    logger.warning("Live log limit reached for %s/%s; telemetry window is partial", pod["namespace"], pod["name"])
+                self.telemetry.poll_result(pod["uid"], now, since=since, error=error,
+                                           truncated=truncated, successful_read=current_ok)
+                if recovered:
+                    self.recovered_restarts[pod["uid"]] = pod["restarts"]
+                if current_ok and error is None:
+                    self.log_cursors[pod["uid"]] = now
+        return []
+
+    def update_traffic(self):
+        """Expire roads on the publishing clock even if log reads are blocked."""
+        changes = []
         edges = self.traffic()
         if edges != self.edges:
             self.edges = edges
             changes.append({"type": "TRAFFIC", "edges": edges})
         return changes
 
-    def traffic(self):
+    def traffic(self, now=None):
+        now = time.time() if now is None else now
         buildings = {f'{item["metadata"]["namespace"]}/{item["metadata"]["name"]}'
                      for item in self.objects.values() if item["kind"] == "Deployment"}
-        samples = []
-        for namespace in sorted(self.traffic_namespaces):
-            try:
-                logs = kubectl("--context", self.context, "--request-timeout=5s",
-                               "-n", namespace, "logs", "-l",
-                               "app.kubernetes.io/part-of=kubeverse-demo",
-                               "-c", "workload", "--since=5s", "--tail=100",
-                               "--ignore-errors=true")
-            except (OSError, subprocess.SubprocessError):
-                logging.getLogger(__name__).debug("Could not read demo logs in %s", namespace)
-                continue
-            samples += parse_samples(logs, namespace)
-        edges = summarize(samples, buildings, self.declared | self.learned, time.time() * 1000)
+        samples = [{"from": row.source, "to": row.target, "at": row.observed_at * 1000,
+                    "outcome": outcome({"status": row.status, "event": row.event, "error": row.error}),
+                    "latency": None if row.operation == "orders.transaction" else row.latency_ms}
+                   for row in self.telemetry.edge_observations(now)]
+        edges = summarize(samples, buildings, self.declared | self.learned, now * 1000)
         self.learned |= {(e["from"], e["to"]) for e in edges if e["requests"]}
         return edges
 
     def initial_events(self):
-        return [{"type": "SOURCE", "context": self.context}] + [
+        return [{"type": "SOURCE", "context": self.context, "mode": "live"}] + [
             {"type": "ADDED", "object": item} for item in self.objects.values()
         ] + [{"type": "TRAFFIC", "edges": self.edges}]
 
@@ -116,7 +223,7 @@ def discover(context=None):
     for name in contexts:
         cluster = LiveCluster(name)
         try:
-            cluster.refresh()
+            cluster.refresh_resources()
         except (OSError, subprocess.SubprocessError):
             if context:
                 raise
@@ -146,7 +253,7 @@ def declared_calls(resources):
         if item["kind"] != "Deployment":
             continue
         namespace, name = item["metadata"]["namespace"], item["metadata"]["name"]
-        for container in item["spec"]["template"]["spec"].get("containers", []):
+        for container in item.get("spec", {}).get("template", {}).get("spec", {}).get("containers", []):
             for env in container.get("env", []):
                 value = env.get("value") or ""
                 try:
