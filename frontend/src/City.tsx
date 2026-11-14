@@ -4,7 +4,7 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useRef } from 'react'
 import * as THREE from 'three'
 import {
   type ClusterState, type Edge, type K8sObject, deploymentHealth, describePod, HEALTH_COLOR, isWorkload,
-  keyOf, NODE_COLORS, podsOf, podStatus, rolloutOf, STATUS_COLOR, versionColor,
+  keyOf, NODE_COLORS, nodeReady, podsOf, podStatus, rolloutOf, STATUS_COLOR, versionColor,
 } from './k8s'
 import { FacadeSign, Landmark, type LandmarkInfo, landmarkFor } from './landmarks'
 import { BUILDING, buildRoads, carTrip, type CityLayout, checkRoads, KERB, layoutCity, offsetPath, Path, ROAD_W } from './layout'
@@ -119,7 +119,7 @@ function GroundText({ text, height, position, color }: { text: string; height: n
 function Ground({ layout, theme }: { layout: CityLayout; theme: Theme }) {
   return (
     <group>
-      <mesh rotation-x={-Math.PI / 2} position={[0, -0.02, 0]} receiveShadow>
+      <mesh rotation-x={-Math.PI / 2} position={[0, -0.08, 0]} receiveShadow>
         <planeGeometry args={[900, 900]} />
         <meshStandardMaterial color={theme.ground} />
       </mesh>
@@ -184,8 +184,8 @@ function Road({ pts, edge, emphasis, theme, measured }: {
     <group>
       <mesh geometry={geo.kerb} receiveShadow><meshStandardMaterial color={theme.kerb} side={THREE.DoubleSide} /></mesh>
       <mesh geometry={geo.asphalt} receiveShadow><meshStandardMaterial color={theme.street} roughness={0.95} side={THREE.DoubleSide} /></mesh>
-      <mesh geometry={geo.left}>{glow}</mesh>
-      <mesh geometry={geo.right}>{glow}</mesh>
+      <mesh geometry={geo.left} renderOrder={edge.healthy ? 1 : 2}>{glow}</mesh>
+      <mesh geometry={geo.right} renderOrder={edge.healthy ? 1 : 2}>{glow}</mesh>
       <Marks pts={pts} every={2.6} offset={0} start={4} geometry={dash} color={theme.laneMark} opacity={0.9 * dim} />
       <Marks pts={pts} every={13} offset={ROAD_W / 4} start={7} geometry={arrow} color={theme.laneMark} opacity={0.55 * dim} />
     </group>
@@ -263,7 +263,7 @@ function Plot({ position, empty, theme }: { position: THREE.Vector3; empty: bool
 
 function tagFor(dep: K8sObject, info: LandmarkInfo, state: ServiceState[string] | undefined, theme: Theme,
   rollout: ReturnType<typeof rolloutOf>): { lines: TextLine[]; border: string } {
-  const ready = dep.status.readyReplicas ?? 0, want = dep.spec.replicas
+  const ready = dep.status?.readyReplicas ?? 0, want = dep.spec.replicas
   const health = deploymentHealth(dep)
   const title: TextLine = { text: `${info.emoji} ${dep.metadata.name}`, px: 56, color: theme.labelFg }
   const night = theme.mode === 'night'
@@ -356,7 +356,7 @@ function PowerStation({ node, pos, used, color, theme, onHover, selected, onSele
   node: K8sObject; pos: THREE.Vector3; used: number; color: string; theme: Theme; onHover: OnHover
   selected: boolean; onSelect: () => void
 }) {
-  const ready = node.status.conditions[0].status === 'True'
+  const ready = nodeReady(node)
   const cordoned = !!node.spec?.unschedulable
   const drain: string = node.metadata.annotations?.['kubeverse.io/drain'] ?? ''
   const capacity = Number(node.status.capacity.pods)
@@ -820,7 +820,7 @@ export function City({ cluster, selected, onSelect, powerGrid, theme, onHover, s
     !p.metadata.deletionTimestamp && p.status?.containerStatuses?.[0]?.ready).map((p) => p.metadata.uid)
 
   return (
-    <Canvas shadows camera={{ position: [0, 60, 80], fov: 45 }} onPointerMissed={() => onSelect(null)}>
+    <Canvas shadows camera={{ position: [0, 60, 80], fov: 45, near: 1, far: 900 }} onPointerMissed={() => onSelect(null)}>
       <color attach="background" args={[theme.sky]} />
       <fog attach="fog" args={[theme.sky, ...theme.fog]} />
       <ambientLight intensity={theme.ambient} />

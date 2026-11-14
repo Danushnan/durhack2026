@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react'
 import { City, type HoverInfo, type ServiceState } from './City'
 import {
   ACTION_FAILED, api, deploymentHealth, describeDeployment, describePod, FRIENDLY, HEALTH_COLOR, isWorkload, type K8sObject, keyOf, NODE_COLORS,
-  podsOf, type PodStatus, podStatus, rolloutOf, versionColor, STATUS_COLOR, useCluster,
+  nodeReady, podsOf, type PodStatus, podStatus, rolloutOf, versionColor, STATUS_COLOR, useCluster,
 } from './k8s'
 import { landmarkFor } from './landmarks'
 import { COMPONENTS, downServices, explain, impactChain, kubectl, nameOf, roleOf } from './teach'
@@ -40,7 +40,7 @@ export default function App() {
     Number(b.metadata.uid.slice(3)) - Number(a.metadata.uid.slice(3)))
   const dep = deployments.find((o) => keyOf(o) === selected)
   const node = selected?.startsWith('node:') ? nodes.find((n) => n.metadata.name === selected.slice(5)) : undefined
-  const sim = cluster.connected && !cluster.live // simulator-only actions are hidden when watching a real cluster
+  const sim = cluster.connected && !cluster.context // simulator-only actions are hidden when watching a real cluster
   const rush = all.some((o) => o.kind === 'Ingress' && o.status?.['kubeverse.io/rush-hour'])
 
   const down = downServices(deployments)
@@ -49,7 +49,7 @@ export default function App() {
     return [k, { down: down.has(k), chain: down.has(k) ? null : impactChain(k, cluster.edges, down) }]
   }))
   const unhealthyPods = all.some((o) => o.kind === 'Pod' && podStatus(o) !== 'Running')
-  const outages = nodes.filter((n) => n.status.conditions[0].status !== 'True')
+  const outages = nodes.filter((n) => !nodeReady(n))
 
   return (
     <div className={`app ${mode}`}>
@@ -61,8 +61,8 @@ export default function App() {
         <h1>Kuebec <small>Port Kube</small></h1>
         <span className={`dot ${cluster.connected ? 'on' : ''}`} title={cluster.connected ? 'Live' : 'Reconnecting…'}
           aria-label={cluster.connected ? 'Live' : 'Reconnecting'} />
-        {cluster.live && <span className="badge" title="Watching a real Kubernetes cluster through kubectl. Simulator controls are hidden.">
-          live cluster · {cluster.live} · read-only</span>}
+        {cluster.context && <span className="badge" title="Watching a real Kubernetes cluster through kubectl. Simulator controls are hidden.">
+          live cluster · {cluster.context} · read-only{cluster.stale ? ' · ⚠ data may be stale' : ''}</span>}
       </header>
 
       <nav className="hud controls" aria-label="View controls">
@@ -112,7 +112,7 @@ export default function App() {
           <span className="emoji">🏛️</span>{sidebar && <span className="svc-text"><b>City Hall</b><small>control plane</small></span>}
         </button>
         {nodes.map((n, i) => {
-          const ready = n.status.conditions[0].status === 'True'
+          const ready = nodeReady(n)
           return (
             <button key={n.metadata.uid} className={`svc ${selected === `node:${n.metadata.name}` ? 'sel' : ''}`}
               onClick={() => setSelected(`node:${n.metadata.name}`)} aria-label={`Power Station ${n.metadata.name}`}>
@@ -245,7 +245,7 @@ function Action({ label, hint, cmd, onClick, bad, disabled }: {
 function DesiredActual({ dep, pods }: { dep: K8sObject; pods: K8sObject[] }) {
   const r = rolloutOf(dep, pods)
   const want: number = dep.spec.replicas
-  const ready = dep.status.readyReplicas ?? 0
+  const ready = dep.status?.readyReplicas ?? 0
   const versions = Object.entries(r.byVersion).sort(([a], [b]) => a.localeCompare(b, undefined, { numeric: true }))
   const old = versions.filter(([v]) => v !== r.version)
   const doing = r.stalled
@@ -352,7 +352,7 @@ function Inspect({ dep, all, events, states, edges, sim, onPick, onClose }: {
         </div>
         {stateful && <p className="endpoints muted">StatefulSets update one numbered Pod at a time in reverse order; releases are not simulated for them here.</p>}
       </> : <p className="endpoints muted">Watching a real cluster: read-only.</p>}
-      <h3>Units <small>(Pods) · {dep.status.readyReplicas ?? 0} of {replicas} ready</small></h3>
+      <h3>Units <small>(Pods) · {dep.status?.readyReplicas ?? 0} of {replicas} ready</small></h3>
       <table>
         <tbody>
           {pods.map((p) => {
@@ -381,7 +381,7 @@ function Inspect({ dep, all, events, states, edges, sim, onPick, onClose }: {
 /** A Power Station (Node): its Pods, and the two very different ways of taking it away. */
 function StationPanel({ node, all, sim, onClose }: { node: K8sObject; all: K8sObject[]; sim: boolean; onClose: () => void }) {
   const name = node.metadata.name
-  const ready = node.status.conditions[0].status === 'True'
+  const ready = nodeReady(node)
   const cordoned = !!node.spec?.unschedulable
   const drain: string = node.metadata.annotations?.['kubeverse.io/drain'] ?? ''
   const pods = all.filter((o) => o.kind === 'Pod' && o.spec?.nodeName === name)

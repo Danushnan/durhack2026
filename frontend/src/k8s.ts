@@ -3,6 +3,7 @@ import { useEffect, useState } from 'react'
 // Trimmed Kubernetes object shapes, as streamed by the backend's watch.
 export interface K8sObject {
   kind: string
+  deploymentUid?: string
   metadata: {
     name: string
     namespace?: string
@@ -29,6 +30,7 @@ export interface Edge { from: string; to: string; rps: number; healthy: boolean;
 
 type WatchEvent =
   | { type: 'ADDED' | 'MODIFIED' | 'DELETED'; object: K8sObject }
+  | { type: 'HEALTH'; stale: boolean; lastRefresh: number | null }
   | { type: 'TRAFFIC'; edges: Edge[] }
   | { type: 'SOURCE'; context: string | null } // null: the simulator; otherwise a live cluster's kubectl context
 
@@ -36,15 +38,23 @@ export interface ClusterState {
   objects: Record<string, K8sObject> // by uid
   edges: Edge[]
   connected: boolean
-  live: string | null // kubectl context when watching a real cluster (read-only); null for the simulator
+  context?: string | null // kubectl context when watching a real cluster (read-only); null/absent for the simulator
+  stale?: boolean          // live mode: the last refresh from the cluster failed
 }
 
 /** Deployments and StatefulSets are both drawn as Buildings. */
 export const isWorkload = (o: K8sObject) => o.kind === 'Deployment' || o.kind === 'StatefulSet'
 
-/** A workload's Pods: by the app label (simulator), or by owner (live clusters strip labels). */
-export const podsOf = (w: K8sObject, pods: K8sObject[]) => pods.filter((p) => p.metadata.namespace === w.metadata.namespace &&
-  (p.metadata.labels?.app === w.metadata.name || (p as { deploymentUid?: string }).deploymentUid === w.metadata.uid))
+export const nodeReady = (node: K8sObject) =>
+  node.status?.conditions?.some((condition: { type: string; status: string }) =>
+    condition.type === 'Ready' && condition.status === 'True') ?? false
+
+/** A Pod belongs to a workload by owner (live clusters strip labels) or by its app label (simulator). */
+export const belongsTo = (pod: K8sObject, dep: K8sObject) =>
+  pod.metadata.namespace === dep.metadata.namespace &&
+  (pod.deploymentUid ? pod.deploymentUid === dep.metadata.uid : pod.metadata.labels?.app === dep.metadata.name)
+
+export const podsOf = (w: K8sObject, pods: K8sObject[]) => pods.filter((p) => belongsTo(p, w))
 
 export const keyOf = (o: { metadata: { namespace?: string; name: string } }) =>
   `${o.metadata.namespace}/${o.metadata.name}`
@@ -142,39 +152,42 @@ export const HEALTH_COLOR: Record<Health, string> = { healthy: '#22d3ee', degrad
 export const NODE_COLORS = ['#38bdf8', '#c084fc', '#4ade80', '#fb7185', '#fbbf24']
 
 export function useCluster(): ClusterState {
-  const [state, setState] = useState<ClusterState>({ objects: {}, edges: [], connected: false, live: null })
+  const [state, setState] = useState<ClusterState>({ objects: {}, edges: [], connected: false })
 
   useEffect(() => {
-    let ws: WebSocket
+    let ws: WebSocket | undefined
     let retry: number
     let closed = false
     const connect = () => {
       ws = new WebSocket(`${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/ws`)
-      ws.onopen = () => setState({ objects: {}, edges: [], connected: true, live: null }) // server resends everything
+      ws.onopen = () => setState({ objects: {}, edges: [], connected: true }) // server resends everything
       ws.onmessage = (msg) => {
         const batch: WatchEvent[] = JSON.parse(msg.data)
         setState((s) => {
           const objects = { ...s.objects }
-          let edges = s.edges, live = s.live
+          let edges = s.edges
+          let { context, stale } = s
           for (const ev of batch) {
-            if (ev.type === 'SOURCE') live = ev.context
+            if (ev.type === 'SOURCE') context = ev.context
+            else if (ev.type === 'HEALTH') stale = ev.stale
             else if (ev.type === 'TRAFFIC') edges = ev.edges
             else if (ev.type === 'DELETED') delete objects[ev.object.metadata.uid]
             else objects[ev.object.metadata.uid] = ev.object
           }
-          return { objects, edges, connected: true, live }
+          return { objects, edges, context, stale, connected: true }
         })
       }
       ws.onclose = () => {
+        if (closed) return
         setState((s) => ({ ...s, connected: false }))
-        if (!closed) retry = window.setTimeout(connect, 1000)
+        retry = window.setTimeout(connect, 1000)
       }
     }
-    connect()
+    retry = window.setTimeout(connect, 0)
     return () => {
       closed = true
       clearTimeout(retry)
-      ws.close()
+      ws?.close()
     }
   }, [])
 
