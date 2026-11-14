@@ -1,11 +1,15 @@
 import asyncio
+import os
 import time
 from contextlib import asynccontextmanager
+from pathlib import Path
 
+from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel, Field
 
 from sim import MAX_REPLICAS, demo_cluster
+from telemetry import TigerTelemetry, router, stop_task
 
 TICK_SECONDS = 0.5
 sim = demo_cluster()
@@ -25,14 +29,23 @@ async def loop():
 
 
 @asynccontextmanager
-async def lifespan(_):
+async def lifespan(app):
+    load_dotenv(Path(__file__).with_name(".env"))
+    dsn = os.environ.get("TIGERDATA_DATABASE_URL")
+    app.state.telemetry = TigerTelemetry(dsn, sim) if dsn else None
     sim.tick(time.time())
     task = asyncio.create_task(loop())
-    yield
-    task.cancel()
+    ingestion = asyncio.create_task(app.state.telemetry.ingest()) if dsn else None
+    try:
+        yield
+    finally:
+        await stop_task(task)
+        if ingestion is not None:
+            await stop_task(ingestion)
 
 
 app = FastAPI(title="KubeVerse Simulated Cluster", lifespan=lifespan)
+app.include_router(router)
 
 
 @app.websocket("/ws")
