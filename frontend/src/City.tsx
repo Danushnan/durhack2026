@@ -1,5 +1,5 @@
 import { Canvas, type ThreeEvent, useFrame, useThree } from '@react-three/fiber'
-import { Edges, OrbitControls } from '@react-three/drei'
+import { Edges, Line, OrbitControls } from '@react-three/drei'
 import { useEffect, useMemo, useRef } from 'react'
 import * as THREE from 'three'
 import {
@@ -12,6 +12,7 @@ import { Scenery } from './scenery'
 import { nameOf, roleOf } from './teach'
 import { textTexture, type TextLine } from './textures'
 import type { Theme } from './theme'
+import { routeKey, trafficColor, type RouteMetrics, type ServiceMetrics } from './Telemetry'
 
 export interface HoverInfo { title: string; lines: string[]; x: number; y: number }
 type OnHover = (h: HoverInfo | null) => void
@@ -146,15 +147,16 @@ function tagFor(dep: K8sObject, info: LandmarkInfo, state: ServiceState[string] 
   return { lines: [title, { text: `${info.title} · ${ready}/${want} ready`, px: 40, color }], border: HEALTH_COLOR[health] }
 }
 
-function Building({ dep, info, pods, pos, selected, onSelect, powerGrid, nodeColors, theme, onHover, state }: {
+function Building({ dep, info, pods, pos, selected, onSelect, powerGrid, nodeColors, theme, onHover, state, metric }: {
   dep: K8sObject; info: LandmarkInfo; pods: K8sObject[]; pos: THREE.Vector3; selected: boolean; onSelect: () => void
   powerGrid: boolean; nodeColors: Record<string, string>; theme: Theme; onHover: OnHover; state?: ServiceState[string]
+  metric?: ServiceMetrics
 }) {
   const health = deploymentHealth(dep)
   const desired: number = dep.spec.replicas
   const sorted = [...pods].sort((a, b) => (a.metadata.creationTimestamp ?? '').localeCompare(b.metadata.creationTimestamp ?? ''))
   const plots = Math.max(0, desired - sorted.filter((p) => !p.metadata.deletionTimestamp).length)
-  const glow = state?.chain && health === 'healthy' ? AMBER : HEALTH_COLOR[health]
+  const glow = metric ? trafficColor(metric, metric.anomaly) : state?.chain && health === 'healthy' ? AMBER : HEALTH_COLOR[health]
   const role = roleOf(dep.metadata.name)
   const hover = (e: ThreeEvent<PointerEvent>) => {
     e.stopPropagation()
@@ -281,12 +283,13 @@ function Car({ color, theme, hazards }: { color: string; theme: Theme; hazards: 
   )
 }
 
-function Traffic({ edge, layout, theme, accent, onHover }: {
-  edge: Edge; layout: CityLayout; theme: Theme; accent: string; onHover: OnHover
+function Traffic({ edge, layout, theme, accent, onHover, metric }: {
+  edge: Edge; layout: CityLayout; theme: Theme; accent: string; onHover: OnHover; metric?: RouteMetrics
 }) {
-  const { fwd, back } = useMemo(() => {
+  const { fwd, back, road } = useMemo(() => {
     const centre = routeBetween(layout, edge.from, edge.to)
-    return { fwd: new Path(laneOffset(centre)), back: new Path(laneOffset([...centre].reverse())) }
+    return { fwd: new Path(laneOffset(centre)), back: new Path(laneOffset([...centre].reverse())),
+      road: centre.map((point) => point.clone().add(new THREE.Vector3(0, 0.045, 0))) }
   }, [layout, edge.from, edge.to])
   const count = Math.ceil(edge.rps)
   const refs = useRef<(THREE.Group | null)[]>([])
@@ -306,13 +309,19 @@ function Traffic({ edge, layout, theme, accent, onHover }: {
       g.rotation.y = heading
     })
   })
-  const color = edge.healthy ? accent : '#ef4444'
+  const color = metric ? trafficColor(metric) : edge.healthy ? accent : '#ef4444'
   const [src, dst] = [nameOf(edge.from), nameOf(edge.to)]
   return (
     <group>
+      {metric && <Line points={road} color={color} lineWidth={2} />}
       {Array.from({ length: count }, (_, i) => (
         <group key={i} ref={(g) => { refs.current[i] = g }}
-          onPointerOver={(e) => { e.stopPropagation(); onHover({ title: `🚗 Request: ${src} → ${dst}`, lines: [edge.healthy ? 'Delivered successfully.' : `Failed: ${dst} has no working Units, so the car turns back.`, `${edge.rps} requests/second on this route.`], ...at(e) }) }}
+          onPointerOver={(e) => { e.stopPropagation(); onHover({
+            title: `🚗 Request: ${src} → ${dst}`,
+            lines: metric ? [`${metric.requests} requests in 10 seconds`, `${Math.round(metric.latency_ms)} ms average · ${(metric.error_rate * 100).toFixed(1)}% errors`]
+              : [edge.healthy ? 'Delivered successfully.' : `Failed: ${dst} has no working Units, so the car turns back.`, `${edge.rps} requests/second on this route.`],
+            ...at(e),
+          }) }}
           onPointerOut={() => onHover(null)}>
           <Car color={color} theme={theme} hazards={!edge.healthy} />
         </group>
@@ -356,7 +365,8 @@ function CameraRig({ focus, home }: { focus: THREE.Vector3 | null; home: THREE.V
 
 // ---------- the City ----------
 
-export function City({ cluster, selected, onSelect, powerGrid, theme, onHover, states }: {
+export function City({ cluster, selected, onSelect, powerGrid, theme, onHover, states, serviceMetrics, routeMetrics, replay }: {
+  serviceMetrics: Record<string, ServiceMetrics>; routeMetrics: Record<string, RouteMetrics>; replay: boolean
   cluster: ClusterState; selected: string | null; onSelect: (key: string | null) => void
   powerGrid: boolean; theme: Theme; onHover: OnHover; states: ServiceState
 }) {
@@ -397,14 +407,17 @@ export function City({ cluster, selected, onSelect, powerGrid, theme, onHover, s
         return (
           <Building key={dep.metadata.uid} dep={dep} info={landmarkFor(dep.metadata.name)} pos={lot.center}
             selected={selected === key} onSelect={() => onSelect(key)} powerGrid={powerGrid} nodeColors={nodeColors}
-            theme={theme} onHover={onHover} state={states[key]}
+            theme={theme} onHover={onHover} state={states[key]} metric={serviceMetrics[key]}
             pods={pods.filter((p) => p.metadata.namespace === dep.metadata.namespace && p.metadata.labels?.app === dep.metadata.name)} />
         )
       })}
-      {edges.map((e) => (
-        <Traffic key={`${e.from}->${e.to}`} edge={e} layout={layout} theme={theme} onHover={onHover}
-          accent={landmarkFor(nameOf(e.from)).accent} />
-      ))}
+      {edges.map((e) => {
+        const metric = routeMetrics[routeKey(e.from, e.to)]
+        if (replay && !metric) return null
+        const edge = metric ? { ...e, rps: metric.rps, healthy: metric.error_rate < 0.1 } : e
+        return <Traffic key={routeKey(e.from, e.to)} edge={edge} layout={layout} theme={theme} onHover={onHover}
+          accent={landmarkFor(nameOf(e.from)).accent} metric={metric} />
+      })}
       <OrbitControls makeDefault maxPolarAngle={Math.PI / 2.15} minDistance={8} maxDistance={140} />
       <CameraRig focus={focus} home={layout.focus} />
     </Canvas>

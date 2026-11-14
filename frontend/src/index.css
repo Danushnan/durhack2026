@@ -60,6 +60,17 @@ button.small { padding: 2px 8px; font-size: 11px; }
 .controls button { width: 34px; height: 34px; padding: 0; font-size: 16px; font-weight: 700; }
 .controls button.on { border-color: var(--accent); color: var(--accent); }
 
+.telemetry { top: 60px; left: 60px; width: 390px; max-width: calc(100vw - 72px);
+  max-height: calc(100vh - 120px); overflow: auto; z-index: 21; }
+.telemetry h2 { margin: 4px 30px 0 0; font-size: 16px; }
+.telemetry p { margin: 6px 0 10px; }
+.telemetry-time { display: flex; justify-content: space-between; align-items: center; gap: 6px; }
+.telemetry input { width: 100%; accent-color: var(--accent); }
+.telemetry table { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; }
+.telemetry th, .telemetry td { text-align: left; padding: 4px; border-bottom: 1px solid var(--border); }
+.telemetry details { margin: 6px 0; }
+.telemetry summary { cursor: pointer; }
+
 .banner { top: 12px; left: 50%; transform: translateX(-50%); max-width: min(640px, calc(100vw - 340px));
   border-color: var(--red); line-height: 1.5; padding: 8px 14px; }
 
