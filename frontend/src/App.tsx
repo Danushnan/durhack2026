@@ -1,7 +1,7 @@
 import { useState } from 'react'
 import { City, type HoverInfo, type ServiceState } from './City'
 import {
-  api, deploymentHealth, describeDeployment, describePod, FRIENDLY, HEALTH_COLOR, type K8sObject, keyOf, NODE_COLORS,
+  api, belongsTo, nodeReady, deploymentHealth, describeDeployment, describePod, FRIENDLY, HEALTH_COLOR, type K8sObject, keyOf, NODE_COLORS,
   type PodStatus, podStatus, STATUS_COLOR, useCluster,
 } from './k8s'
 import { landmarkFor } from './landmarks'
@@ -39,7 +39,7 @@ export default function App() {
     return [k, { down: down.has(k), chain: down.has(k) ? null : impactChain(k, cluster.edges, down) }]
   }))
   const unhealthyPods = all.some((o) => o.kind === 'Pod' && podStatus(o) !== 'Running')
-  const outages = nodes.filter((n) => n.status.conditions[0].status !== 'True')
+  const outages = nodes.filter((n) => !nodeReady(n))
 
   return (
     <div className={`app ${mode}`}>
@@ -92,7 +92,7 @@ export default function App() {
         })}
       </aside>
 
-      {dep && <Inspect dep={dep} all={all} events={events} states={states} edges={cluster.edges} onPick={setSelected} onClose={() => setSelected(null)} />}
+      {dep && <Inspect readOnly={!!cluster.context} dep={dep} all={all} events={events} states={states} edges={cluster.edges} onPick={setSelected} onClose={() => setSelected(null)} />}
 
       {(powerGrid || unhealthyPods) && (
         <div className="hud legend" aria-label="Legend">
@@ -196,13 +196,13 @@ function Action({ label, hint, onClick, bad, disabled }: { label: string; hint: 
   )
 }
 
-function Inspect({ dep, all, events, states, edges, onPick, onClose }: {
-  dep: K8sObject; all: K8sObject[]; events: K8sObject[]; states: ServiceState
+function Inspect({ readOnly, dep, all, events, states, edges, onPick, onClose }: {
+  readOnly: boolean; dep: K8sObject; all: K8sObject[]; events: K8sObject[]; states: ServiceState
   edges: { from: string; to: string }[]; onPick: (k: string) => void; onClose: () => void
 }) {
   const ns = dep.metadata.namespace!, name = dep.metadata.name, key = keyOf(dep)
   const info = landmarkFor(name), role = roleOf(name), state = states[key]
-  const pods = all.filter((o) => o.kind === 'Pod' && o.metadata.namespace === ns && o.metadata.labels?.app === name)
+  const pods = all.filter((o) => o.kind === 'Pod' && belongsTo(o, dep))
     .sort((a, b) => (a.metadata.creationTimestamp ?? '').localeCompare(b.metadata.creationTimestamp ?? ''))
   const mine = events.filter((e) => e.involvedObject?.namespace === ns &&
     (e.involvedObject.name === name || e.involvedObject.name.startsWith(`${name}-`))).slice(0, 6)
@@ -232,17 +232,19 @@ function Inspect({ dep, all, events, states, edges, onPick, onClose }: {
         {dependsOn.length > 0 && <><dt>Needs</dt><dd>{dependsOn.map(chip)}</dd></>}
         {usedBy.length > 0 && <><dt>Used by</dt><dd>{usedBy.map(chip)}</dd></>}
       </dl>
-      <h3>Try it</h3>
-      <div className="actions">
-        <Action label="➕ Add Unit" hint="Desired +1: Kubernetes creates a Pod" disabled={replicas >= 10}
-          onClick={() => api.scale(ns, name, replicas + 1)} />
-        <Action label="➖ Remove Unit" hint="Desired −1: Kubernetes stops one" disabled={replicas <= 0}
-          onClick={() => api.scale(ns, name, replicas - 1)} />
-        {sabotaged
-          ? <Action label="🔧 Repair" hint="Next restart succeeds" onClick={() => api.sabotage(ns, name, false)} />
-          : <Action bad label="💣 Sabotage" hint="Pods crash; see who's impacted" onClick={() => api.sabotage(ns, name, true)} />}
-      </div>
-      <h3>Units <small>(Pods) · {dep.status.readyReplicas ?? 0} of {replicas} ready</small></h3>
+      {!readOnly && <>
+        <h3>Try it</h3>
+        <div className="actions">
+          <Action label="➕ Add Unit" hint="Desired +1: Kubernetes creates a Pod" disabled={replicas >= 10}
+            onClick={() => api.scale(ns, name, replicas + 1)} />
+          <Action label="➖ Remove Unit" hint="Desired −1: Kubernetes stops one" disabled={replicas <= 0}
+            onClick={() => api.scale(ns, name, replicas - 1)} />
+          {sabotaged
+            ? <Action label="🔧 Repair" hint="Next restart succeeds" onClick={() => api.sabotage(ns, name, false)} />
+            : <Action bad label="💣 Sabotage" hint="Pods crash; see who's impacted" onClick={() => api.sabotage(ns, name, true)} />}
+        </div>
+      </>}
+      <h3>Units <small>(Pods) · {dep.status?.readyReplicas ?? 0} of {replicas} ready</small></h3>
       <table>
         <tbody>
           {pods.map((p) => {
@@ -251,9 +253,9 @@ function Inspect({ dep, all, events, states, edges, onPick, onClose }: {
               <tr key={p.metadata.uid}>
                 <td><i style={{ background: STATUS_COLOR[s] }} />{p.metadata.name}</td>
                 <td>{describePod(p)}<small>{s}</small></td>
-                <td title="Restarts">↻ {p.status.containerStatuses[0].restartCount}</td>
+                <td title="Restarts">↻ {p.status?.containerStatuses?.[0]?.restartCount ?? 0}</td>
                 <td title="Node (Power Station)">{p.spec.nodeName ?? '—'}</td>
-                <td>{s !== 'Terminating' && (
+                <td>{!readOnly && s !== 'Terminating' && (
                   <button className="bad small" title="Delete this Pod and watch Kubernetes replace it"
                     onClick={() => api.demolish(ns, p.metadata.name)}>Demolish</button>
                 )}</td>

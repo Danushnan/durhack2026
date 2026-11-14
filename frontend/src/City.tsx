@@ -3,7 +3,7 @@ import { Edges, OrbitControls } from '@react-three/drei'
 import { useEffect, useMemo, useRef } from 'react'
 import * as THREE from 'three'
 import {
-  api, type ClusterState, type Edge, type K8sObject, deploymentHealth, describePod, HEALTH_COLOR,
+  api, belongsTo, nodeReady, type ClusterState, type Edge, type K8sObject, deploymentHealth, describePod, HEALTH_COLOR,
   keyOf, NODE_COLORS, podStatus, STATUS_COLOR,
 } from './k8s'
 import { FacadeSign, Landmark, type LandmarkInfo, landmarkFor } from './landmarks'
@@ -104,7 +104,7 @@ function GroundText({ text, height, position, color }: { text: string; height: n
 function Ground({ layout, theme }: { layout: CityLayout; theme: Theme }) {
   return (
     <group>
-      <mesh rotation-x={-Math.PI / 2} position={[0, -0.02, 0]} receiveShadow>
+      <mesh rotation-x={-Math.PI / 2} position={[0, -0.08, 0]} receiveShadow>
         <planeGeometry args={[900, 900]} />
         <meshStandardMaterial color={theme.ground} />
       </mesh>
@@ -131,7 +131,7 @@ function Road({ pts, edge, emphasis, theme, measured }: {
   return (
     <group>
       <mesh geometry={asphalt} receiveShadow><meshStandardMaterial color={theme.street} side={THREE.DoubleSide} /></mesh>
-      <mesh geometry={line}><meshBasicMaterial color={color} toneMapped={false} transparent opacity={emphasis === 'dim' ? 0.25 : 1} side={THREE.DoubleSide} /></mesh>
+      <mesh geometry={line} renderOrder={edge.healthy ? 1 : 2}><meshBasicMaterial color={color} toneMapped={false} transparent depthWrite={false} opacity={emphasis === 'dim' ? 0.25 : 1} side={THREE.DoubleSide} /></mesh>
     </group>
   )
 }
@@ -187,7 +187,7 @@ function Plot({ position, empty, theme }: { position: THREE.Vector3; empty: bool
 }
 
 function tagFor(dep: K8sObject, info: LandmarkInfo, state: ServiceState[string] | undefined, theme: Theme): { lines: TextLine[]; border: string } {
-  const ready = dep.status.readyReplicas ?? 0, want = dep.spec.replicas
+  const ready = dep.status?.readyReplicas ?? 0, want = dep.spec.replicas
   const health = deploymentHealth(dep)
   const title: TextLine = { text: `${info.emoji} ${dep.metadata.name}`, px: 56, color: theme.labelFg }
   const night = theme.mode === 'night'
@@ -241,10 +241,10 @@ function Building({ dep, info, pods, pos, selected, onSelect, powerGrid, nodeCol
 
 // ---------- Power Stations (Nodes) ----------
 
-function PowerStation({ node, pos, used, color, theme, onHover }: {
-  node: K8sObject; pos: THREE.Vector3; used: number; color: string; theme: Theme; onHover: OnHover
+function PowerStation({ readOnly, node, pos, used, color, theme, onHover }: {
+  readOnly: boolean; node: K8sObject; pos: THREE.Vector3; used: number; color: string; theme: Theme; onHover: OnHover
 }) {
-  const ready = node.status.conditions[0].status === 'True'
+  const ready = nodeReady(node)
   const capacity = Number(node.status.capacity.pods)
   const name = node.metadata.name
   const night = theme.mode === 'night'
@@ -300,7 +300,7 @@ function PowerStation({ node, pos, used, color, theme, onHover }: {
       {[3.6, 4.8].map((x) => <mesh key={x} position={[x, 0.55, 2]} castShadow><boxGeometry args={[0.9, 1.1, 0.9]} /><meshStandardMaterial color={night ? '#55627d' : '#a8b0bc'} /></mesh>)}
       <FacadeSign text="POWER STATION" width={3.8} pos={[-1.2, 2.25, 3.23]} bg={ready ? color : '#7f1d1d'} theme={theme} />
       <mesh position={[0, 2.6, 0]} visible={false} onPointerOver={hover} onPointerMove={hover} onPointerOut={() => onHover(null)}
-        onClick={(e) => { e.stopPropagation(); onHover(null); api.outage(name, ready) }}>
+        onClick={(e) => { e.stopPropagation(); onHover(null); if (!readOnly) void api.outage(name, ready) }}>
         <boxGeometry args={[12, 5.2, 9.5]} />
       </mesh>
       <Tag theme={theme} position={[-0.5, 7, 0]} border={ready ? color : RED} size={0.036}
@@ -505,7 +505,7 @@ export function City({ cluster, selected, onSelect, powerGrid, theme, onHover, s
   const ready = deployments.length > 0
 
   return (
-    <Canvas shadows camera={{ position: [0, 60, 80], fov: 45 }} onPointerMissed={() => onSelect(null)}>
+    <Canvas shadows camera={{ position: [0, 60, 80], fov: 45, near: 1, far: 900 }} onPointerMissed={() => onSelect(null)}>
       <color attach="background" args={[theme.sky]} />
       <fog attach="fog" args={[theme.sky, ...theme.fog]} />
       <ambientLight intensity={theme.ambient} />
@@ -521,7 +521,7 @@ export function City({ cluster, selected, onSelect, powerGrid, theme, onHover, s
           emphasis={!selected ? 'normal' : e.from === selected || e.to === selected ? 'strong' : 'dim'} />
       ))}
       {nodes.map((n) => layout.stations[n.metadata.name] && (
-        <PowerStation key={n.metadata.uid} node={n} pos={layout.stations[n.metadata.name].center} used={podsOn(n.metadata.name)}
+        <PowerStation readOnly={!!cluster.context} key={n.metadata.uid} node={n} pos={layout.stations[n.metadata.name].center} used={podsOn(n.metadata.name)}
           color={nodeColors[n.metadata.name]} theme={theme} onHover={onHover} />
       ))}
       {deployments.map((dep) => {
@@ -532,7 +532,7 @@ export function City({ cluster, selected, onSelect, powerGrid, theme, onHover, s
           <Building key={dep.metadata.uid} dep={dep} info={landmarkFor(dep.metadata.name)} pos={lot.center}
             selected={selected === key} onSelect={() => onSelect(key)} powerGrid={powerGrid} nodeColors={nodeColors}
             theme={theme} onHover={onHover} state={states[key]} metric={serviceMetrics[key]}
-            pods={pods.filter((p) => p.metadata.namespace === dep.metadata.namespace && p.metadata.labels?.app === dep.metadata.name)} />
+            pods={pods.filter((p) => belongsTo(p, dep))} />
         )
       })}
       {edges.map((e) => {

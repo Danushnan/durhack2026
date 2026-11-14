@@ -3,6 +3,7 @@ import { useEffect, useState } from 'react'
 // Trimmed Kubernetes object shapes, as streamed by the backend's watch.
 export interface K8sObject {
   kind: string
+  deploymentUid?: string
   metadata: {
     name: string
     namespace?: string
@@ -26,13 +27,25 @@ export interface Edge { from: string; to: string; rps: number; healthy: boolean 
 
 type WatchEvent =
   | { type: 'ADDED' | 'MODIFIED' | 'DELETED'; object: K8sObject }
+  | { type: 'SOURCE'; context: string }
+  | { type: 'HEALTH'; stale: boolean; lastRefresh: number | null }
   | { type: 'TRAFFIC'; edges: Edge[] }
 
 export interface ClusterState {
   objects: Record<string, K8sObject> // by uid
   edges: Edge[]
   connected: boolean
+  context?: string
+  stale?: boolean
 }
+
+export const nodeReady = (node: K8sObject) =>
+  node.status?.conditions?.some((condition: { type: string; status: string }) =>
+    condition.type === 'Ready' && condition.status === 'True') ?? false
+
+export const belongsTo = (pod: K8sObject, dep: K8sObject) =>
+  pod.metadata.namespace === dep.metadata.namespace &&
+  (pod.deploymentUid ? pod.deploymentUid === dep.metadata.uid : pod.metadata.labels?.app === dep.metadata.name)
 
 export const keyOf = (o: { metadata: { namespace?: string; name: string } }) =>
   `${o.metadata.namespace}/${o.metadata.name}`
@@ -98,7 +111,7 @@ export function useCluster(): ClusterState {
   const [state, setState] = useState<ClusterState>({ objects: {}, edges: [], connected: false })
 
   useEffect(() => {
-    let ws: WebSocket
+    let ws: WebSocket | undefined
     let retry: number
     let closed = false
     const connect = () => {
@@ -109,24 +122,28 @@ export function useCluster(): ClusterState {
         setState((s) => {
           const objects = { ...s.objects }
           let edges = s.edges
+          let { context, stale } = s
           for (const ev of batch) {
-            if (ev.type === 'TRAFFIC') edges = ev.edges
+            if (ev.type === 'SOURCE') context = ev.context
+            else if (ev.type === 'HEALTH') stale = ev.stale
+            else if (ev.type === 'TRAFFIC') edges = ev.edges
             else if (ev.type === 'DELETED') delete objects[ev.object.metadata.uid]
             else objects[ev.object.metadata.uid] = ev.object
           }
-          return { objects, edges, connected: true }
+          return { objects, edges, context, stale, connected: true }
         })
       }
       ws.onclose = () => {
+        if (closed) return
         setState((s) => ({ ...s, connected: false }))
-        if (!closed) retry = window.setTimeout(connect, 1000)
+        retry = window.setTimeout(connect, 1000)
       }
     }
-    connect()
+    retry = window.setTimeout(connect, 0)
     return () => {
       closed = true
       clearTimeout(retry)
-      ws.close()
+      ws?.close()
     }
   }, [])
 
@@ -134,12 +151,16 @@ export function useCluster(): ClusterState {
 }
 
 async function call(method: string, path: string, body?: unknown) {
-  const res = await fetch(`/api${path}`, {
-    method,
-    headers: { 'Content-Type': 'application/json' },
-    body: body === undefined ? undefined : JSON.stringify(body),
-  })
-  if (!res.ok) console.error(`${method} ${path} failed: ${res.status}`)
+  try {
+    const res = await fetch(`/api${path}`, {
+      method,
+      headers: { 'Content-Type': 'application/json' },
+      body: body === undefined ? undefined : JSON.stringify(body),
+    })
+    if (!res.ok) throw new Error(`Request failed (HTTP ${res.status})`)
+  } catch (error) {
+    window.alert(error instanceof Error ? error.message : 'Request failed')
+  }
 }
 
 export const api = {
