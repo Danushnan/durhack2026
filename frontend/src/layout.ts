@@ -1,118 +1,174 @@
 import * as THREE from 'three'
 
-/** Port Kube is a grid of square lots; Streets run along every lot boundary. */
-export const LOT = 14
-export const STREET_W = 3
-export const DRIVEWAY_X = 4.5 // lot-local x of each Building's driveway (Units sit to its left)
-const LANE = 0.6
-const RING_SIDE = 1  // Scenery columns either side of the service districts
-const RING_BACK = 2  // downtown rows behind
-const RING_FRONT = 1 // row in front (Power Stations and suburbs)
+/**
+ * Port Kube has no street grid. Buildings are placed by the call graph (callers on the left, the
+ * services they call to the right), staggered by a hash of their name so the town never lines up,
+ * each namespace is one rounded District, and a Road exists only where one service calls another.
+ */
+const COL = 34            // x distance between call-graph columns
+const ROW = 28            // z distance between Buildings in a column
+const PAD = 11            // District padding around its Buildings
+const DISTRICT_GAP = 7
+export const ROAD_W = 2.1
+/** Room a Building can take at its largest size (10 replicas), Building-local, including its Unit rows. */
+export const BUILDING = { halfW: 7, back: -7.6, front: 6.8 }
+const SIDE_X = BUILDING.halfW + 2.5   // where a Road leaves/enters beside a Building
 
-export interface Lot { key: string; col: number; row: number; center: THREE.Vector3 }
-export type SceneryZone = 'downtown' | 'midrise' | 'suburb' | 'park'
-export interface SceneryLot { col: number; row: number; center: THREE.Vector3; zone: SceneryZone }
-export interface District { name: string; x0: number; x1: number; z0: number; z1: number }
+export interface Lot { key: string; center: THREE.Vector3 }
+export interface Rect { x0: number; x1: number; z0: number; z1: number }
+export interface District extends Rect { name: string }
 export interface CityLayout {
-  lots: Record<string, Lot>          // service lots by "ns/name"
-  stations: Record<string, Lot>      // Power Station lots by node name
-  scenery: SceneryLot[]
+  lots: Record<string, Lot>      // service lots by "ns/name"
+  stations: Record<string, Lot>  // Power Station positions by node name
   districts: District[]
-  streetsX: number[]
-  streetsZ: number[]
-  extent: { x0: number; x1: number; z0: number; z1: number }
-  focus: THREE.Vector3               // centre of the service districts
+  core: Rect                     // everything meaningful; Scenery buildings stay outside it
+}
+export interface Call { from: string; to: string }
+
+/** Stable pseudo-random number in [-1, 1) from a string. */
+function hash(s: string, salt = 0) {
+  let h = 2166136261 ^ salt
+  for (let i = 0; i < s.length; i++) h = Math.imul(h ^ s.charCodeAt(i), 16777619)
+  return ((h >>> 0) / 4294967296) * 2 - 1
 }
 
-/** Service districts in the middle, ringed by Scenery and Power Stations. Pure and deterministic. */
-export function layoutCity(deployments: { namespace: string; name: string }[], nodes: string[]): CityLayout {
-  const namespaces = [...new Set(deployments.map((d) => d.namespace))].sort()
-  const lots: CityLayout['lots'] = {}
-  const raw: { name: string; c0: number; c1: number; rows: number }[] = []
-  let svcCols = 0, svcRows = 1
-  for (const ns of namespaces) {
-    const deps = deployments.filter((d) => d.namespace === ns).sort((a, b) => a.name.localeCompare(b.name))
-    const cols = Math.min(2, deps.length)
-    const rows = Math.ceil(deps.length / cols)
-    deps.forEach((d, i) => {
-      const c = RING_SIDE + svcCols + (i % cols), r = RING_BACK + Math.floor(i / cols)
-      lots[`${ns}/${d.name}`] = { key: `${ns}/${d.name}`, col: c, row: r, center: new THREE.Vector3() }
-    })
-    raw.push({ name: ns, c0: RING_SIDE + svcCols, c1: RING_SIDE + svcCols + cols, rows })
-    svcCols += cols
-    svcRows = Math.max(svcRows, rows)
+/** Pure and deterministic. `calls` must be from→to pairs only (no rates or health) so failures never rearrange the city. */
+export function layoutCity(deployments: { namespace: string; name: string }[], nodes: string[], calls: Call[]): CityLayout {
+  const keys = deployments.map((d) => `${d.namespace}/${d.name}`).sort()
+  const known = new Set(keys)
+  const edges = calls.filter((c) => known.has(c.from) && known.has(c.to))
+  // Depth = longest chain of callers above a service (bounded passes, so a cycle cannot hang it).
+  const depth: Record<string, number> = Object.fromEntries(keys.map((k) => [k, 0]))
+  for (let pass = 0; pass < keys.length; pass++) {
+    for (const e of edges) if (depth[e.to] < depth[e.from] + 1 && depth[e.from] + 1 < keys.length) depth[e.to] = depth[e.from] + 1
   }
-  const cols = svcCols + 2 * RING_SIDE, rows = svcRows + RING_BACK + RING_FRONT
-  const ox = (cols * LOT) / 2, oz = (rows * LOT) / 2
-  const centre = (c: number, r: number) => new THREE.Vector3((c + 0.5) * LOT - ox, 0, (r + 0.5) * LOT - oz)
-  for (const lot of Object.values(lots)) lot.center.copy(centre(lot.col, lot.row))
+  const nsOf = (k: string) => k.split('/')[0]
+  const namespaces = [...new Set(keys.map(nsOf))]
+  const minDepth = (ns: string) => Math.min(...keys.filter((k) => nsOf(k) === ns).map((k) => depth[k]))
+  namespaces.sort((a, b) => minDepth(a) - minDepth(b) || a.localeCompare(b))
 
-  // Power Stations along the front row, starting under the service districts.
-  const front = rows - 1
-  const stations: CityLayout['stations'] = {}
-  ;[...nodes].sort().forEach((n, i) => {
-    const c = Math.min(cols - 1, RING_SIDE + i)
-    stations[n] = { key: n, col: c, row: front, center: centre(c, front) }
-  })
-
-  const taken = new Set([...Object.values(lots), ...Object.values(stations)].map((l) => `${l.col},${l.row}`))
-  const scenery: SceneryLot[] = []
-  for (let r = 0; r < rows; r++) {
+  const pos: Record<string, THREE.Vector3> = {}
+  const districts: District[] = []
+  let x = 0
+  namespaces.forEach((ns, d) => {
+    const members = keys.filter((k) => nsOf(k) === ns)
+    const base = minDepth(ns)
+    const cols = Math.max(...members.map((k) => depth[k])) - base + 1
+    const shiftZ = d % 2 ? ROW * 0.55 : 0 // neighbouring Districts sit at different depths
     for (let c = 0; c < cols; c++) {
-      if (taken.has(`${c},${r}`)) continue
-      const inServiceArea = r >= RING_BACK && r < RING_BACK + svcRows && c >= RING_SIDE && c < RING_SIDE + svcCols
-      const zone: SceneryZone = inServiceArea ? 'park' : r < RING_BACK ? 'downtown' : r === front ? 'suburb' : 'midrise'
-      scenery.push({ col: c, row: r, center: centre(c, r), zone })
+      // Order each column by where its callers sit (barycentre), so Roads do not cross; name breaks ties.
+      const callerZ = (k: string) => {
+        const zs = edges.filter((e) => e.to === k && pos[e.from]).map((e) => pos[e.from].z)
+        return zs.length ? zs.reduce((a, b) => a + b, 0) / zs.length : 0
+      }
+      const col = members.filter((k) => depth[k] - base === c).sort((a, b) => callerZ(a) - callerZ(b) || a.localeCompare(b))
+      // Lean towards the callers (fewer crossings), spread to the minimum gap, then zig-zag a little
+      // and jitter by name so chains never form a straight line.
+      const ideal = col.map((k) => (c === 0 ? 0 : callerZ(k)))
+      const zs: number[] = []
+      ideal.forEach((z, i) => zs.push(i === 0 ? z : Math.max(z, zs[i - 1] + ROW)))
+      const centre = ideal.reduce((a, b) => a + b, 0) / col.length - zs.reduce((a, b) => a + b, 0) / col.length
+      col.forEach((k, i) => {
+        const zig = (c % 2 ? 1 : -1) * ROW * 0.22
+        pos[k] = new THREE.Vector3(x + PAD + c * COL + hash(k, 1) * 4, 0, zs[i] + centre + zig + shiftZ + hash(k, 2) * 4)
+      })
     }
-  }
-
-  return {
-    lots, stations, scenery,
-    districts: raw.map((d) => ({
-      name: d.name, x0: d.c0 * LOT - ox, x1: d.c1 * LOT - ox, z0: RING_BACK * LOT - oz, z1: (RING_BACK + d.rows) * LOT - oz,
-    })),
-    streetsX: Array.from({ length: cols + 1 }, (_, i) => i * LOT - ox),
-    streetsZ: Array.from({ length: rows + 1 }, (_, i) => i * LOT - oz),
-    extent: { x0: -ox, x1: ox, z0: -oz, z1: oz },
-    focus: new THREE.Vector3(
-      (RING_SIDE + svcCols / 2) * LOT - ox, 0, (RING_BACK + svcRows / 2) * LOT - oz),
-  }
-}
-
-/** Street-following route between two lots' driveways (centre-line, before lane offset). */
-export function routeBetween(layout: CityLayout, from: string, to: string): THREE.Vector3[] {
-  const a = layout.lots[from], b = layout.lots[to]
-  const front = (lot: Lot) => lot.center.z + LOT / 2         // the street in front of the lot
-  const drive = (lot: Lot) => lot.center.x + DRIVEWAY_X
-  const door = (lot: Lot) => new THREE.Vector3(drive(lot), 0, front(lot) - STREET_W)
-  // Pick the north-south street to cross on: just right of the source unless going left.
-  const vx = b.col < a.col ? a.center.x - LOT / 2 : a.center.x + LOT / 2
-  const pts = [
-    door(a),
-    new THREE.Vector3(drive(a), 0, front(a)),
-    new THREE.Vector3(vx, 0, front(a)),
-    new THREE.Vector3(vx, 0, front(b)),
-    new THREE.Vector3(drive(b), 0, front(b)),
-    door(b),
-  ]
-  // Drop zero-length legs (e.g. both lots on the same row).
-  return pts.filter((p, i) => i === 0 || p.distanceTo(pts[i - 1]) > 1e-6)
-}
-
-/** Shift a polyline to its right-hand lane (90° corners only). */
-export function laneOffset(pts: THREE.Vector3[], d = LANE): THREE.Vector3[] {
-  const right = (p: THREE.Vector3, q: THREE.Vector3) => {
-    const dir = q.clone().sub(p).normalize()
-    return new THREE.Vector3(-dir.z, 0, dir.x)
-  }
-  return pts.map((p, i) => {
-    const n = new THREE.Vector3()
-    if (i > 0) n.add(right(pts[i - 1], p))
-    if (i < pts.length - 1) n.add(right(p, pts[i + 1]))
-    // At a 90° corner the summed normals (length √2) are exactly the miter; otherwise use the unit normal.
-    if (n.length() > 1.5 || i === 0 || i === pts.length - 1) n.normalize()
-    return p.clone().addScaledVector(n, d)
+    const xs = members.map((k) => pos[k].x), zs = members.map((k) => pos[k].z)
+    const x1 = Math.max(...xs) + PAD
+    districts.push({ name: ns, x0: x, x1, z0: Math.min(...zs) - PAD, z1: Math.max(...zs) + PAD })
+    x = x1 + DISTRICT_GAP
   })
+
+  // Power Stations: a gently curved row behind the Districts.
+  const all: Rect = districts.length
+    ? { x0: 0, x1: x - DISTRICT_GAP, z0: Math.min(...districts.map((d) => d.z0)), z1: Math.max(...districts.map((d) => d.z1)) }
+    : { x0: 0, x1: 0, z0: 0, z1: 0 }
+  const sorted = [...nodes].sort()
+  const stationPos = sorted.map((_, i) => {
+    const t = i - (sorted.length - 1) / 2
+    return new THREE.Vector3((all.x0 + all.x1) / 2 + t * 19, 0, all.z0 - 19 + Math.abs(t) * 3)
+  })
+  const core: Rect = { x0: all.x0 - 3, x1: all.x1 + 3, z0: sorted.length ? all.z0 - 30 : all.z0 - 3, z1: all.z1 + 3 }
+
+  // Centre the city on the origin.
+  const off = new THREE.Vector3((all.x0 + all.x1) / 2, 0, (all.z0 + all.z1) / 2)
+  const moved = (r: Rect) => ({ x0: r.x0 - off.x, x1: r.x1 - off.x, z0: r.z0 - off.z, z1: r.z1 - off.z })
+  return {
+    lots: Object.fromEntries(keys.map((k) => [k, { key: k, center: pos[k].clone().sub(off) }])),
+    stations: Object.fromEntries(sorted.map((n, i) => [n, { key: n, center: stationPos[i].clone().sub(off) }])),
+    districts: districts.map((d) => ({ name: d.name, ...moved(d) })),
+    core: moved(core),
+  }
+}
+
+/** True if a point (with `margin`) is inside the room reserved for a Building. */
+function inBuilding(p: THREE.Vector3, c: THREE.Vector3, margin: number) {
+  const dx = Math.abs(p.x - c.x), dz = p.z - c.z
+  return dx < BUILDING.halfW + margin && dz > BUILDING.back - margin && dz < BUILDING.front + margin
+}
+
+/**
+ * One Road per call. Each Road has its own lane out of the caller's right side and into the callee's
+ * left side (so Roads never share a stretch), joined by a smooth S-curve that bends around any other
+ * Building in the way. The Road starts and ends under the two Buildings, so Cars appear from inside.
+ */
+export function buildRoads(layout: CityLayout, calls: Call[]): Record<string, THREE.Vector3[]> {
+  const out: Record<string, THREE.Vector3[]> = {}
+  const valid = calls.filter((c) => layout.lots[c.from] && layout.lots[c.to])
+  // Spread each Building's outgoing (and incoming) Roads along its side, ordered by where they head.
+  const slots = (list: Call[], end: 'from' | 'to', other: 'from' | 'to') => {
+    const m = new Map<Call, number>()
+    const groups = new Map<string, Call[]>()
+    for (const c of list) groups.set(c[end], [...(groups.get(c[end]) ?? []), c])
+    for (const g of groups.values()) {
+      g.sort((a, b) => layout.lots[a[other]].center.z - layout.lots[b[other]].center.z)
+      g.forEach((c, i) => m.set(c, (i - (g.length - 1) / 2) * 3.2 - 1))
+    }
+    return m
+  }
+  const outZ = slots(valid, 'from', 'to'), inZ = slots(valid, 'to', 'from')
+  for (const c of valid) {
+    const a = layout.lots[c.from].center, b = layout.lots[c.to].center
+    const za = a.z + outZ.get(c)!, zb = b.z + inZ.get(c)!
+    const start = new THREE.Vector3(a.x + 2, 0, za), exit = new THREE.Vector3(a.x + SIDE_X, 0, za)
+    const entry = new THREE.Vector3(b.x - SIDE_X, 0, zb), end = new THREE.Vector3(b.x - 2, 0, zb)
+    // shortcut: assumes the callee is to the right (true for this layout); a call back to the left loops wide.
+    const h = Math.max(6, (entry.x - exit.x) / 2)
+    const others = Object.values(layout.lots).filter((l) => l.key !== c.from && l.key !== c.to)
+    let best: THREE.Vector3[] = []
+    for (const bend of [0, 9, -9, 18, -18, 27, -27, 36, -36]) {
+      const curve = new THREE.CubicBezierCurve3(exit, new THREE.Vector3(exit.x + h, 0, exit.z + bend),
+        new THREE.Vector3(entry.x - h, 0, entry.z + bend), entry)
+      const pts = [start, ...curve.getPoints(40), end]
+      if (!best.length) best = pts
+      if (pts.every((p) => others.every((l) => !inBuilding(p, l.center, ROAD_W)))) { best = pts; break }
+    }
+    out[`${c.from}>${c.to}`] = best
+  }
+  return out
+}
+
+/** Shift a polyline sideways (positive = to the right of travel). */
+export function offsetPath(pts: THREE.Vector3[], d: number): THREE.Vector3[] {
+  return pts.map((p, i) => {
+    const dir = pts[Math.min(i + 1, pts.length - 1)].clone().sub(pts[Math.max(i - 1, 0)]).normalize()
+    return new THREE.Vector3(p.x - dir.z * d, p.y, p.z + dir.x * d)
+  })
+}
+
+/** A Car's full trip: out along the right lane, and for a failed request a U-turn and back along the other lane. */
+export function carTrip(road: THREE.Vector3[], turnBack: boolean): THREE.Vector3[] {
+  const lane = ROAD_W / 4
+  const out = offsetPath(road, lane)
+  if (!turnBack) return out
+  const n = road.length
+  const c = road[n - 1], dir = c.clone().sub(road[n - 2]).normalize()
+  const right = new THREE.Vector3(-dir.z, 0, dir.x)
+  const arc = Array.from({ length: 9 }, (_, i) => {
+    const t = (i / 8) * Math.PI
+    return c.clone().addScaledVector(right, lane * Math.cos(t)).addScaledVector(dir, lane * 1.6 * Math.sin(t))
+  })
+  return [...out.slice(0, -1), ...arc, ...offsetPath([...road].reverse(), lane).slice(1)]
 }
 
 /** A polyline you can sample by distance travelled. */
@@ -136,18 +192,22 @@ export class Path {
   }
 }
 
-/** Dev self-check: every route leg is axis-aligned, and all but the driveways lie on a Street line. */
-export function checkRoutes(layout: CityLayout, routes: THREE.Vector3[][]) {
-  const onLine = (v: number, lines: number[]) => lines.some((l) => Math.abs(l - v) < 1e-6)
-  for (const r of routes) {
-    for (let i = 1; i < r.length; i++) {
-      const a = r[i - 1], b = r[i]
-      console.assert(Math.abs(a.x - b.x) < 1e-6 || Math.abs(a.z - b.z) < 1e-6, 'route leg not axis-aligned', r)
-      const driveway = i === 1 || i === r.length - 1
-      if (!driveway) {
-        const ok = Math.abs(a.x - b.x) < 1e-6 ? onLine(a.x, layout.streetsX) : onLine(a.z, layout.streetsZ)
-        console.assert(ok, 'route leg leaves the street grid', r)
-      }
+/** Dev self-check: no Road runs through another Building's reserved room; logs Road–Road crossings too. */
+export function checkRoads(layout: CityLayout, roads: Record<string, THREE.Vector3[]>) {
+  for (const [key, road] of Object.entries(roads)) {
+    const [from, to] = key.split('>')
+    for (const lot of Object.values(layout.lots)) {
+      if (lot.key === from || lot.key === to) continue
+      const hit = road.find((p) => inBuilding(p, lot.center, ROAD_W / 2))
+      console.assert(!hit, `road ${key} crosses ${lot.key}`, hit)
     }
   }
+  const segs = Object.entries(roads).flatMap(([k, r]) => r.slice(1).map((p, i) => ({ k, a: r[i], b: p })))
+  const cross = (s: typeof segs[0], t: typeof segs[0]) => {
+    const d = (p: THREE.Vector3, q: THREE.Vector3, r: THREE.Vector3) => (q.x - p.x) * (r.z - p.z) - (q.z - p.z) * (r.x - p.x)
+    return d(s.a, s.b, t.a) * d(s.a, s.b, t.b) < 0 && d(t.a, t.b, s.a) * d(t.a, t.b, s.b) < 0
+  }
+  let crossings = 0
+  for (let i = 0; i < segs.length; i++) for (let j = i + 1; j < segs.length; j++) if (segs[i].k !== segs[j].k && cross(segs[i], segs[j])) crossings++
+  if (crossings) console.info(`roads: ${crossings} road-road crossing(s)`)
 }

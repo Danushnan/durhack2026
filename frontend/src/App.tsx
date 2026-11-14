@@ -16,6 +16,7 @@ export default function App() {
   const [help, setHelp] = useState(false)
   const [sidebar, setSidebar] = useState(false)
   const [feedOpen, setFeedOpen] = useState(false)
+  const [homeTick, setHomeTick] = useState(0)
   const [mode, setMode] = useThemeMode()
   const theme = THEMES[mode]
 
@@ -37,7 +38,7 @@ export default function App() {
   return (
     <div className={`app ${mode}`}>
       <City cluster={cluster} selected={selected} onSelect={setSelected} powerGrid={powerGrid} theme={theme}
-        onHover={setHover} states={states} />
+        onHover={setHover} states={states} homeTick={homeTick} />
 
       <header className="hud brand">
         <h1>Port Kube</h1>
@@ -46,6 +47,8 @@ export default function App() {
       </header>
 
       <nav className="hud controls" aria-label="View controls">
+        <button aria-label="Reset the camera to the overview" title="Reset view"
+          onClick={() => { setSelected(null); setHomeTick(homeTick + 1) }}>⌂</button>
         <button aria-label={`Switch to ${mode === 'night' ? 'day' : 'night'}`} title="Day / night"
           onClick={() => setMode(mode === 'night' ? 'day' : 'night')}>{mode === 'night' ? '🌙' : '☀️'}</button>
         <button aria-pressed={powerGrid} className={powerGrid ? 'on' : ''} title="Power Grid: colour each Unit by the Node it runs on"
@@ -135,9 +138,11 @@ function Help({ onClose }: { onClose: () => void }) {
       <h2>How Port Kube works</h2>
       <p>Port Kube is a shop's software running on <b>Kubernetes</b>, drawn as a city.</p>
       <ul>
-        <li>🏦 <b>Buildings</b> are services (Deployments). Each does one job: hover one to see what.</li>
+        <li>🏦 <b>Buildings</b> are services (Deployments). Each does one job: hover one to see what. A bigger Building means more copies were asked for.</li>
+        <li>🏙️ Towers, houses and trees around the edge are just scenery.</li>
         <li>▪️ <b>Units</b> in front are its Pods: identical copies doing the work. ⬚ An outlined <b>Plot</b> is a Pod still being created.</li>
-        <li>🚗 <b>Cars</b> are requests between services. A <span className="red">red car</span> turning back is a failed request.</li>
+        <li>🛣️ A <b>Road</b> exists only where one service calls another. Its centre line is blue while calls succeed and <span className="red">red</span> when they fail.</li>
+        <li>🚗 <b>Cars</b> are requests driving from the caller to the service it needs. A <span className="red">red car</span> turning back is a failed request.</li>
         <li>⚡ <b>Power Stations</b> are Nodes: the machines Pods run on. Their lights show used Pod slots.</li>
       </ul>
       <h3>How Kubernetes thinks</h3>
