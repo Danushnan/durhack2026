@@ -59,17 +59,19 @@ class SimulatedRequests:
 
         rows = []
         failures = set()
+        # The edge's own rates and latency (one source of truth with the city); answered errors only show
+        # once the service it calls failed in the previous step, so incidents propagate visibly in order.
         for edge in edges:
             caller, target = edge["from"], edge["to"]
-            unavailable = not edge["healthy"]
-            failed = unavailable or target in self.previous_failures
             count = edge["rps"] * duration
             count = math.floor(count) + (random.random() < count % 1)
-            if count and failed:
+            refused = round(count * edge.get("refused_rate", 0.0 if edge["healthy"] else 1.0))
+            errors = round(count * edge.get("error_rate", 0.0)) if target in self.previous_failures else 0
+            if refused + errors:
                 failures.add(caller)
-            for _ in range(count):
-                baseline = 100 if target == "shop/payments" else 65
-                latency = random.uniform(800, 1000) if failed else random.uniform(baseline * .8, baseline * 1.2)
+            for i in range(count):
+                unavailable, failed = i < refused, i < refused + errors
+                latency = random.uniform(800, 1000) if failed else (edge.get("latency_ms") or 65) * random.uniform(0.8, 1.2)
                 rows.append((now, self.demo_id, caller, target, latency, failed, unavailable))
         self.previous_failures = failures
         return rows

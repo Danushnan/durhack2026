@@ -164,3 +164,22 @@ i { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin
 .components { list-style: none; padding: 0; margin: 4px 0; font-size: 12px; line-height: 1.6; }
 .components i, .inspect .event i { width: 9px; height: 9px; border-radius: 50%; }
 .toast { bottom: 64px; left: 50%; transform: translateX(-50%); max-width: min(560px, calc(100vw - 24px)); border-color: var(--red); padding: 9px 34px 9px 12px; line-height: 1.45; z-index: 25; }
+
+/* traffic overview (bottom left), headline tiles, affected list, full legend */
+.overview { bottom: 12px; left: 12px; width: 300px; max-width: calc(100vw - 24px); padding: 10px; }
+.overview .small, .small { font-size: 11px; margin: 6px 0 4px; }
+.tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(80px, 1fr)); gap: 6px; }
+.tile { border: 1px solid var(--border); border-radius: 8px; padding: 6px 8px; display: flex; flex-direction: column; gap: 2px; }
+.tile b { font-size: 18px; font-variant-numeric: tabular-nums; }
+.tile span { font-size: 10px; color: var(--muted); }
+.tile span i, .flows i, .affected i { width: 8px; height: 8px; border-radius: 50%; }
+.affected { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 4px; max-height: 30vh; overflow: auto; }
+.affected button { width: 100%; text-align: left; border-left-width: 4px; font-size: 12px; }
+.affected button span { color: var(--muted); }
+.legend.full { display: block; width: 330px; max-height: calc(100vh - 150px); overflow: auto; padding: 10px 12px; }
+.legend.full > div { margin: 3px 0; line-height: 1.35; }
+.legend.full h3:first-of-type { margin-top: 0; }
+.flows { width: 100%; border-collapse: collapse; font-size: 12px; }
+.flows td { padding: 4px; border-bottom: 1px solid var(--line); }
+.flows td:last-child { white-space: nowrap; }
+@media (max-width: 720px) { .overview { width: auto; right: 12px; bottom: 60px; } }

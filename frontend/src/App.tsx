@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
-import { City, type HoverInfo, type ServiceState } from './City'
+import { City, type HoverInfo, type RoadFlow, type ServiceState, type ViewMode } from './City'
+import { affected, describeFlow, ERROR_RATE, overview, serviceFlow, SIGNAL, type Signal, signalOf, SLOW_MS } from './health'
 import {
   ACTION_FAILED, api, deploymentHealth, describeDeployment, describePod, FRIENDLY, HEALTH_COLOR, isWorkload, type K8sObject, keyOf, NODE_COLORS,
   nodeReady, podsOf, type PodStatus, podStatus, rolloutOf, versionColor, STATUS_COLOR, useCluster,
@@ -32,6 +33,9 @@ export default function App() {
   }, [])
   const [mode, setMode] = useThemeMode()
   const theme = THEMES[mode]
+  const [view, setView] = useState<ViewMode>(() => { try { return localStorage.getItem('kubeverse.view') === '3d' ? '3d' : 'iso' } catch { return 'iso' } })
+  useEffect(() => { try { localStorage.setItem('kubeverse.view', view) } catch { /* per-viewer nicety only */ } }, [view])
+  const [legendOpen, setLegendOpen] = useState(false)
 
   const all = Object.values(cluster.objects)
   const nodes = all.filter((o) => o.kind === 'Node').sort((a, b) => a.metadata.name.localeCompare(b.metadata.name))
@@ -43,10 +47,20 @@ export default function App() {
   const sim = cluster.connected && !cluster.context // simulator-only actions are hidden when watching a real cluster
   const rush = all.some((o) => o.kind === 'Ingress' && o.status?.['kubeverse.io/rush-hour'])
 
+  // Every Road's traffic. With TigerData, its measured rows win (and are all there is during replay).
+  const flows: RoadFlow[] = cluster.edges.map((e) => {
+    const m = routes[routeKey(e.from, e.to)]
+    return m ? { ...e, rps: m.rps, latency_ms: m.latency_ms, measured: true,
+      error_rate: e.healthy ? m.error_rate : 0, refused_rate: e.healthy ? 0 : Math.max(m.error_rate, 0.5) } : e
+  })
   const down = downServices(deployments)
   const states: ServiceState = Object.fromEntries(deployments.map((d) => {
     const k = keyOf(d)
-    return [k, { down: down.has(k), chain: down.has(k) ? null : impactChain(k, cluster.edges, down) }]
+    const chain = down.has(k) ? null : impactChain(k, cluster.edges, down)
+    const flow = serviceFlow(k, flows)
+    if (flow.signal === 'ok' && services[k]?.anomaly) flow.signal = 'slow' // TigerData: far slower than its own baseline
+    const ready = d.status?.readyReplicas ?? 0, want = d.spec?.replicas ?? 0
+    return [k, { down: down.has(k), chain, flow, affected: affected({ ready, want, signal: flow.signal, basis: flow.basis, impactedBy: chain ? nameOf(chain[chain.length - 1]) : null }) }]
   }))
   const unhealthyPods = all.some((o) => o.kind === 'Pod' && podStatus(o) !== 'Running')
   const outages = nodes.filter((n) => !nodeReady(n))
@@ -54,8 +68,7 @@ export default function App() {
   return (
     <div className={`app ${mode}`}>
       <City cluster={cluster} selected={selected} onSelect={setSelected} powerGrid={powerGrid} theme={theme}
-        onHover={setHover} states={states} homeTick={homeTick}
-        serviceMetrics={services} routeMetrics={routes} replay={replayAt !== null} />
+        onHover={setHover} states={states} homeTick={homeTick} flows={flows} replay={replayAt !== null} mode={view} />
 
       <header className="hud brand">
         <h1>Kuebec <small>Port Kube</small></h1>
@@ -68,6 +81,9 @@ export default function App() {
       <nav className="hud controls" aria-label="View controls">
         <button aria-label="Reset the camera to the overview" title="Reset view"
           onClick={() => { setSelected(null); setHomeTick(homeTick + 1) }}>⌂</button>
+        <button aria-label={view === 'iso' ? 'Switch to the free 3D view' : 'Switch to the isometric view'}
+          title={view === 'iso' ? '3D view: drag to orbit, right-drag to pan' : 'Isometric view: drag to pan'}
+          onClick={() => setView(view === 'iso' ? '3d' : 'iso')}>{view === 'iso' ? '3D' : 'ISO'}</button>
         <button aria-label={`Switch to ${mode === 'night' ? 'day' : 'night'}`} title="Day / night"
           onClick={() => setMode(mode === 'night' ? 'day' : 'night')}>{mode === 'night' ? '🌙' : '☀️'}</button>
         <button aria-pressed={powerGrid} className={powerGrid ? 'on' : ''} title="Power Grid: colour each Unit by the Node it runs on"
@@ -76,6 +92,8 @@ export default function App() {
           title="Rush hour: triple the customers at the City Gate and watch the autoscaler react" onClick={() => api.rushHour(!rush)}>🚦</button>}
         {sim && <button aria-label="Reset the city to its starting state" title="Reset city"
           onClick={() => { if (window.confirm('Reset Port Kube to its starting state? Every change you made will be undone.')) { setSelected(null); api.reset() } }}>⟲</button>}
+        <button aria-expanded={legendOpen} className={legendOpen ? 'on' : ''} title="Legend: what every colour means" aria-label="Legend"
+          onClick={() => setLegendOpen(!legendOpen)}>◧</button>
         <button aria-expanded={help} className={help ? 'on' : ''} title="How this city works" onClick={() => setHelp(!help)}>?</button>
         <button aria-expanded={analyticsOpen} className={analyticsOpen ? 'on' : ''} title="Network analytics"
           aria-label="Network analytics" onClick={() => {
@@ -84,7 +102,8 @@ export default function App() {
           }}>▥</button>
       </nav>
 
-      <Banner deployments={deployments} states={states} outages={outages} onPick={setSelected} />
+      <Banner deployments={deployments} states={states} outages={outages} edges={flows} onPick={setSelected} />
+      <Overview flows={flows} deployments={deployments} states={states} onPick={setSelected} />
 
       {help && <Help onClose={() => setHelp(false)} />}
       {analyticsOpen && <Telemetry snapshot={telemetry} at={replayAt} onSeek={setReplayAt} onClose={() => {
@@ -97,12 +116,12 @@ export default function App() {
           onClick={() => setSidebar(!sidebar)}>{sidebar ? '‹' : '›'}</button>
         {deployments.map((d) => {
           const info = landmarkFor(d.metadata.name), k = keyOf(d), s = states[k]
-          const color = s.down ? '#ef4444' : s.chain ? '#f59e0b' : HEALTH_COLOR[deploymentHealth(d)]
+          const color = s.affected?.color ?? HEALTH_COLOR[deploymentHealth(d)]
           return (
             <button key={d.metadata.uid} className={`svc ${selected === k ? 'sel' : ''}`} onClick={() => setSelected(k)}
               title={`${info.title}: ${d.metadata.name}. ${roleOf(d.metadata.name).does}`} aria-label={`${d.metadata.name}, ${describeDeployment(d)}`}>
               <span className="emoji">{info.emoji}<i className="pip" style={{ background: color }} /></span>
-              {sidebar && <span className="svc-text"><b>{d.metadata.name}</b><small>{s.down ? 'Down' : s.chain ? 'Impacted' : describeDeployment(d)}</small></span>}
+              {sidebar && <span className="svc-text"><b>{d.metadata.name}</b><small>{s.affected ? `${s.affected.icon} ${s.affected.label}` : describeDeployment(d)}</small></span>}
             </button>
           )
         })}
@@ -125,9 +144,9 @@ export default function App() {
 
       {node && <StationPanel node={node} all={all} sim={sim} onClose={() => setSelected(null)} />}
       {selected === 'city-hall' && <HallPanel events={events} onClose={() => setSelected(null)} />}
-      {dep && <Inspect dep={dep} all={all} events={events} states={states} edges={cluster.edges} sim={sim} onPick={setSelected} onClose={() => setSelected(null)} />}
+      {dep && <Inspect dep={dep} all={all} events={events} states={states} edges={flows} sim={sim} onPick={setSelected} onClose={() => setSelected(null)} />}
 
-      {(powerGrid || unhealthyPods) && (
+      {legendOpen ? <Legend onClose={() => setLegendOpen(false)} /> : (powerGrid || unhealthyPods) && (
         <div className="hud legend" aria-label="Legend">
           {powerGrid
             ? nodes.map((n, i) => <span key={n.metadata.uid}><i style={{ background: NODE_COLORS[i % NODE_COLORS.length] }} />{n.metadata.name}</span>)
@@ -157,10 +176,28 @@ export default function App() {
 }
 
 /** Explains the knock-on effect of whatever is broken right now. */
-function Banner({ deployments, states, outages, onPick }: {
-  deployments: K8sObject[]; states: ServiceState; outages: K8sObject[]; onPick: (k: string) => void
+function Banner({ deployments, states, outages, edges, onPick }: {
+  deployments: K8sObject[]; states: ServiceState; outages: K8sObject[]; edges: RoadFlow[]; onPick: (k: string) => void
 }) {
   const downDeps = deployments.filter((d) => states[keyOf(d)]?.down)
+  // Failing requests while every Pod is fine: the app is broken, not Kubernetes.
+  const bad = (k: string) => !states[k]?.down && !states[k]?.chain && (states[k]?.affected?.rank ?? 0) >= 4
+  // Name the root cause first: a failing service whose own calls are fine, not the callers it drags down.
+  const dragged = (k: string) => states[k]?.flow.basis === 'received' && deployments.some((y) => bad(keyOf(y)) && keyOf(y) !== k &&
+    states[keyOf(y)].flow.basis === 'received' && edges.some((e) => e.from === k && e.to === keyOf(y)))
+  const failing = deployments.filter((x) => bad(keyOf(x))).sort((a, b) => Number(dragged(keyOf(a))) - Number(dragged(keyOf(b))) ||
+    states[keyOf(b)].affected!.rank - states[keyOf(a)].affected!.rank || Number(states[keyOf(a)].flow.basis === 'sent') - Number(states[keyOf(b)].flow.basis === 'sent'))
+  if (!downDeps.length && !outages.length && failing.length) {
+    const f = failing[0], st = states[keyOf(f)]
+    return (
+      <div className="hud banner" role="status">
+        <b>{st.affected!.icon} {f.metadata.name}: {st.affected!.label.toLowerCase()}</b> ({describeFlow(st.flow)}).
+        {' '}Its Pods are {f.status?.readyReplicas ?? 0}/{f.spec?.replicas} ready: the application is failing, not Kubernetes.
+        {' '}<button className="link" onClick={() => onPick(keyOf(f))}>Inspect →</button>
+        {failing.length > 1 && <span className="muted"> (+{failing.length - 1} more)</span>}
+      </div>
+    )
+  }
   if (!downDeps.length && !outages.length) return null
   const d = downDeps[0]
   const affected = d ? deployments.filter((x) => states[keyOf(x)]?.chain?.includes(keyOf(d))) : []
@@ -187,12 +224,15 @@ function Help({ onClose }: { onClose: () => void }) {
     <div className="hud help" role="dialog" aria-label="How this city works">
       <button className="close" onClick={onClose} aria-label="Close">×</button>
       <h2>How Port Kube works</h2>
-      <p>Port Kube is a shop's software running on <b>Kubernetes</b>, drawn as a city. Drag to move around; scroll or pinch to zoom.</p>
+      <p>Port Kube is a shop's software running on <b>Kubernetes</b>, drawn as a city. Drag to move around; scroll or pinch to zoom.
+        Press <b>3D</b> to orbit freely (drag to turn, right-drag to move), <b>ISO</b> to go back.</p>
       <ul>
         <li>🏦 <b>Buildings</b> are services (Deployments). Each does one job: hover one to see what. A bigger Building means more copies were asked for.</li>
         <li>🏙️ Towers, houses and trees around the edge are just scenery.</li>
         <li>▪️ <b>Units</b> in front are its Pods: identical copies doing the work. ⬚ An outlined <b>Plot</b> is a Pod still being created.</li>
-        <li>🛣️ A <b>Road</b> exists only where one service calls another. Its centre line is blue while calls succeed and <span className="red">red</span> when they fail.</li>
+        <li>🛣️ A <b>Road</b> exists only where one service calls another, and stays while traffic is quiet. Its edge lines show how the calls are going: healthy, slow, errors, refused or idle (◧ shows the legend).</li>
+        <li>💡 A Building glows with how its <b>requests</b> are going; its <b>Units</b> show its <b>Pods</b>. They are separate: every Pod can be ready while the app answers with errors.</li>
+        <li>🚨 A pulsing ring (and a light beam when serious) marks every Building that needs attention; the overview at the bottom left lists them.</li>
         <li>🚗 <b>Cars</b> are requests driving from the caller to the service it needs. A <span className="red">red car</span> turning back is a failed request.</li>
         <li>⚡ <b>Power Stations</b> are Nodes: the machines Pods run on. Their lights show used Pod slots.</li>
         <li>🌐 The <b>City Gate</b> is an Ingress: customers from the internet enter there and go to the frontend.</li>
@@ -270,7 +310,7 @@ function DesiredActual({ dep, pods }: { dep: K8sObject; pods: K8sObject[] }) {
 
 function Inspect({ dep, all, events, states, edges, sim, onPick, onClose }: {
   dep: K8sObject; all: K8sObject[]; events: K8sObject[]; states: ServiceState
-  edges: { from: string; to: string }[]; sim: boolean; onPick: (k: string) => void; onClose: () => void
+  edges: RoadFlow[]; sim: boolean; onPick: (k: string) => void; onClose: () => void
 }) {
   const ns = dep.metadata.namespace!, name = dep.metadata.name, key = keyOf(dep)
   const info = landmarkFor(name), role = roleOf(name), state = states[key]
@@ -299,23 +339,38 @@ function Inspect({ dep, all, events, states, edges, sim, onPick, onClose }: {
   const r = rolloutOf(dep, pods)
   const next = `v${Number((dep.metadata.annotations?.['kubeverse.io/latest-version'] ?? r.version).slice(1)) + 1}`
   const endpoints = pods.filter((p) => !p.metadata.deletionTimestamp && p.status?.containerStatuses?.[0]?.ready).length
-  const now = state?.down
-    ? { cls: 'bad', text: `💥 Down. ${role.ifDown}` }
-    : state?.chain
-      ? { cls: 'warn', text: `⚠ Impacted: it is running, but ${state.chain.map(nameOf).join(' → ')} ${state.chain.length > 1 ? 'chain is' : 'is'} down, so its requests fail.` }
-      : { cls: deploymentHealth(dep) === 'healthy' ? 'ok' : 'warn', text: describeDeployment(dep) }
+  const podsNow = state?.down
+    ? { cls: 'bad', text: `Pods: 💥 none ready. ${role.ifDown}` }
+    : { cls: deploymentHealth(dep) === 'healthy' ? 'ok' : 'warn', text: `Pods: ${describeDeployment(dep)}` }
+  const flow = state?.flow, signal = flow ? SIGNAL[flow.signal] : null
+  const requestsNow = state?.chain && !state.down
+    ? { cls: 'warn', text: `Requests: ⚠ impacted. It is running, but ${state.chain.map(nameOf).join(' → ')} ${state.chain.length > 1 ? 'chain is' : 'is'} down, so requests that need it fail.` }
+    : flow && signal ? { cls: flow.signal === 'ok' ? 'ok' : flow.signal === 'idle' ? '' : flow.signal === 'slow' ? 'warn' : 'bad',
+      text: `Requests ${flow.basis}: ${signal.icon} ${signal.label}. ${flow.rps > 0 ? describeFlow(flow) : 'none right now.'}` } : null
 
   return (
     <aside className="hud inspect" aria-label={`${name} details`}>
       <button className="close" onClick={onClose} aria-label="Close">×</button>
       <h2>{info.emoji} {info.title} <small>{name} · {ns}</small></h2>
       <p className="does">{role.does}</p>
-      <p className={`now ${now.cls}`}>{now.text}</p>
+      <p className={`now ${podsNow.cls}`}>{podsNow.text}</p>
+      {requestsNow && <p className={`now ${requestsNow.cls}`}>{requestsNow.text}</p>}
       <dl className="facts">
         <dt>If it stops</dt><dd>{role.ifDown}</dd>
         {dependsOn.length > 0 && <><dt>Needs</dt><dd>{dependsOn.map(chip)}</dd></>}
         {usedBy.length > 0 && <><dt>Used by</dt><dd>{usedBy.map(chip)}</dd></>}
       </dl>
+      {flow && <>
+        <h3>Requests <small>· separate from Pod health</small></h3>
+        <Tiles items={[
+          { label: `req/s ${flow.basis}`, value: flow.rps < 10 ? flow.rps.toFixed(1) : String(Math.round(flow.rps)) },
+          { label: 'avg latency', value: flow.latency_ms == null ? '—' : `${Math.round(flow.latency_ms)} ms`, status: flow.rps > 0 && (flow.latency_ms ?? 0) >= SLOW_MS ? 'slow' : undefined },
+          { label: 'answered with error', value: pct(flow.error_rate ?? 0), status: (flow.error_rate ?? 0) >= ERROR_RATE ? 'errors' : undefined },
+          { label: 'refused', value: pct(flow.refused_rate ?? 0), status: (flow.refused_rate ?? 0) > 0 ? 'refused' : undefined },
+        ]} />
+        <FlowTable title="Calls it makes" rows={edges.filter((e) => e.from === key)} end="to" onPick={onPick} />
+        <FlowTable title="Called by" rows={edges.filter((e) => e.to === key)} end="from" onPick={onPick} />
+      </>}
       <h3>Desired vs actual</h3>
       <DesiredActual dep={dep} pods={pods} />
       {hpa && (
@@ -453,6 +508,94 @@ function HallPanel({ events, onClose }: { events: K8sObject[]; onClose: () => vo
         <div key={e.metadata.uid} className="event"><i style={{ background: COMPONENTS[componentOf(e)].color }} />
           <b>{e.reason}</b> {e.involvedObject?.name}: {explain(e) || e.message}</div>
       ))}
+    </aside>
+  )
+}
+
+const pct = (r: number) => `${(r * 100).toFixed(r > 0 && r < 0.1 ? 1 : 0)}%`
+
+/** Headline numbers. A status value carries an icon and a label, never colour alone. */
+function Tiles({ items }: { items: { label: string; value: string; status?: Signal }[] }) {
+  return (
+    <div className="tiles">
+      {items.map((t) => (
+        <div key={t.label} className="tile" style={t.status ? { borderColor: SIGNAL[t.status].color } : undefined}>
+          <b>{t.value}</b>
+          <span>{t.status && <i style={{ background: SIGNAL[t.status].color }} aria-hidden />}{t.status ? `${SIGNAL[t.status].icon} ` : ''}{t.label}</span>
+        </div>
+      ))}
+    </div>
+  )
+}
+
+/** One row per Road in or out of a service: who, how much, how fast, how well. */
+function FlowTable({ title, rows, end, onPick }: { title: string; rows: RoadFlow[]; end: 'from' | 'to'; onPick: (k: string) => void }) {
+  if (!rows.length) return null
+  return <>
+    <h3>{title}</h3>
+    <table className="flows"><tbody>
+      {rows.map((e) => {
+        const other = e[end], sig = SIGNAL[signalOf(e)], gate = other.startsWith('ingress:')
+        return (
+          <tr key={`${e.from}>${e.to}`}>
+            <td>{gate ? '🌐 customers' : <button className="link" onClick={() => onPick(other)}>{landmarkFor(nameOf(other)).emoji} {nameOf(other)}</button>}</td>
+            <td>{describeFlow(e)}</td>
+            <td><i style={{ background: sig.color }} aria-hidden />{sig.icon} {sig.label}</td>
+          </tr>
+        )
+      })}
+    </tbody></table>
+  </>
+}
+
+/** Bottom-left: the whole city's traffic at a glance, and every service that needs attention. */
+function Overview({ flows, deployments, states, onPick }: {
+  flows: RoadFlow[]; deployments: K8sObject[]; states: ServiceState; onPick: (k: string) => void
+}) {
+  const o = overview(flows)
+  const list = deployments.filter((d) => states[keyOf(d)]?.affected).sort((a, b) => states[keyOf(b)].affected!.rank - states[keyOf(a)].affected!.rank)
+  return (
+    <section className="hud overview" aria-label="Traffic overview">
+      <Tiles items={[
+        { label: 'req/s coming in', value: o.rps < 10 ? o.rps.toFixed(1) : String(Math.round(o.rps)) },
+        { label: 'avg latency', value: o.latency_ms == null ? '—' : `${Math.round(o.latency_ms)} ms`, status: o.rps > 0 && (o.latency_ms ?? 0) >= SLOW_MS ? 'slow' : undefined },
+        { label: 'failing', value: pct(o.failing), status: o.failing >= ERROR_RATE ? 'errors' : undefined },
+      ]} />
+      <p className="muted small">Coming in: where requests enter the app. All {flows.length} Roads: {o.allRps.toFixed(1)} req/s, {pct(o.allFailing)} failing.</p>
+      {list.length ? (
+        <ul className="affected" aria-label="Services that need attention">
+          {list.map((d) => {
+            const a = states[keyOf(d)].affected!
+            return (
+              <li key={d.metadata.uid}><button onClick={() => onPick(keyOf(d))} style={{ borderColor: a.color }}>
+                <i style={{ background: a.color }} aria-hidden />{a.icon} <b>{d.metadata.name}</b> <span>{a.label}</span>
+              </button></li>
+            )
+          })}
+        </ul>
+      ) : <p className="small">✓ Every service is healthy</p>}
+    </section>
+  )
+}
+
+/** What every colour and mark in the city means, with the thresholds behind them. */
+function Legend({ onClose }: { onClose: () => void }) {
+  return (
+    <aside className="hud legend full" aria-label="Legend">
+      <button className="close" onClick={onClose} aria-label="Close legend">×</button>
+      <h3>Roads and Building glow · requests</h3>
+      {(['ok', 'slow', 'errors', 'refused', 'idle'] as Signal[]).map((s) => (
+        <div key={s}><i style={{ background: SIGNAL[s].color }} />{SIGNAL[s].icon} <b>{SIGNAL[s].label}</b>: {SIGNAL[s].means}</div>
+      ))}
+      <h3>Needs attention</h3>
+      <div>🚨 A pulsing ring around the Building, plus a beam of light when it is down, refusing or failing requests. Listed bottom left.</div>
+      <h3>Units · Pods</h3>
+      {(Object.keys(STATUS_COLOR) as PodStatus[]).map((s) => <div key={s}><i style={{ background: STATUS_COLOR[s] }} />{FRIENDLY[s]} <small>({s})</small></div>)}
+      <h3>Cars · requests</h3>
+      <div>🚕 Yellow taxis are customers; other Cars wear their caller's colour.</div>
+      <div><i style={{ background: SIGNAL.errors.color }} />Comes back orange: answered with an error.</div>
+      <div><i style={{ background: SIGNAL.refused.color }} />Comes back red: refused, nobody answered.</div>
+      <div>🔴 Brake lights: slowing, or queuing behind the Car ahead.</div>
     </aside>
   )
 }

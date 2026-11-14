@@ -2,6 +2,7 @@ import { Instance, Instances } from '@react-three/drei'
 import { useEffect, useMemo } from 'react'
 import * as THREE from 'three'
 import { textTexture } from './textures'
+import { canonical } from './teach'
 import type { Theme } from './theme'
 
 export type LandmarkKind = 'mall' | 'market' | 'tollgate' | 'bank' | 'archive' | 'kiosk' | 'tower'
@@ -15,10 +16,11 @@ const BY_SERVICE: Record<string, LandmarkInfo> = {
   payments: { kind: 'bank', title: 'Bank', sign: 'BANK', emoji: '🏦', accent: '#059669', height: 7.6 },
   postgres: { kind: 'archive', title: 'Archive', sign: 'ARCHIVE · DATABASE', emoji: '📚', accent: '#db2777', height: 9.3 },
   redis: { kind: 'kiosk', title: 'Kiosk', sign: 'KIOSK · CACHE', emoji: '🏪', accent: '#e11d48', height: 3.4 },
+  products: { kind: 'tower', title: 'Catalogue Tower', sign: 'CATALOGUE', emoji: '📦', accent: '#0d9488', height: 9 },
 }
 const FALLBACK: LandmarkInfo = { kind: 'tower', title: 'Office Tower', sign: 'OFFICES', emoji: '🏢', accent: '#475569', height: 14 }
 
-export const landmarkFor = (service: string) => BY_SERVICE[service] ?? FALLBACK
+export const landmarkFor = (service: string) => BY_SERVICE[canonical(service)] ?? FALLBACK
 
 type V3 = [number, number, number]
 

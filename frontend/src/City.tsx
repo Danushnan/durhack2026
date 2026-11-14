@@ -1,5 +1,5 @@
 import { Canvas, type ThreeEvent, useFrame, useThree } from '@react-three/fiber'
-import { Edges, OrbitControls } from '@react-three/drei'
+import { Edges, OrbitControls, OrthographicCamera, PerspectiveCamera } from '@react-three/drei'
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef } from 'react'
 import * as THREE from 'three'
 import {
@@ -12,13 +12,21 @@ import { Scenery } from './scenery'
 import { COMPONENTS, componentOf, nameOf, roleOf } from './teach'
 import { textTexture, type TextLine } from './textures'
 import type { Theme } from './theme'
-import { routeKey, trafficColor, type RouteMetrics, type ServiceMetrics } from './Telemetry'
+import { type Affected, describeFlow, type Flow, rates, type serviceFlow, SIGNAL, signalOf } from './health'
 import { admit, bendLimit, type CarAgent, newCar, stepCars } from './traffic'
 
 export interface HoverInfo { title: string; lines: string[]; x: number; y: number }
 type OnHover = (h: HoverInfo | null) => void
 /** Per-service state the City needs for labelling: down, or impacted via a chain of dependencies. */
-export type ServiceState = Record<string, { down: boolean; chain: string[] | null }>
+export type ServiceState = Record<string, {
+  down: boolean; chain: string[] | null
+  flow: ReturnType<typeof serviceFlow>   // how its requests are going (separate from its Pods)
+  affected: Affected | null              // why it needs attention, if it does
+}>
+/** Isometric (fixed angle, orthographic) or free 3D (perspective, orbit). */
+export type ViewMode = 'iso' | '3d'
+/** A Road's traffic: the call, with measured rates and latency. */
+export type RoadFlow = Edge & Flow & { measured?: boolean } // measured: TigerData rows replaced the live rates
 
 const UNIT = 1
 const UNIT_GAP = 1.45
@@ -34,11 +42,11 @@ const ISO_RIGHT = new THREE.Vector3(1, 0, -1).normalize(), ISO_UP = new THREE.Ve
 const TAG_SCALE = 1 / (2 * Math.tan(Math.PI / 8)) // keeps tags the size they had under the old 45° perspective camera
 /** A pan that ends over a Building must not also select it. */
 const dragged = (e: ThreeEvent<MouseEvent>) => e.delta > 4
-const ORANGE = '#f97316' // an error response: the service answered, but could not do the job
+const ORANGE = SIGNAL.errors.color // an error response: the service answered, but could not do the job
 /** A Building's size follows its desired replica count: small when asked for 0, half again as big at 10. */
 export const sizeFor = (replicas: number) => 0.75 + 0.075 * Math.max(0, Math.min(10, replicas))
 const AMBER = '#f59e0b'
-const RED = '#ef4444'
+const RED = SIGNAL.refused.color
 
 const at = (e: ThreeEvent<PointerEvent>) => ({ x: e.nativeEvent.clientX, y: e.nativeEvent.clientY })
 const CUSTOMER = '#facc15' // customers arriving through a City Gate drive yellow taxis
@@ -179,8 +187,8 @@ const arrow = (() => {
  * A two-lane Road: pavement, asphalt, a dashed centre line, arrows in the outbound lane, and edge lines
  * that glow with the health of the call (blue fine, orange answered-with-errors, red refused, grey idle).
  */
-function Road({ pts, edge, emphasis, theme, measured }: {
-  pts: THREE.Vector3[]; edge: Edge; emphasis: 'normal' | 'dim' | 'strong'; theme: Theme; measured?: string // telemetry colour wins when present
+function Road({ pts, edge, emphasis, theme, onHover }: {
+  pts: THREE.Vector3[]; edge: RoadFlow; emphasis: 'normal' | 'dim' | 'strong'; theme: Theme; onHover: OnHover
 }) {
   const geo = useMemo(() => ({
     kerb: ribbon(pts, ROAD_W + 2 * KERB, 0.006),
@@ -189,13 +197,25 @@ function Road({ pts, edge, emphasis, theme, measured }: {
     right: ribbon(offsetPath(pts, ROAD_W / 2 - 0.14), 0.16, 0.022),
   }), [pts])
   useEffect(() => () => Object.values(geo).forEach((g) => g.dispose()), [geo])
-  const color = measured ?? (!edge.healthy ? RED : edge.errors ? ORANGE : edge.rps === 0 ? '#94a3b8' : theme.roadGlow)
+  const signal = SIGNAL[signalOf(edge)]
+  const color = signal.color
   const dim = emphasis === 'dim' ? 0.3 : 1
+  const hover = (e: ThreeEvent<PointerEvent>) => {
+    e.stopPropagation()
+    const r = rates(edge), src = edge.from.startsWith('ingress:') ? 'customers' : nameOf(edge.from)
+    onHover({ title: `🛣️ ${src} → ${nameOf(edge.to)} · ${signal.icon} ${signal.label}`, lines: [
+      describeFlow(edge),
+      edge.rps > 0 ? `${(r.error * 100).toFixed(1)}% answered with an error · ${(r.refused * 100).toFixed(1)}% refused (nobody answered)` : 'This call is part of the app, so its Road stays while traffic is quiet.',
+      `${signal.label}: ${signal.means}.`,
+    ], ...at(e) })
+  }
   const glow = <meshBasicMaterial color={color} toneMapped={false} transparent opacity={dim} side={THREE.DoubleSide} />
   return (
     <group>
       <mesh geometry={geo.kerb} receiveShadow><meshStandardMaterial color={theme.kerb} side={THREE.DoubleSide} /></mesh>
-      <mesh geometry={geo.asphalt} receiveShadow><meshStandardMaterial color={theme.street} roughness={0.95} side={THREE.DoubleSide} /></mesh>
+      <mesh geometry={geo.asphalt} receiveShadow onPointerOver={hover} onPointerMove={hover} onPointerOut={() => onHover(null)}>
+        <meshStandardMaterial color={theme.street} roughness={0.95} side={THREE.DoubleSide} />
+      </mesh>
       <mesh geometry={geo.left} renderOrder={edge.healthy ? 1 : 2}>{glow}</mesh>
       <mesh geometry={geo.right} renderOrder={edge.healthy ? 1 : 2}>{glow}</mesh>
       <Marks pts={pts} every={2.6} offset={0} start={4} geometry={dash} color={theme.laneMark} opacity={0.9 * dim} />
@@ -277,19 +297,42 @@ function tagFor(dep: K8sObject, info: LandmarkInfo, state: ServiceState[string] 
   rollout: ReturnType<typeof rolloutOf>): { lines: TextLine[]; border: string } {
   const ready = dep.status?.readyReplicas ?? 0, want = dep.spec.replicas
   const health = deploymentHealth(dep)
-  const title: TextLine = { text: `${info.emoji} ${dep.metadata.name}`, px: 56, color: theme.labelFg }
+  const title: TextLine = { text: `${state?.affected ? `${state.affected.icon} ` : ''}${info.emoji} ${dep.metadata.name}`, px: 56, color: theme.labelFg }
   const night = theme.mode === 'night'
-  const amber = night ? AMBER : '#b45309', red = night ? '#f87171' : '#dc2626' // text needs more contrast on the light tag
-  if (state?.down) return { lines: [title, { text: `DOWN · ${ready}/${want} ready`, px: 40, color: red }], border: RED }
-  if (state?.chain) return { lines: [title, { text: `⚠ IMPACTED · needs ${nameOf(state.chain[state.chain.length - 1])}`, px: 40, color: amber }], border: AMBER }
-  if (rollout.stalled) return { lines: [title, { text: `⚠ ${rollout.version} STUCK · old version serving`, px: 40, color: amber }], border: AMBER }
-  if (rollout.rolling && Object.keys(rollout.byVersion).length > 1) {
-    const updated = rollout.byVersion[rollout.version]?.ready ?? 0
-    return { lines: [title, { text: `ROLLING OUT ${rollout.version} · ${updated}/${want} ready`, px: 40, color: amber }], border: AMBER }
-  }
-  if (ready !== want) return { lines: [title, { text: `want ${want} · have ${ready} ready · fixing…`, px: 40, color: amber }], border: AMBER }
-  const color = health === 'healthy' ? (night ? '#4ade80' : '#15803d') : amber
-  return { lines: [title, { text: `${info.title} · ${ready}/${want} ready · ${rollout.version}`, px: 40, color }], border: HEALTH_COLOR[health] }
+  const amber = night ? AMBER : '#b45309', red = night ? '#f87171' : '#dc2626', green = night ? '#4ade80' : '#15803d' // text needs more contrast on the light tag
+  // Line 2: the Pods (are copies running and ready?).
+  const pods: TextLine = state?.down ? { text: `PODS DOWN · ${ready}/${want} ready`, px: 40, color: red }
+    : rollout.stalled ? { text: `⚠ ${rollout.version} STUCK · old version serving`, px: 40, color: amber }
+      : rollout.rolling && Object.keys(rollout.byVersion).length > 1
+        ? { text: `ROLLING OUT ${rollout.version} · ${rollout.byVersion[rollout.version]?.ready ?? 0}/${want} ready`, px: 40, color: amber }
+        : ready !== want ? { text: `Pods ${ready}/${want} ready · fixing…`, px: 40, color: amber }
+          : { text: `Pods ${ready}/${want} ready · ${rollout.version}`, px: 40, color: health === 'healthy' ? green : amber }
+  // Line 3: the requests (is it doing its job?).
+  const flow = state?.flow
+  const signal = flow ? SIGNAL[flow.signal] : null
+  const requests: TextLine | null = state?.chain && !state.down ? { text: `⚠ IMPACTED · needs ${nameOf(state.chain[state.chain.length - 1])}`, px: 40, color: amber }
+    : flow && signal && !state?.down ? { text: `${signal.icon} ${flow.rps > 0 ? describeFlow(flow) : 'no requests right now'}`, px: 40,
+      color: flow.signal === 'refused' || flow.signal === 'errors' ? red : flow.signal === 'slow' ? amber : flow.signal === 'ok' ? green : theme.labelFg }
+      : null
+  return { lines: requests ? [title, pods, requests] : [title, pods], border: state?.affected?.color ?? HEALTH_COLOR[health] }
+}
+
+/** Marks an affected Building: a pulsing ring on the ground and, for serious cases, a beam of light. */
+function Alarm({ color, strong }: { color: string; strong: boolean }) {
+  const ring = useRef<THREE.Mesh>(null), beam = useRef<THREE.Mesh>(null)
+  useFrame(({ clock }) => {
+    const k = (clock.elapsedTime * 0.8) % 1
+    ring.current?.scale.setScalar(0.85 + 0.35 * k)
+    if (ring.current) (ring.current.material as THREE.MeshBasicMaterial).opacity = 0.75 * (1 - k)
+    if (beam.current) (beam.current.material as THREE.MeshBasicMaterial).opacity = 0.16 + 0.1 * Math.sin(clock.elapsedTime * 4)
+  })
+  return (
+    <group position={[0, 0, -0.6]}>
+      <mesh rotation-x={-Math.PI / 2} position={[0, 0.05, 0]}><ringGeometry args={[7.6, 8.4, 48]} /><meshBasicMaterial color={color} transparent toneMapped={false} depthWrite={false} /></mesh>
+      <mesh ref={ring} rotation-x={-Math.PI / 2} position={[0, 0.06, 0]}><ringGeometry args={[8.2, 9, 48]} /><meshBasicMaterial color={color} transparent toneMapped={false} depthWrite={false} /></mesh>
+      {strong && <mesh ref={beam} position={[0, 20, -1.4]}><cylinderGeometry args={[0.5, 1.4, 40, 16, 1, true]} /><meshBasicMaterial color={color} transparent depthWrite={false} toneMapped={false} side={THREE.DoubleSide} /></mesh>}
+    </group>
+  )
 }
 
 /** A PersistentVolumeClaim: a storage tank beside a StatefulSet's Building. Its data outlives any Pod. */
@@ -317,20 +360,28 @@ function Tank({ claim, attached, index, accent, theme, onHover }: {
   )
 }
 
-function Building({ dep, info, pods, pos, selected, onSelect, powerGrid, nodeColors, theme, onHover, state, metric, claims }: {
+function Building({ dep, info, pods, pos, selected, onSelect, powerGrid, nodeColors, theme, onHover, state, claims }: {
   dep: K8sObject; info: LandmarkInfo; pods: K8sObject[]; pos: THREE.Vector3; selected: boolean; onSelect: () => void
   powerGrid: boolean; nodeColors: Record<string, string>; theme: Theme; onHover: OnHover; state?: ServiceState[string]
-  metric?: ServiceMetrics; claims: K8sObject[]
+  claims: K8sObject[]
 }) {
   const health = deploymentHealth(dep)
   const desired: number = dep.spec.replicas
   const sorted = [...pods].sort((a, b) => (a.metadata.creationTimestamp ?? '').localeCompare(b.metadata.creationTimestamp ?? ''))
   const total = Math.max(desired, sorted.length)
-  const glow = metric ? trafficColor(metric, metric.anomaly) : state?.chain && health === 'healthy' ? AMBER : HEALTH_COLOR[health]
+  // The Building glows with its request health; its Units show its Pod health.
+  const glow = state?.flow ? SIGNAL[state.flow.signal].color : HEALTH_COLOR[health]
   const role = roleOf(dep.metadata.name)
   const hover = (e: ThreeEvent<PointerEvent>) => {
     e.stopPropagation()
-    onHover({ title: `${info.emoji} ${info.title}: ${dep.metadata.name}`, lines: [role.does, `If it stops: ${role.ifDown}`, 'Click to inspect'], ...at(e) })
+    const ready = dep.status?.readyReplicas ?? 0, f = state?.flow
+    onHover({ title: `${info.emoji} ${info.title}: ${dep.metadata.name}`, lines: [
+      role.does,
+      ...(state?.affected ? [`${state.affected.icon} Needs attention: ${state.affected.label}`] : []),
+      `Pods: ${ready} of ${desired} ready${ready < desired ? ' (Kubernetes is fixing it)' : ''}`,
+      f ? `Requests ${f.basis}: ${describeFlow(f)} · ${SIGNAL[f.signal].icon} ${SIGNAL[f.signal].label}` : 'Requests: no measurements',
+      `If it stops: ${role.ifDown}`, 'Click to inspect',
+    ], ...at(e) })
   }
   const tag = tagFor(dep, info, state, theme, rolloutOf(dep, pods))
   const size = sizeFor(desired)
@@ -339,6 +390,7 @@ function Building({ dep, info, pods, pos, selected, onSelect, powerGrid, nodeCol
   return (
     <group position={pos}>
       {selected && <Pad w={17} d={17} r={3.5} position={[0, 0.008, -0.6]} color={info.accent} opacity={0.4} />}
+      {state?.affected && <Alarm color={state.affected.color} strong={state.affected.rank >= 3} />}
       <group ref={body} position={[0, 0, -2]} scale={size}>
         <Landmark info={info} glow={glow} theme={theme} />
         {/* One invisible hit-box for hover/click instead of handlers on every part */}
@@ -457,8 +509,8 @@ function PowerStation({ node, pos, used, color, theme, onHover, selected, onSele
  * the Car ahead, slow for bends, and at the callee's door are served, refused (red) or answered with an
  * error (orange). Fate is decided on arrival, from the live state, so Cars already on the road react to failures.
  */
-function Traffic({ edge, road, theme, accent, onHover, metric, endpoints }: {
-  edge: Edge; road: THREE.Vector3[]; theme: Theme; accent: string; onHover: OnHover; metric?: RouteMetrics
+function Traffic({ edge, road, theme, accent, onHover, endpoints }: {
+  edge: RoadFlow; road: THREE.Vector3[]; theme: Theme; accent: string; onHover: OnHover
   endpoints: string[] // uids of the destination's ready Pods: the Service only sends requests to these
 }) {
   const targets = useRef(endpoints)
@@ -490,7 +542,7 @@ function Traffic({ edge, road, theme, accent, onHover, metric, endpoints }: {
     if (arrival.leave && slot !== undefined) cars.current.push(newCar(slot, Math.random))
     const steps = Math.ceil(dt * 60) // small steps keep the car-following stable
     for (let k = 0; k < steps; k++) {
-      const r = stepCars(cars.current, dt / steps, now, trips.trip, e.healthy, !!e.errors)
+      const r = stepCars(cars.current, dt / steps, now, trips.trip, rates(e))
       for (let n = 0; n < r.served.length; n++) deliver(e.to, targets.current, now)
       cars.current = r.cars
     }
@@ -524,8 +576,7 @@ function Traffic({ edge, road, theme, accent, onHover, metric, endpoints }: {
             const car = cars.current.find((c) => c.slot === i)
             onHover({
               title: `🚗 Request: ${src} → ${dst}`,
-              lines: metric ? [`${metric.requests} requests in 10 seconds`, `${Math.round(metric.latency_ms)} ms average · ${(metric.error_rate * 100).toFixed(1)}% errors`]
-                : [story(car), `${live.current.rps} requests/second on this road.`],
+              lines: [story(car), `This Road: ${describeFlow(live.current)}.`],
               ...at(e),
             })
           }}
@@ -715,27 +766,38 @@ function Lamps({ points, theme }: { points: THREE.Vector3[]; theme: Theme }) {
 
 interface Controls extends THREE.EventDispatcher<{ start: object }> { target: THREE.Vector3; update(): void }
 
-/** Isometric camera: the view direction never changes; flying moves the look-at point and the zoom. */
-function CameraRig({ focus, layout, homeTick }: { focus: THREE.Vector3 | null; layout: CityLayout; homeTick: number }) {
+/**
+ * Flies the camera to the overview or to a selected Building. Isometric: the view direction never
+ * changes; flying moves the look-at point and the zoom. 3D: it moves the camera itself.
+ */
+function CameraRig({ focus, layout, homeTick, mode }: { focus: THREE.Vector3 | null; layout: CityLayout; homeTick: number; mode: ViewMode }) {
   const view = useThree((s) => s.size)
+  const fov = useThree((s) => (s.camera as THREE.PerspectiveCamera).fov ?? 45)
   const controls = useThree((s) => s.controls) as unknown as Controls | null
   const flying = useRef(false)
-  const goal = useRef({ target: new THREE.Vector3(), zoom: 5 })
-  const fly = (target: THREE.Vector3, zoom: number) => {
+  const goal = useRef({ target: new THREE.Vector3(), zoom: 5, cam: new THREE.Vector3() })
+  const fly = (target: THREE.Vector3, zoom: number, offset: THREE.Vector3) => {
     goal.current.target.copy(target)
     goal.current.zoom = zoom
+    goal.current.cam.copy(target).add(offset)
     flying.current = true
   }
   const { x0, x1, z0, z1 } = layout.core
-  // Overview: zoom so the whole core (and the tallest Buildings on it) fits the viewport.
+  // Overview: the whole core (and the tallest Buildings on it) fits the viewport.
   useEffect(() => {
     const corners = [x0, x1].flatMap((x) => [z0, z1].flatMap((z) => [0, 14].map((y) => new THREE.Vector3(x, y, z))))
     const span = (axis: THREE.Vector3) => { const d = corners.map((c) => c.dot(axis)); return Math.max(...d) - Math.min(...d) }
     const zoom = 0.94 * Math.min(view.width / span(ISO_RIGHT), view.height / span(ISO_UP))
-    fly(new THREE.Vector3((x0 + x1) / 2, 0, (z0 + z1) / 2), zoom)
-  }, [x0, x1, z0, z1, homeTick]) // eslint-disable-line react-hooks/exhaustive-deps
-  // Fly-to: look slightly right of the Building on screen so it is not hidden behind the inspect panel.
-  useEffect(() => { if (focus) fly(focus.clone().addScaledVector(ISO_RIGHT, 8).setY(2), view.height / 46) }, [focus]) // eslint-disable-line react-hooks/exhaustive-deps
+    const wide = Math.max(x1 - x0, (z1 - z0) * 1.5, 40)
+    const dist = (wide * 0.62) / (Math.tan((fov * Math.PI) / 360) * Math.min(view.width / view.height, 2))
+    fly(new THREE.Vector3((x0 + x1) / 2, 0, (z0 + z1) / 2), zoom, new THREE.Vector3(0, dist * 0.62, dist * 0.78))
+  }, [x0, x1, z0, z1, homeTick, mode]) // eslint-disable-line react-hooks/exhaustive-deps
+  // Fly-to: look slightly right of the Building so it is not hidden behind the inspect panel.
+  useEffect(() => {
+    if (!focus) return
+    if (mode === 'iso') fly(focus.clone().addScaledVector(ISO_RIGHT, 8).setY(2), view.height / 46, new THREE.Vector3())
+    else fly(focus.clone().add(new THREE.Vector3(5, 2, 0)), 1, new THREE.Vector3(6, 19, 24))
+  }, [focus, mode]) // eslint-disable-line react-hooks/exhaustive-deps
   useEffect(() => {
     if (!controls) return
     const stop = () => { flying.current = false } // the user grabbed the camera
@@ -746,19 +808,23 @@ function CameraRig({ focus, layout, homeTick }: { focus: THREE.Vector3 | null; l
     if (!flying.current || !controls) return
     const k = Math.min(1, dt * 2.5)
     controls.target.lerp(goal.current.target, k)
-    camera.position.copy(controls.target).addScaledVector(ISO, CAM_DIST)
-    camera.zoom += (goal.current.zoom - camera.zoom) * k
-    camera.updateProjectionMatrix()
+    if ((camera as THREE.OrthographicCamera).isOrthographicCamera) {
+      camera.position.copy(controls.target).addScaledVector(ISO, CAM_DIST)
+      camera.zoom += (goal.current.zoom - camera.zoom) * k
+      camera.updateProjectionMatrix()
+    } else camera.position.lerp(goal.current.cam, k)
     controls.update()
-    if (controls.target.distanceTo(goal.current.target) < 0.05 && Math.abs(camera.zoom - goal.current.zoom) < 0.01) flying.current = false
+    const there = (camera as THREE.OrthographicCamera).isOrthographicCamera
+      ? Math.abs(camera.zoom - goal.current.zoom) < 0.01 : camera.position.distanceTo(goal.current.cam) < 0.05
+    if (controls.target.distanceTo(goal.current.target) < 0.05 && there) flying.current = false
   })
   return null
 }
 
 // ---------- the City ----------
 
-export function City({ cluster, selected, onSelect, powerGrid, theme, onHover, states, homeTick, serviceMetrics, routeMetrics, replay }: {
-  serviceMetrics: Record<string, ServiceMetrics>; routeMetrics: Record<string, RouteMetrics>; replay: boolean
+export function City({ cluster, selected, onSelect, powerGrid, theme, onHover, states, homeTick, flows, replay, mode }: {
+  flows: RoadFlow[]; replay: boolean; mode: ViewMode
   cluster: ClusterState; selected: string | null; onSelect: (key: string | null) => void
   powerGrid: boolean; theme: Theme; onHover: OnHover; states: ServiceState; homeTick: number
 }) {
@@ -804,7 +870,7 @@ export function City({ cluster, selected, onSelect, powerGrid, theme, onHover, s
     ]
     return { layout, roads, obstacles, lamps, keep }
   }, [layoutKey]) // eslint-disable-line react-hooks/exhaustive-deps
-  const edges = cluster.edges.filter((e) => roads[`${e.from}>${e.to}`])
+  const edges = flows.filter((e) => roads[`${e.from}>${e.to}`])
   const focus = !selected ? null : selected === 'city-hall' ? layout.hall?.center ?? null
     : selected.startsWith('node:') ? layout.stations[selected.slice(5)]?.center ?? null : layout.lots[selected]?.center ?? null
   const podsOn = (node: string) => pods.filter((p) => p.spec.nodeName === node && !p.metadata.deletionTimestamp).length
@@ -834,15 +900,19 @@ export function City({ cluster, selected, onSelect, powerGrid, theme, onHover, s
     return from && to ? [from, to] : null
   }, [layout, objects])
   // A Service's endpoints are its ready Pods: the only ones that receive requests.
-  const endpoints = (service: string) => pods.filter((p) => `${p.metadata.namespace}/${p.metadata.labels?.app}` === service &&
-    !p.metadata.deletionTimestamp && p.status?.containerStatuses?.[0]?.ready).map((p) => p.metadata.uid)
+  const endpoints = (service: string) => {
+    const dep = deployments.find((d) => keyOf(d) === service)
+    return dep ? podsOf(dep, pods).filter((p) => !p.metadata.deletionTimestamp && p.status?.containerStatuses?.[0]?.ready).map((p) => p.metadata.uid) : []
+  }
 
   return (
-    <Canvas shadows orthographic camera={{ position: ISO.clone().multiplyScalar(CAM_DIST).toArray(), zoom: 5, near: 1, far: 1200 }}
-      onPointerMissed={() => onSelect(null)}>
+    <Canvas shadows onPointerMissed={() => onSelect(null)}>
+      {mode === 'iso'
+        ? <OrthographicCamera key="camera-iso" makeDefault position={ISO.clone().multiplyScalar(CAM_DIST).toArray()} zoom={5} near={1} far={1200} />
+        : <PerspectiveCamera key="camera-3d" makeDefault position={[0, 60, 80]} fov={45} near={1} far={900} />}
       <color attach="background" args={[theme.sky]} />
-      {/* fog by distance beyond the look-at point, so only the far edge of the ground fades */}
-      <fog attach="fog" args={[theme.sky, CAM_DIST + theme.fog[0] - 30, CAM_DIST + theme.fog[1]]} />
+      {/* Isometric fog starts beyond the look-at point, so only the far edge of the ground fades. */}
+      <fog attach="fog" args={mode === 'iso' ? [theme.sky, CAM_DIST + theme.fog[0] - 30, CAM_DIST + theme.fog[1]] : [theme.sky, ...theme.fog]} />
       <ambientLight intensity={theme.ambient} />
       <hemisphereLight args={[theme.sky, theme.ground, theme.ambient * 0.5]} />
       <directionalLight position={[30, 45, 25]} intensity={theme.sun} color={theme.sunColor} castShadow
@@ -852,8 +922,7 @@ export function City({ cluster, selected, onSelect, powerGrid, theme, onHover, s
       {ready && <Scenery core={layout.core} districts={layout.districts} obstacles={obstacles} keep={keep} theme={theme} />}
       {ready && <Lamps points={lamps} theme={theme} />}
       {edges.map((e) => (
-        <Road key={`${e.from}>${e.to}`} pts={roads[`${e.from}>${e.to}`]} edge={e} theme={theme}
-          measured={routeMetrics[routeKey(e.from, e.to)] ? trafficColor(routeMetrics[routeKey(e.from, e.to)]) : undefined}
+        <Road key={`${e.from}>${e.to}`} pts={roads[`${e.from}>${e.to}`]} edge={e} theme={theme} onHover={onHover}
           emphasis={!selected ? 'normal' : e.from === selected || e.to === selected ? 'strong' : 'dim'} />
       ))}
       {nodes.map((n) => layout.stations[n.metadata.name] && (
@@ -868,7 +937,7 @@ export function City({ cluster, selected, onSelect, powerGrid, theme, onHover, s
         const key = `ingress:${ing.metadata.namespace}/${ing.metadata.name}`
         const gate = layout.gates[key]
         return gate && <CityGate key={ing.metadata.uid} ingress={ing} pos={gate.center} theme={theme} onHover={onHover}
-          healthy={cluster.edges.find((e) => e.from === key)?.healthy ?? true} />
+          healthy={flows.find((e) => e.from === key)?.healthy ?? true} />
       })}
       {deployments.map((dep) => {
         const key = keyOf(dep)
@@ -877,24 +946,25 @@ export function City({ cluster, selected, onSelect, powerGrid, theme, onHover, s
         return (
           <Building key={dep.metadata.uid} dep={dep} info={landmarkFor(dep.metadata.name)} pos={lot.center}
             selected={selected === key} onSelect={() => onSelect(key)} powerGrid={powerGrid} nodeColors={nodeColors}
-            theme={theme} onHover={onHover} state={states[key]} metric={serviceMetrics[key]}
+            theme={theme} onHover={onHover} state={states[key]}
             pods={podsOf(dep, pods)}
             claims={claims.filter((c) => c.metadata.namespace === dep.metadata.namespace && c.metadata.labels?.app === dep.metadata.name)} />
         )
       })}
       {edges.map((e) => {
-        const metric = routeMetrics[routeKey(e.from, e.to)]
-        if (replay && !metric) return null // replaying history: only routes with recorded traffic get Cars
-        const edge = metric ? { ...e, rps: metric.rps, healthy: metric.error_rate < 0.1 } : e
-        return <Traffic key={`${e.from}>${e.to}`} edge={edge} road={roads[`${e.from}>${e.to}`]} theme={theme} onHover={onHover}
-          accent={metric ? trafficColor(metric) : e.from.startsWith('ingress:') ? CUSTOMER : landmarkFor(nameOf(e.from)).accent}
-          metric={metric} endpoints={endpoints(e.to)} />
+        if (replay && !e.measured) return null // replaying history: only routes with recorded traffic get Cars
+        // A Car wears its caller's colour (customers: yellow taxis); how its request went shows at the door.
+        return <Traffic key={`${e.from}>${e.to}`} edge={e} road={roads[`${e.from}>${e.to}`]} theme={theme} onHover={onHover}
+          accent={e.from.startsWith('ingress:') ? CUSTOMER : landmarkFor(nameOf(e.from)).accent} endpoints={endpoints(e.to)} />
       })}
-      {/* Isometric: no rotation. Drag (or one finger) pans, wheel (or pinch) zooms towards the cursor. */}
-      <OrbitControls makeDefault enableRotate={false} screenSpacePanning zoomToCursor minZoom={1.5} maxZoom={60}
-        mouseButtons={{ LEFT: THREE.MOUSE.PAN, MIDDLE: THREE.MOUSE.DOLLY, RIGHT: THREE.MOUSE.PAN }}
-        touches={{ ONE: THREE.TOUCH.PAN, TWO: THREE.TOUCH.DOLLY_PAN }} />
-      <CameraRig focus={focus} layout={layout} homeTick={homeTick} />
+      {mode === 'iso'
+        // Isometric: no rotation. Drag (or one finger) pans, wheel (or pinch) zooms towards the cursor.
+        ? <OrbitControls key="controls-iso" makeDefault enableRotate={false} screenSpacePanning zoomToCursor minZoom={1.5} maxZoom={60}
+          mouseButtons={{ LEFT: THREE.MOUSE.PAN, MIDDLE: THREE.MOUSE.DOLLY, RIGHT: THREE.MOUSE.PAN }}
+          touches={{ ONE: THREE.TOUCH.PAN, TWO: THREE.TOUCH.DOLLY_PAN }} />
+        // 3D: drag orbits, right-drag pans, wheel zooms; the camera never goes below the ground.
+        : <OrbitControls key="controls-3d" makeDefault maxPolarAngle={Math.PI / 2.15} minDistance={10} maxDistance={170} />}
+      <CameraRig focus={focus} layout={layout} homeTick={homeTick} mode={mode} />
     </Canvas>
   )
 }

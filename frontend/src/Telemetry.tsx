@@ -34,8 +34,6 @@ type Snapshot =
     }
 
 export const routeKey = (from: string, to: string) => `${from}→${to}`
-export const trafficColor = (metric: Measurement, anomaly = false) =>
-  metric.error_rate >= 0.1 || anomaly ? '#ef4444' : '#22c55e'
 
 export function useTelemetry(at: number | null) {
   const [snapshot, setSnapshot] = useState<Snapshot>({ status: 'waiting' })

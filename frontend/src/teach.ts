@@ -1,6 +1,10 @@
 import type { Edge, K8sObject } from './k8s'
 import { keyOf } from './k8s'
 
+/** The same kind of service under other names (MiniShop's `payment-api`, `minishop-web`, …) gets the same Building and role. */
+const ALIAS: Record<string, string> = { 'minishop-web': 'frontend', web: 'frontend', payment: 'payments', product: 'products', catalog: 'products' }
+export const canonical = (service: string) => { const s = service.replace(/-(api|service|svc)$/, ''); return ALIAS[s] ?? s }
+
 /** What each service is for, and what users would notice if it stopped. */
 const ROLES: Record<string, { does: string; ifDown: string }> = {
   frontend: { does: 'The shop website customers browse.', ifDown: 'Customers cannot load the shop at all.' },
@@ -9,9 +13,10 @@ const ROLES: Record<string, { does: string; ifDown: string }> = {
   payments: { does: "Charges the customer's card.", ifDown: 'Orders fail at the very last step: nobody can pay.' },
   postgres: { does: 'The database: the permanent record of every order.', ifDown: 'Checkout cannot save orders.' },
   redis: { does: 'A fast in-memory cache that holds basket data.', ifDown: 'The cart cannot read or save baskets.' },
+  products: { does: 'The catalogue: product details, prices and stock.', ifDown: 'The shop shows no products, and baskets cannot price items.' },
 }
 export const roleOf = (service: string) =>
-  ROLES[service] ?? { does: 'A service running in the cluster.', ifDown: 'Anything that calls it will start failing.' }
+  ROLES[canonical(service)] ?? { does: 'A service running in the cluster.', ifDown: 'Anything that calls it will start failing.' }
 
 /** Why Kubernetes did each thing, in one plain sentence. */
 const EXPLAIN: Record<string, string> = {
