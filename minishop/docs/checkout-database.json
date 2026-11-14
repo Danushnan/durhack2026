@@ -1,0 +1,9 @@
+{
+  "id": "0c324e53-3b4a-4e5a-a01a-e94fc0ac9d37",
+  "session_id": "349638ac-90c6-47b2-8169-989d314a6292",
+  "total_cents": 15800,
+  "status": "confirmed",
+  "payment_status": "simulated_paid",
+  "payment_reference": "sim_2317bd02-521b-5159-9d69-1cab7fe9eb6c",
+  "created_at": "2026-11-14 19:31:15.583736+00:00"
+}
