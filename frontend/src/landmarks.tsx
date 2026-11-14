@@ -82,11 +82,11 @@ function Triangle({ w, h, depth, pos, mat }: { w: number; h: number; depth: numb
 }
 
 /** A sign on the facade naming the building type; glows at night. */
-export function FacadeSign({ text, width, pos, bg, theme }: { text: string; width: number; pos: V3; bg: string; theme: Theme }) {
+export function FacadeSign({ text, width, pos, bg, theme, rotY = 0 }: { text: string; width: number; pos: V3; bg: string; theme: Theme; rotY?: number }) {
   const { texture, aspect } = useMemo(() => textTexture([{ text, px: 64, color: '#ffffff', weight: 800 }], { bg, border: '#ffffff', pad: 22, radius: 10 }), [text, bg])
   useEffect(() => () => texture.dispose(), [texture])
   return (
-    <mesh position={pos}>
+    <mesh position={pos} rotation-y={rotY}>
       <planeGeometry args={[width, width / aspect]} />
       {theme.mode === 'night'
         ? <meshBasicMaterial map={texture} toneMapped={false} />

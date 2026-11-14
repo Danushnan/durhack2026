@@ -1,4 +1,4 @@
-# KubeVerse — Watch Kubernetes Think
+# Kuebec — Watch Kubernetes Think
 
 Port Kube is a 3D city that renders a (simulated) Kubernetes cluster live. Namespaces are Districts, each service
 (Deployment) is a distinct landmark Building, its Pods are Units on plots out front, a Road joins two Buildings only
@@ -63,21 +63,32 @@ Live cluster mode is read-only. The demo script below uses the simulator.
 
 1. Press **?** for a short explainer of the city and of how Kubernetes thinks (desired vs actual state).
 2. Hover a Building to see what the service does and what breaks if it stops; click it (or pick it from the left rail)
-   to fly there and open the inspect panel.
-3. **Demolish** a Unit → it shuts down, Kubernetes creates a replacement, the scheduler places it.
-4. **Sabotage** `payments` (the Bank) → its Units pulse red ("Crashing, next retry waits 4s"), the Road to it turns red
-   and its Cars drive back, and a banner shows the knock-on effect: checkout becomes **Impacted**. **Repair** → it recovers.
-5. **Add / Remove Unit** → the Building grows or shrinks with the replicas you ask for; outlined Plots show Units
-   Kubernetes still has to create.
-6. Click a **Power Station** (a Node) to cut its power → its Units are evicted and rescheduled; with only 10 slots left
-   some wait for space (Pending). Toggle **⚡ Power Grid** to colour Units by Node. Click the station again to restore.
-7. **🌙 / ☀️** switches night and day (remembered per browser); **⌂** returns the camera to the overview. The ticker at the bottom explains each thing Kubernetes
-   does; click it for the full list.
+   to fly there and open the inspect panel. Each button shows the `kubectl` command it stands for.
+3. **Demolish** a Unit → it shuts down, Kubernetes creates a replacement, the scheduler places it. Watch the glowing
+   **messengers** fly from **City Hall** (the control plane) and from the Power Stations' kubelets.
+4. **Sabotage** `payments` (the Bank) → its Units crash; Cars to it are refused and turn back **red**; checkout is now
+   **Impacted**, so Cars to checkout wait at its door, queue, and come back **orange** (an error answer).
+5. **Release v2** of the Bank → Unit caps change colour one at a time and the Service never drops below 2 ready Units.
+   **Release buggy v3** → the rollout stalls with v2 still serving; **Roll back** returns to v2.
+6. Customers (yellow taxis) enter through the **City Gate** (an Ingress). Each delivered request flashes the ready Unit
+   that served it (round-robin). Press **🚦** for rush hour: customers triple, the frontend's autoscaler adds Units
+   (the Building grows), Roads fill up, and it scales back down afterwards.
+7. The database (`postgres`, the Archive) is a **StatefulSet**: Demolish `postgres-0` and the same name returns with the
+   same **storage tank**. Cut its Power Station's power and it is *not* copied elsewhere; it waits until power returns.
+8. Click a **Power Station** (a Node): **Maintenance** (`kubectl drain`) moves Units out gently, never breaking a
+   service's disruption budget; **Cut power** is the sudden version. Toggle **⚡ Power Grid** to colour Units by Node.
+9. **⟲** resets the city; **🌙 / ☀️** switches night and day; **⌂** returns the camera to the overview. The ticker at
+   the bottom explains each thing Kubernetes does; click it for the full list.
 
 ## Simulated cases
 
-Scheduling with per-Node capacity (FailedScheduling → Pending), container start-up, CrashLoopBackOff with exponential
-back-off, graceful termination, Deployment reconcile (scale up/down, self-healing), Node NotReady eviction.
+Scheduling with per-Node capacity (FailedScheduling → Pending), container start-up, readiness (running before ready),
+CrashLoopBackOff with exponential back-off, graceful termination, Deployment reconcile (scale up/down, self-healing),
+rolling updates with the default 25% maxSurge/maxUnavailable, progress deadline and rollback, an Ingress routing
+customers to frontend, a HorizontalPodAutoscaler on requests per second per Pod, a StatefulSet with ordered Pods and
+PersistentVolumeClaims, PodDisruptionBudgets with `kubectl drain`, Node NotReady eviction (Pods stay Terminating until
+the Node returns), and error propagation to callers of an impacted service. In live mode (a real cluster) the city is
+read-only.
 Timings are compressed for the demo (see `shortcut:` comments in `backend/sim.py`).
 
 Both modes stream Kubernetes-shaped updates (`ADDED`/`MODIFIED`/`DELETED`) over `/ws`.

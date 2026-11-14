@@ -1,15 +1,15 @@
 import { Canvas, type ThreeEvent, useFrame, useThree } from '@react-three/fiber'
 import { Edges, OrbitControls } from '@react-three/drei'
-import { useEffect, useMemo, useRef } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef } from 'react'
 import * as THREE from 'three'
 import {
-  api, belongsTo, nodeReady, type ClusterState, type Edge, type K8sObject, deploymentHealth, describePod, HEALTH_COLOR,
-  keyOf, NODE_COLORS, podStatus, STATUS_COLOR,
+  type ClusterState, type Edge, type K8sObject, deploymentHealth, describePod, HEALTH_COLOR, isWorkload,
+  keyOf, NODE_COLORS, nodeReady, podsOf, podStatus, rolloutOf, STATUS_COLOR, versionColor,
 } from './k8s'
 import { FacadeSign, Landmark, type LandmarkInfo, landmarkFor } from './landmarks'
-import { BUILDING, buildRoads, carTrip, type CityLayout, checkRoads, layoutCity, offsetPath, Path, ROAD_W } from './layout'
+import { BUILDING, buildRoads, carTrip, type CityLayout, checkRoads, KERB, layoutCity, offsetPath, Path, ROAD_W } from './layout'
 import { Scenery } from './scenery'
-import { nameOf, roleOf } from './teach'
+import { COMPONENTS, nameOf, roleOf } from './teach'
 import { textTexture, type TextLine } from './textures'
 import type { Theme } from './theme'
 import { routeKey, trafficColor, type RouteMetrics, type ServiceMetrics } from './Telemetry'
@@ -25,13 +25,28 @@ const UNIT_COLS = 6
 const UNIT_Z = 4.4
 const CAR_SPEED = 7 // world units per second
 const CAR_GROW = 2.2 // distance over which a Car grows as it leaves a Building and shrinks as it enters one
-const CAR_POOL = 14  // most Cars drawn on one Road at once
+const CAR_POOL = 40  // most Cars drawn on one Road at once (rush hour fills a Road bumper to bumper)
+const CAR_GAP = 2.1  // a Car keeps this distance behind the one ahead, so queues form instead of overlaps
+const ERROR_WAIT = 1.1 // seconds a Car waits at the door of an Impacted service before getting its error back
+const ORANGE = '#f97316' // an error response: the service answered, but could not do the job
 /** A Building's size follows its desired replica count: small when asked for 0, half again as big at 10. */
 export const sizeFor = (replicas: number) => 0.75 + 0.075 * Math.max(0, Math.min(10, replicas))
 const AMBER = '#f59e0b'
 const RED = '#ef4444'
 
 const at = (e: ThreeEvent<PointerEvent>) => ({ x: e.nativeEvent.clientX, y: e.nativeEvent.clientY })
+const CUSTOMER = '#facc15' // customers arriving through a City Gate drive yellow taxis
+
+// When a Car delivers a request, the Service hands it to the next ready Pod (round-robin); that Unit
+// flashes. Shared mutable state, read in animation frames, so deliveries never cause React re-renders.
+const servedAt = new Map<string, number>()
+const turn = new Map<string, number>()
+function deliver(service: string, endpoints: string[], now: number) {
+  if (!endpoints.length) return
+  const i = (turn.get(service) ?? 0) % endpoints.length
+  turn.set(service, i + 1)
+  servedAt.set(endpoints[i], now)
+}
 
 // ---------- shared shapes ----------
 
@@ -120,18 +135,59 @@ function Ground({ layout, theme }: { layout: CityLayout; theme: Theme }) {
 
 // ---------- Roads: one per call between two services ----------
 
+/** Painted marks along a Road (centre dashes, lane arrows) as one instanced mesh. */
+function Marks({ pts, every, offset, start, geometry, color, opacity = 1 }: {
+  pts: THREE.Vector3[]; every: number; offset: number; start: number; geometry: THREE.BufferGeometry; color: string; opacity?: number
+}) {
+  const ref = useRef<THREE.InstancedMesh>(null)
+  const spots = useMemo(() => {
+    const path = new Path(offset ? offsetPath(pts, offset) : pts), out: { p: THREE.Vector3; h: number }[] = []
+    for (let s = start; s < path.length - 3; s += every) { const p = new THREE.Vector3(); out.push({ p, h: path.at(s, p) }) }
+    return out
+  }, [pts, every, offset, start])
+  useLayoutEffect(() => {
+    const m = new THREE.Matrix4(), q = new THREE.Quaternion(), up = new THREE.Vector3(0, 1, 0), one = new THREE.Vector3(1, 1, 1)
+    spots.forEach(({ p, h }, i) => ref.current?.setMatrixAt(i, m.compose(p, q.setFromAxisAngle(up, h), one)))
+    if (ref.current) ref.current.instanceMatrix.needsUpdate = true
+  }, [spots, geometry])
+  return (
+    <instancedMesh ref={ref} args={[geometry, undefined, spots.length]}>
+      <meshBasicMaterial color={color} transparent={opacity < 1} opacity={opacity} toneMapped={false} />
+    </instancedMesh>
+  )
+}
+const dash = new THREE.BoxGeometry(1.3, 0.02, 0.13).translate(0, 0.024, 0)
+const arrow = (() => {
+  const s = new THREE.Shape()
+  s.moveTo(0.55, 0); s.lineTo(-0.35, 0.38); s.lineTo(-0.15, 0); s.lineTo(-0.35, -0.38); s.closePath()
+  return new THREE.ShapeGeometry(s).rotateX(-Math.PI / 2).translate(0, 0.023, 0)
+})()
+
+/**
+ * A two-lane Road: pavement, asphalt, a dashed centre line, arrows in the outbound lane, and edge lines
+ * that glow with the health of the call (blue fine, orange answered-with-errors, red refused, grey idle).
+ */
 function Road({ pts, edge, emphasis, theme, measured }: {
   pts: THREE.Vector3[]; edge: Edge; emphasis: 'normal' | 'dim' | 'strong'; theme: Theme; measured?: string // telemetry colour wins when present
 }) {
-  const asphalt = useMemo(() => ribbon(pts, ROAD_W, 0.012), [pts])
-  // Failing roads sit a hair higher so red wins where two roads share a stretch.
-  const line = useMemo(() => ribbon(pts, emphasis === 'strong' ? 0.34 : 0.2, edge.healthy ? 0.02 : 0.026), [pts, emphasis, edge.healthy])
-  useEffect(() => () => { asphalt.dispose(); line.dispose() }, [asphalt, line])
-  const color = measured ?? (!edge.healthy ? RED : edge.rps === 0 ? '#94a3b8' : theme.roadGlow)
+  const geo = useMemo(() => ({
+    kerb: ribbon(pts, ROAD_W + 2 * KERB, 0.006),
+    asphalt: ribbon(pts, ROAD_W, 0.014),
+    left: ribbon(offsetPath(pts, -(ROAD_W / 2 - 0.14)), 0.16, 0.022),
+    right: ribbon(offsetPath(pts, ROAD_W / 2 - 0.14), 0.16, 0.022),
+  }), [pts])
+  useEffect(() => () => Object.values(geo).forEach((g) => g.dispose()), [geo])
+  const color = measured ?? (!edge.healthy ? RED : edge.errors ? ORANGE : edge.rps === 0 ? '#94a3b8' : theme.roadGlow)
+  const dim = emphasis === 'dim' ? 0.3 : 1
+  const glow = <meshBasicMaterial color={color} toneMapped={false} transparent opacity={dim} side={THREE.DoubleSide} />
   return (
     <group>
-      <mesh geometry={asphalt} receiveShadow><meshStandardMaterial color={theme.street} side={THREE.DoubleSide} /></mesh>
-      <mesh geometry={line} renderOrder={edge.healthy ? 1 : 2}><meshBasicMaterial color={color} toneMapped={false} transparent depthWrite={false} opacity={emphasis === 'dim' ? 0.25 : 1} side={THREE.DoubleSide} /></mesh>
+      <mesh geometry={geo.kerb} receiveShadow><meshStandardMaterial color={theme.kerb} side={THREE.DoubleSide} /></mesh>
+      <mesh geometry={geo.asphalt} receiveShadow><meshStandardMaterial color={theme.street} roughness={0.95} side={THREE.DoubleSide} /></mesh>
+      <mesh geometry={geo.left} renderOrder={edge.healthy ? 1 : 2}>{glow}</mesh>
+      <mesh geometry={geo.right} renderOrder={edge.healthy ? 1 : 2}>{glow}</mesh>
+      <Marks pts={pts} every={2.6} offset={0} start={4} geometry={dash} color={theme.laneMark} opacity={0.9 * dim} />
+      <Marks pts={pts} every={13} offset={ROAD_W / 4} start={7} geometry={arrow} color={theme.laneMark} opacity={0.55 * dim} />
     </group>
   )
 }
@@ -159,17 +215,36 @@ function Unit({ pod, target, powerGrid, nodeColor, onHover }: {
     }
   })
   const faint = status === 'Terminating' || status === 'Pending'
+  const version = pod.metadata.labels?.version ?? 'v1'
+  const ring = useRef<THREE.Mesh>(null)
+  useFrame(({ clock }) => {
+    if (!ring.current) return
+    const k = 1 - (clock.elapsedTime - (servedAt.get(pod.metadata.uid) ?? -9)) / 0.7
+    ring.current.visible = k > 0
+    if (k > 0) {
+      ring.current.scale.setScalar(1 + (1 - k) * 0.8)
+      ;(ring.current.material as THREE.MeshBasicMaterial).opacity = k
+    }
+  })
+  const rotation = status === 'Running' ? 'In rotation: the Service sends it requests.'
+    : status === 'NotReady' ? 'Not in rotation yet: no requests until its readiness check passes.'
+      : 'Not in rotation: receives no requests.'
   return (
     <group ref={ref} position={[target.x, 3, target.z]}
-      onPointerOver={(e) => { e.stopPropagation(); onHover({ title: `Unit ${pod.metadata.name}`, lines: [describePod(pod), `Pod · ${status}`, `Runs on: ${pod.spec.nodeName ?? 'no Node yet'}`], ...at(e) }) }}
+      onPointerOver={(e) => { e.stopPropagation(); onHover({ title: `Unit ${pod.metadata.name} · ${version}`, lines: [describePod(pod), rotation, `Pod · ${status} · runs on ${pod.spec.nodeName ?? 'no Node yet'}`], ...at(e) }) }}
       onPointerOut={() => onHover(null)}>
+      <mesh ref={ring} rotation-x={-Math.PI / 2} position={[0, 0.06, 0]} visible={false}>
+        <ringGeometry args={[0.72, 1.08, 28]} />
+        <meshBasicMaterial color="#f59e0b" transparent toneMapped={false} />
+      </mesh>
       <mesh position={[0, 0.5, 0]} castShadow>
         <boxGeometry args={[UNIT, 0.84, UNIT]} />
         <meshStandardMaterial ref={mat} color={color} emissive={color} transparent opacity={faint ? 0.4 : 1} />
       </mesh>
       <mesh position={[0, 0.98, 0]}>
         <boxGeometry args={[UNIT + 0.1, 0.12, UNIT + 0.1]} />
-        <meshStandardMaterial color="#f8fafc" transparent opacity={faint ? 0.4 : 1} />
+        {/* the cap shows the version, so a rolling update is visible as caps changing colour */}
+        <meshStandardMaterial color={versionColor(version)} transparent opacity={faint ? 0.4 : 1} />
       </mesh>
     </group>
   )
@@ -186,7 +261,8 @@ function Plot({ position, empty, theme }: { position: THREE.Vector3; empty: bool
   )
 }
 
-function tagFor(dep: K8sObject, info: LandmarkInfo, state: ServiceState[string] | undefined, theme: Theme): { lines: TextLine[]; border: string } {
+function tagFor(dep: K8sObject, info: LandmarkInfo, state: ServiceState[string] | undefined, theme: Theme,
+  rollout: ReturnType<typeof rolloutOf>): { lines: TextLine[]; border: string } {
   const ready = dep.status?.readyReplicas ?? 0, want = dep.spec.replicas
   const health = deploymentHealth(dep)
   const title: TextLine = { text: `${info.emoji} ${dep.metadata.name}`, px: 56, color: theme.labelFg }
@@ -194,14 +270,45 @@ function tagFor(dep: K8sObject, info: LandmarkInfo, state: ServiceState[string] 
   const amber = night ? AMBER : '#b45309', red = night ? '#f87171' : '#dc2626' // text needs more contrast on the light tag
   if (state?.down) return { lines: [title, { text: `DOWN · ${ready}/${want} ready`, px: 40, color: red }], border: RED }
   if (state?.chain) return { lines: [title, { text: `⚠ IMPACTED · needs ${nameOf(state.chain[state.chain.length - 1])}`, px: 40, color: amber }], border: AMBER }
+  if (rollout.stalled) return { lines: [title, { text: `⚠ ${rollout.version} STUCK · old version serving`, px: 40, color: amber }], border: AMBER }
+  if (rollout.rolling && Object.keys(rollout.byVersion).length > 1) {
+    const updated = rollout.byVersion[rollout.version]?.ready ?? 0
+    return { lines: [title, { text: `ROLLING OUT ${rollout.version} · ${updated}/${want} ready`, px: 40, color: amber }], border: AMBER }
+  }
+  if (ready !== want) return { lines: [title, { text: `want ${want} · have ${ready} ready · fixing…`, px: 40, color: amber }], border: AMBER }
   const color = health === 'healthy' ? (night ? '#4ade80' : '#15803d') : amber
-  return { lines: [title, { text: `${info.title} · ${ready}/${want} ready`, px: 40, color }], border: HEALTH_COLOR[health] }
+  return { lines: [title, { text: `${info.title} · ${ready}/${want} ready · ${rollout.version}`, px: 40, color }], border: HEALTH_COLOR[health] }
 }
 
-function Building({ dep, info, pods, pos, selected, onSelect, powerGrid, nodeColors, theme, onHover, state, metric }: {
+/** A PersistentVolumeClaim: a storage tank beside a StatefulSet's Building. Its data outlives any Pod. */
+function Tank({ claim, attached, index, accent, theme, onHover }: {
+  claim: K8sObject; attached?: string; index: number; accent: string; theme: Theme; onHover: OnHover
+}) {
+  const night = theme.mode === 'night'
+  const hover = (e: ThreeEvent<PointerEvent>) => {
+    e.stopPropagation()
+    onHover({ title: `🛢️ Storage ${claim.metadata.name}`, lines: [
+      'A PersistentVolumeClaim: the disk that holds this database copy\'s data.',
+      attached ? `Attached to ${attached}. If that Pod is replaced, the new one with the same name gets this same disk back.`
+        : 'Not attached right now, but kept: scaling back up reuses it, data and all.',
+    ], ...at(e) })
+  }
+  return (
+    <group position={[5.9, 0, -5.4 + index * 2.3]} onPointerOver={hover} onPointerMove={hover} onPointerOut={() => onHover(null)}>
+      <mesh position={[0, 1, 0]} castShadow><cylinderGeometry args={[0.85, 0.85, 2, 20]} /><meshStandardMaterial color={attached ? accent : night ? '#475569' : '#94a3b8'} /></mesh>
+      <mesh position={[0, 2.05, 0]}><sphereGeometry args={[0.85, 20, 10, 0, Math.PI * 2, 0, Math.PI / 2]} /><meshStandardMaterial color={night ? '#cbd5e1' : '#e2e8f0'} /></mesh>
+      {/* data level gauge */}
+      <mesh position={[0, 1, 0.86]}><boxGeometry args={[0.18, 1.4, 0.04]} /><meshBasicMaterial color={night ? '#0f172a' : '#334155'} /></mesh>
+      <mesh position={[0, 0.65, 0.88]}><boxGeometry args={[0.12, 0.7, 0.04]} /><meshBasicMaterial color={attached ? '#4ade80' : '#94a3b8'} toneMapped={false} /></mesh>
+      {attached && <mesh position={[-1.2, 0.3, 0]}><boxGeometry args={[1.6, 0.18, 0.18]} /><meshStandardMaterial color="#64748b" /></mesh>}
+    </group>
+  )
+}
+
+function Building({ dep, info, pods, pos, selected, onSelect, powerGrid, nodeColors, theme, onHover, state, metric, claims }: {
   dep: K8sObject; info: LandmarkInfo; pods: K8sObject[]; pos: THREE.Vector3; selected: boolean; onSelect: () => void
   powerGrid: boolean; nodeColors: Record<string, string>; theme: Theme; onHover: OnHover; state?: ServiceState[string]
-  metric?: ServiceMetrics
+  metric?: ServiceMetrics; claims: K8sObject[]
 }) {
   const health = deploymentHealth(dep)
   const desired: number = dep.spec.replicas
@@ -213,7 +320,7 @@ function Building({ dep, info, pods, pos, selected, onSelect, powerGrid, nodeCol
     e.stopPropagation()
     onHover({ title: `${info.emoji} ${info.title}: ${dep.metadata.name}`, lines: [role.does, `If it stops: ${role.ifDown}`, 'Click to inspect'], ...at(e) })
   }
-  const tag = tagFor(dep, info, state, theme)
+  const tag = tagFor(dep, info, state, theme, rolloutOf(dep, pods))
   const size = sizeFor(desired)
   const body = useRef<THREE.Group>(null)
   useFrame((_, dt) => { body.current?.scale.lerp(new THREE.Vector3(size, size, size), Math.min(1, dt * 4)) })
@@ -233,6 +340,10 @@ function Building({ dep, info, pods, pos, selected, onSelect, powerGrid, nodeCol
       {sorted.map((p, i) => (
         <Unit key={p.metadata.uid} pod={p} target={slot(i, total)} powerGrid={powerGrid} nodeColor={nodeColors[p.spec.nodeName]} onHover={onHover} />
       ))}
+      {claims.map((c, i) => (
+        <Tank key={c.metadata.uid} claim={c} index={i} accent={info.accent} theme={theme} onHover={onHover}
+          attached={pods.find((p) => !p.metadata.deletionTimestamp && p.spec.volumes?.[0]?.persistentVolumeClaim?.claimName === c.metadata.name)?.metadata.name} />
+      ))}
       {/* outside the scaled group: a sprite would inherit its scale */}
       <Tag lines={tag.lines} border={selected ? info.accent : tag.border} position={[0, info.height * size + 0.8, -2]} theme={theme} />
     </group>
@@ -241,10 +352,13 @@ function Building({ dep, info, pods, pos, selected, onSelect, powerGrid, nodeCol
 
 // ---------- Power Stations (Nodes) ----------
 
-function PowerStation({ readOnly, node, pos, used, color, theme, onHover }: {
-  readOnly: boolean; node: K8sObject; pos: THREE.Vector3; used: number; color: string; theme: Theme; onHover: OnHover
+function PowerStation({ node, pos, used, color, theme, onHover, selected, onSelect }: {
+  node: K8sObject; pos: THREE.Vector3; used: number; color: string; theme: Theme; onHover: OnHover
+  selected: boolean; onSelect: () => void
 }) {
   const ready = nodeReady(node)
+  const cordoned = !!node.spec?.unschedulable
+  const drain: string = node.metadata.annotations?.['kubeverse.io/drain'] ?? ''
   const capacity = Number(node.status.capacity.pods)
   const name = node.metadata.name
   const night = theme.mode === 'night'
@@ -252,7 +366,7 @@ function PowerStation({ readOnly, node, pos, used, color, theme, onHover }: {
   const smoke = useRef<THREE.Group>(null)
   useFrame(({ clock }) => {
     const t = clock.elapsedTime
-    if (beacon.current) beacon.current.visible = ready || Math.sin(t * 8) > 0
+    if (beacon.current) beacon.current.visible = (ready && !cordoned) || Math.sin(t * 8) > 0
     smoke.current?.children.forEach((c, i) => {
       const k = (t * 0.3 + i / 3) % 1
       c.position.y = 5 + k * 3.5
@@ -266,14 +380,21 @@ function PowerStation({ readOnly, node, pos, used, color, theme, onHover }: {
     e.stopPropagation()
     onHover({
       title: `⚡ Power Station ${name}`,
-      lines: ['A Node: a machine that runs Pods.', ready ? `Running ${used} of ${capacity} Pod slots.` : 'POWER CUT: its Pods were evicted.',
-        ready ? 'Click to cut power (Node Outage).' : 'Click to restore power.'],
+      lines: ['A Node: a machine that runs Pods.', !ready ? 'POWER CUT: its Pods were evicted.' : cordoned ? `Under maintenance (cordoned): ${drain}.` : `Running ${used} of ${capacity} Pod slots.`,
+        'Click for maintenance and power controls.'],
       ...at(e),
     })
   }
   return (
     <group position={pos} scale={0.85}>
-      <Pad w={13} d={10.5} r={2.5} position={[0, 0.006, -0.3]} color={theme.district} />
+      <Pad w={13} d={10.5} r={2.5} position={[0, 0.006, -0.3]} color={selected ? color : theme.district} opacity={selected ? 0.5 : 1} />
+      {cordoned && (
+        <group position={[-1.2, 0, 4.6]}>
+          {/* maintenance barrier: striped boom between two posts */}
+          {[-3.4, 3.4].map((x) => <mesh key={x} position={[x, 0.6, 0]}><boxGeometry args={[0.25, 1.2, 0.25]} /><meshStandardMaterial color="#334155" /></mesh>)}
+          {[-2.55, -0.85, 0.85, 2.55].map((x, i) => <mesh key={x} position={[x, 1.05, 0]}><boxGeometry args={[1.7, 0.22, 0.12]} /><meshStandardMaterial color={i % 2 ? '#f8fafc' : '#f59e0b'} /></mesh>)}
+        </group>
+      )}
       <mesh position={[-1.2, 1.5, 1.6]} castShadow receiveShadow><boxGeometry args={[6.4, 3, 3.2]} /><meshStandardMaterial color={wall} /></mesh>
       <mesh position={[-1.2, 3.1, 1.6]}><boxGeometry args={[6.7, 0.22, 3.5]} /><meshStandardMaterial color={color} /></mesh>
       {/* Capacity meter: one light per Pod slot, lit when used */}
@@ -296,34 +417,41 @@ function PowerStation({ readOnly, node, pos, used, color, theme, onHover }: {
       </group>
       <mesh position={[-4.6, 3, -2.4]} castShadow><cylinderGeometry args={[0.24, 0.32, 6, 12]} /><meshStandardMaterial color={concrete} /></mesh>
       {[4.6, 5.4].map((y) => <mesh key={y} position={[-4.6, y, -2.4]}><cylinderGeometry args={[0.27, 0.28, 0.32, 12]} /><meshStandardMaterial color="#dc2626" /></mesh>)}
-      <mesh ref={beacon} position={[-4.6, 6.2, -2.4]}><sphereGeometry args={[0.22, 10, 8]} /><meshBasicMaterial color={ready ? color : RED} toneMapped={false} /></mesh>
+      <mesh ref={beacon} position={[-4.6, 6.2, -2.4]}><sphereGeometry args={[0.22, 10, 8]} /><meshBasicMaterial color={!ready ? RED : cordoned ? AMBER : color} toneMapped={false} /></mesh>
       {[3.6, 4.8].map((x) => <mesh key={x} position={[x, 0.55, 2]} castShadow><boxGeometry args={[0.9, 1.1, 0.9]} /><meshStandardMaterial color={night ? '#55627d' : '#a8b0bc'} /></mesh>)}
       <FacadeSign text="POWER STATION" width={3.8} pos={[-1.2, 2.25, 3.23]} bg={ready ? color : '#7f1d1d'} theme={theme} />
       <mesh position={[0, 2.6, 0]} visible={false} onPointerOver={hover} onPointerMove={hover} onPointerOut={() => onHover(null)}
-        onClick={(e) => { e.stopPropagation(); onHover(null); if (!readOnly) void api.outage(name, ready) }}>
+        onClick={(e) => { e.stopPropagation(); onSelect() }}>
         <boxGeometry args={[12, 5.2, 9.5]} />
       </mesh>
       <Tag theme={theme} position={[-0.5, 7, 0]} border={ready ? color : RED} size={0.036}
         lines={[{ text: `⚡ ${name}`, px: 56, color: theme.labelFg },
-          ready ? { text: `Node · ${used}/${capacity} slots used`, px: 40, color: night ? '#cbd5e1' : '#334155' }
-            : { text: 'POWER CUT', px: 40, color: RED }]} />
+          !ready ? { text: 'POWER CUT', px: 40, color: RED }
+            : cordoned ? { text: `MAINTENANCE · ${drain.startsWith('blocked') ? 'waiting on a budget' : drain}`, px: 40, color: night ? AMBER : '#b45309' }
+              : { text: `Node · ${used}/${capacity} slots used`, px: 40, color: night ? '#cbd5e1' : '#334155' }]} />
     </group>
   )
 }
 
 // ---------- Cars ----------
 
-interface CarAgent { s: number; fail: boolean; slot: number }
+interface CarAgent { s: number; slot: number; phase: 'out' | 'in' | 'wait' | 'back'; fate?: 'refused' | 'error'; until: number }
 
 /**
- * Cars are independent agents: each spawns inside the caller, grows as it drives out, and either
- * shrinks into the callee (success) or makes a U-turn at its door and drives home (failure).
- * A failure only affects Cars spawned after it, so nothing on the Road jumps when health changes.
+ * Cars are independent agents. Each leaves the caller in the right-hand lane, keeps its distance from
+ * the Car ahead (so slow answers build a queue), and at the callee's door finds out what happens:
+ *  - the service has ready Units  → it drives in and a Unit serves it (that Unit flashes);
+ *  - it is Impacted (it answers, but something it needs is down) → it waits, then returns orange;
+ *  - it has no ready Units → it is refused at once and returns red, hazards flashing.
+ * Its fate is decided on arrival, from the live state, so Cars already on the road react to failures.
  */
-function Traffic({ edge, road, theme, accent, onHover, metric }: {
+function Traffic({ edge, road, theme, accent, onHover, metric, endpoints }: {
   edge: Edge; road: THREE.Vector3[]; theme: Theme; accent: string; onHover: OnHover; metric?: RouteMetrics
+  endpoints: string[] // uids of the destination's ready Pods: the Service only sends requests to these
 }) {
-  const trips = useMemo(() => ({ ok: new Path(carTrip(road, false)), fail: new Path(carTrip(road, true)) }), [road])
+  const targets = useRef(endpoints)
+  targets.current = endpoints
+  const trips = useMemo(() => ({ ok: new Path(carTrip(road, false)), back: new Path(carTrip(road, true)) }), [road])
   const cars = useRef<CarAgent[]>([])
   const timer = useRef(0)
   const live = useRef(edge)
@@ -332,52 +460,79 @@ function Traffic({ edge, road, theme, accent, onHover, metric }: {
   const paints = useRef<(THREE.MeshStandardMaterial | null)[]>([])
   const hazards = useRef<(THREE.Group | null)[]>([])
   const tmp = useMemo(() => new THREE.Vector3(), [])
-  const okColor = useMemo(() => new THREE.Color(accent), [accent])
-  const failColor = useMemo(() => new THREE.Color(RED), [])
+  const colors = useMemo(() => ({ ok: new THREE.Color(accent), refused: new THREE.Color(RED), error: new THREE.Color(ORANGE) }), [accent])
   useFrame(({ clock }, rawDt) => {
     const dt = Math.min(rawDt, 0.1) // a hidden tab must not dump a burst of Cars
+    const now = clock.elapsedTime
     const e = live.current
+    const L = trips.ok.length, door = L - CAR_GROW
     const n = Math.ceil(e.rps)
     if (n > 0 && (timer.current -= dt) <= 0) {
       const used = new Set(cars.current.map((c) => c.slot))
       const slot = [...Array(CAR_POOL).keys()].find((i) => !used.has(i))
-      if (slot !== undefined) cars.current.push({ s: 0, fail: !e.healthy, slot })
-      timer.current = trips.ok.length / CAR_SPEED / n // about n Cars on the Road at once
+      const room = !cars.current.some((c) => c.phase === 'out' && c.s < CAR_GAP) // the caller's exit is clear
+      if (slot !== undefined && room) cars.current.push({ s: 0, slot, phase: 'out', until: 0 })
+      timer.current = L / CAR_SPEED / n // about n Cars on the Road at once
     }
-    cars.current = cars.current.filter((c) => (c.s += CAR_SPEED * dt) < (c.fail ? trips.fail : trips.ok).length)
-    const blink = Math.sin(clock.elapsedTime * 12) > 0
+    // Outbound lane, front to back: each Car stops short of the one ahead.
+    let limit = Infinity
+    for (const c of cars.current.filter((c) => c.phase !== 'back').sort((a, b) => b.s - a.s)) {
+      if (c.phase === 'wait') {
+        if (now >= c.until) c.phase = 'back'
+      } else if (c.phase === 'in') {
+        c.s += CAR_SPEED * dt
+      } else {
+        c.s = Math.min(c.s + CAR_SPEED * dt, limit)
+        if (c.s >= door) {
+          if (!e.healthy) { c.phase = 'back'; c.fate = 'refused' }
+          else if (e.errors) { c.phase = 'wait'; c.fate = 'error'; c.until = now + ERROR_WAIT; c.s = door }
+          else c.phase = 'in'
+        }
+      }
+      limit = c.s - CAR_GAP
+    }
+    cars.current = cars.current.filter((c) => {
+      if (c.phase === 'back') c.s += CAR_SPEED * dt
+      if (c.phase === 'in' && c.s >= L) { deliver(e.to, targets.current, now); return false }
+      return !(c.phase === 'back' && c.s >= trips.back.length)
+    })
+    const blink = Math.sin(now * 12) > 0
     groups.current.forEach((g, i) => {
       if (!g) return
       const car = cars.current.find((c) => c.slot === i)
       g.visible = !!car
       if (!car) return
-      const trip = car.fail ? trips.fail : trips.ok
+      const trip = car.phase === 'back' ? trips.back : trips.ok
       g.rotation.y = trip.at(car.s, tmp)
       g.position.copy(tmp)
       g.scale.setScalar(1.15 * Math.max(0.01, Math.min(1, car.s / CAR_GROW, (trip.length - car.s) / CAR_GROW)))
-      paints.current[i]?.color.copy(car.fail ? failColor : okColor)
-      if (hazards.current[i]) hazards.current[i]!.visible = car.fail && blink
+      paints.current[i]?.color.copy(car.fate ? colors[car.fate] : colors.ok)
+      if (hazards.current[i]) hazards.current[i]!.visible = !!car.fate && blink
     })
   })
-  const [src, dst] = [nameOf(edge.from), nameOf(edge.to)]
+  const [src, dst] = [edge.from.startsWith('ingress:') ? 'customers' : nameOf(edge.from), nameOf(edge.to)]
   const night = theme.mode === 'night'
+  const story = (c?: CarAgent) => !c ? '' : c.fate === 'refused' ? `Refused: ${dst} has no ready Units to answer, so it turns straight back.`
+    : c.fate === 'error' ? `${dst} answered with an error: something it depends on is down.`
+      : c.phase === 'in' ? `Being served by the next ready ${dst} Unit (round-robin).` : `On its way to ${dst}.`
   return (
     <group>
       {Array.from({ length: CAR_POOL }, (_, i) => (
         <group key={i} visible={false} ref={(g) => { groups.current[i] = g }}
           onPointerOver={(e) => {
             e.stopPropagation()
-            const fail = cars.current.find((c) => c.slot === i)?.fail
+            const car = cars.current.find((c) => c.slot === i)
             onHover({
               title: `🚗 Request: ${src} → ${dst}`,
               lines: metric ? [`${metric.requests} requests in 10 seconds`, `${Math.round(metric.latency_ms)} ms average · ${(metric.error_rate * 100).toFixed(1)}% errors`]
-                : [fail ? `Failed: ${dst} has no working Units, so the car turns back.` : 'On its way; it will be served.', `${live.current.rps} requests/second on this road.`],
+                : [story(car), `${live.current.rps} requests/second on this road.`],
               ...at(e),
             })
           }}
           onPointerOut={() => onHover(null)}>
           <mesh position={[0, 0.3, 0]} castShadow><boxGeometry args={[1.1, 0.35, 0.6]} /><meshStandardMaterial ref={(m) => { paints.current[i] = m }} color={accent} /></mesh>
           <mesh position={[-0.1, 0.6, 0]}><boxGeometry args={[0.6, 0.3, 0.52]} /><meshStandardMaterial color={night ? '#0f172a' : '#e2e8f0'} /></mesh>
+          {[-0.32, 0.32].map((x) => <mesh key={x} position={[x, 0.13, 0]}><boxGeometry args={[0.26, 0.26, 0.66]} /><meshStandardMaterial color="#111827" /></mesh>)}
           {night && [-0.18, 0.18].map((z) => (
             <mesh key={z} position={[0.56, 0.32, z]}><boxGeometry args={[0.04, 0.1, 0.12]} /><meshBasicMaterial color="#fef9c3" toneMapped={false} /></mesh>
           ))}
@@ -388,6 +543,139 @@ function Traffic({ edge, road, theme, accent, onHover, metric }: {
           </group>
         </group>
       ))}
+    </group>
+  )
+}
+
+/** City Hall: the control plane (API server and its record book etcd, the scheduler, the controllers). */
+function CityHall({ pos, theme, onHover, selected, onSelect }: {
+  pos: THREE.Vector3; theme: Theme; onHover: OnHover; selected: boolean; onSelect: () => void
+}) {
+  const night = theme.mode === 'night'
+  const stone = night ? '#8a97b3' : '#f3efe6', roof = '#475569', accent = '#6366f1'
+  const hover = (e: ThreeEvent<PointerEvent>) => {
+    e.stopPropagation()
+    onHover({ title: '🏛️ City Hall · the control plane', lines: [
+      'Where Kubernetes decides. The API server keeps the city\'s records (etcd);',
+      'the scheduler and controllers compare desired with actual and send out orders.',
+      'Watch the glowing messengers: each one is a decision. Click for the legend.',
+    ], ...at(e) })
+  }
+  return (
+    <group position={pos}>
+      <Pad w={18} d={13} r={3} position={[0, 0.006, 0]} color={selected ? accent : theme.district} opacity={selected ? 0.45 : 1} />
+      <mesh position={[0, 0.2, 0.4]} receiveShadow><boxGeometry args={[12, 0.4, 8]} /><meshStandardMaterial color={stone} /></mesh>
+      <mesh position={[0, 0.5, 0.6]}><boxGeometry args={[11, 0.3, 7.4]} /><meshStandardMaterial color={stone} /></mesh>
+      <mesh position={[0, 2.4, -0.6]} castShadow><boxGeometry args={[10, 3.6, 4.6]} /><meshStandardMaterial color={stone} /></mesh>
+      {[-3.6, -2.2, -0.8, 0.8, 2.2, 3.6].map((x) => (
+        <mesh key={x} position={[x, 2.3, 2.3]} castShadow><cylinderGeometry args={[0.25, 0.29, 3.6, 14]} /><meshStandardMaterial color={stone} /></mesh>
+      ))}
+      <mesh position={[0, 4.4, 0.4]}><boxGeometry args={[10.4, 0.5, 4.8 + 3.2]} /><meshStandardMaterial color={roof} /></mesh>
+      <FacadeSign text="CITY HALL" width={3.6} pos={[0, 4.4, 4.42]} bg={accent} theme={theme} />
+      {/* clock tower and dome */}
+      <mesh position={[0, 6.4, -0.6]} castShadow><boxGeometry args={[2.6, 3.6, 2.6]} /><meshStandardMaterial color={stone} /></mesh>
+      <mesh position={[0, 7, 0.72]} rotation-x={Math.PI / 2}><cylinderGeometry args={[0.8, 0.8, 0.06, 24]} /><meshBasicMaterial color={night ? '#fde68a' : '#f8fafc'} toneMapped={false} /></mesh>
+      <mesh position={[0, 8.2, -0.6]}><sphereGeometry args={[1.5, 24, 12, 0, Math.PI * 2, 0, Math.PI / 2]} /><meshStandardMaterial color={accent} /></mesh>
+      <mesh position={[0, 10, -0.6]}><cylinderGeometry args={[0.05, 0.05, 1.6, 6]} /><meshStandardMaterial color="#334155" /></mesh>
+      <mesh position={[0, 3.2, -0.6]} visible={false} onPointerOver={hover} onPointerMove={hover} onPointerOut={() => onHover(null)}
+        onClick={(e) => { e.stopPropagation(); onSelect() }}>
+        <boxGeometry args={[12, 9, 9]} />
+      </mesh>
+      <Tag theme={theme} position={[0, 11, -0.6]} border={accent} size={0.04}
+        lines={[{ text: '🏛️ City Hall', px: 56, color: theme.labelFg }, { text: 'control plane', px: 40, color: night ? '#a5b4fc' : '#4338ca' }]} />
+    </group>
+  )
+}
+
+interface Flight { from: THREE.Vector3; to: THREE.Vector3; color: THREE.Color; t0: number }
+const FLIGHT_SECONDS = 1.5
+const MESSENGERS = 30
+
+/**
+ * Messengers: one glowing orb per control-plane decision, flying through the air (never on a Road)
+ * from whoever decided to whoever must act. Colour = the component that reported the event.
+ */
+function Messengers({ events, place }: { events: K8sObject[]; place: (e: K8sObject) => [THREE.Vector3, THREE.Vector3] | null }) {
+  const clock = useThree((s) => s.clock)
+  const seen = useRef<Set<string> | null>(null)
+  const flights = useRef<(Flight | null)[]>(Array(MESSENGERS).fill(null))
+  const orbs = useRef<(THREE.Group | null)[]>([])
+  useEffect(() => {
+    if (!seen.current) { seen.current = new Set(events.map((e) => e.metadata.uid)); return } // no fly-by for history
+    for (const e of events) {
+      if (seen.current.has(e.metadata.uid)) continue
+      seen.current.add(e.metadata.uid)
+      const ends = place(e)
+      const color = COMPONENTS[e.reportingComponent ?? '']?.color
+      const free = flights.current.findIndex((f) => !f || clock.elapsedTime - f.t0 > FLIGHT_SECONDS)
+      if (ends && color && free >= 0) flights.current[free] = { from: ends[0], to: ends[1], color: new THREE.Color(color), t0: clock.elapsedTime }
+    }
+  }, [events, place, clock])
+  const tmp = useMemo(() => new THREE.Vector3(), [])
+  useFrame(() => {
+    flights.current.forEach((f, i) => {
+      const g = orbs.current[i]
+      if (!g) return
+      const k = f ? (clock.elapsedTime - f.t0) / FLIGHT_SECONDS : 2
+      g.visible = k >= 0 && k <= 1
+      if (!f || !g.visible) return
+      g.children.forEach((child, j) => {
+        const kk = Math.max(0, k - j * 0.05) // the orb, then a short trail
+        tmp.lerpVectors(f.from, f.to, kk)
+        tmp.y += Math.sin(Math.PI * kk) * (6 + f.from.distanceTo(f.to) * 0.12)
+        child.position.copy(tmp)
+        ;((child as THREE.Mesh).material as THREE.MeshBasicMaterial).color.copy(f.color)
+      })
+    })
+  })
+  return (
+    <group>
+      {Array.from({ length: MESSENGERS }, (_, i) => (
+        <group key={i} visible={false} ref={(g) => { orbs.current[i] = g }}>
+          {[0.85, 0.6, 0.4].map((r, j) => (
+            <mesh key={j}><sphereGeometry args={[r, 12, 10]} /><meshBasicMaterial transparent opacity={1 - j * 0.3} toneMapped={false} /></mesh>
+          ))}
+        </group>
+      ))}
+    </group>
+  )
+}
+
+/** The City Gate: an Ingress, the city's entrance from the internet, routing a host name to a Service. */
+function CityGate({ ingress, pos, healthy, theme, onHover }: {
+  ingress: K8sObject; pos: THREE.Vector3; healthy: boolean; theme: Theme; onHover: OnHover
+}) {
+  const rule = ingress.spec.rules[0]
+  const host: string = rule.host, target: string = rule.http.paths[0].backend.service.name
+  const night = theme.mode === 'night'
+  const stone = night ? '#7483a0' : '#ece8df'
+  const accent = healthy ? '#0ea5e9' : RED
+  const hover = (e: ThreeEvent<PointerEvent>) => {
+    e.stopPropagation()
+    onHover({ title: `🌐 City Gate · Ingress ${ingress.metadata.name}`, lines: [
+      'The entrance from the internet: customers visiting this address come in here.',
+      `${host}/ → the ${target} Service`, healthy ? 'Open: customers are reaching the shop.' : `Customers are turned away: ${target} has no ready Units.`,
+    ], ...at(e) })
+  }
+  return (
+    <group position={pos}>
+      <Pad w={11} d={9} r={2.5} position={[0, 0.006, 0]} color={theme.district} />
+      {[-3.2, 3.2].map((z) => (
+        <group key={z} position={[0, 0, z]}>
+          <mesh position={[0, 2.6, 0]} castShadow><boxGeometry args={[1.4, 5.2, 1.4]} /><meshStandardMaterial color={stone} /></mesh>
+          <mesh position={[0, 5.35, 0]}><boxGeometry args={[1.7, 0.3, 1.7]} /><meshStandardMaterial color={accent} /></mesh>
+        </group>
+      ))}
+      <mesh position={[0, 5.9, 0]} castShadow><boxGeometry args={[1.6, 0.9, 8.2]} /><meshStandardMaterial color={stone} /></mesh>
+      <mesh position={[0, 5.9, 0]} rotation-y={Math.PI / 2}><boxGeometry args={[8.25, 0.12, 1.65]} /><meshBasicMaterial color={accent} toneMapped={false} /></mesh>
+      <FacadeSign text="CITY GATE" width={4.6} pos={[0.82, 5.9, 0]} bg={accent} theme={theme} rotY={Math.PI / 2} />
+      <mesh position={[-1.4, 1.1, 2.3]} castShadow><boxGeometry args={[1.2, 2.2, 1.2]} /><meshStandardMaterial color={stone} /></mesh>
+      <mesh position={[-1.4, 1.4, 2.3]}><boxGeometry args={[1.25, 0.6, 1.25]} /><meshStandardMaterial color={night ? '#38bdf8' : '#9cc7e4'} /></mesh>
+      <mesh position={[0, 3, 0]} visible={false} onPointerOver={hover} onPointerMove={hover} onPointerOut={() => onHover(null)}>
+        <boxGeometry args={[4, 6.5, 9]} />
+      </mesh>
+      <Tag theme={theme} position={[0, 7.4, 0]} border={accent} size={0.04}
+        lines={[{ text: '🌐 City Gate', px: 56, color: theme.labelFg }, { text: `${host} → ${target}`, px: 40, color: healthy ? (night ? '#7dd3fc' : '#0369a1') : RED }]} />
     </group>
   )
 }
@@ -467,7 +755,7 @@ export function City({ cluster, selected, onSelect, powerGrid, theme, onHover, s
   powerGrid: boolean; theme: Theme; onHover: OnHover; states: ServiceState; homeTick: number
 }) {
   const all = Object.values(cluster.objects)
-  const deployments = all.filter((o) => o.kind === 'Deployment')
+  const deployments = all.filter(isWorkload)
   const pods = all.filter((o) => o.kind === 'Pod')
   const nodes = all.filter((o) => o.kind === 'Node').sort((a, b) => a.metadata.name.localeCompare(b.metadata.name))
   const nodeColors = Object.fromEntries(nodes.map((n, i) => [n.metadata.name, NODE_COLORS[i % NODE_COLORS.length]]))
@@ -476,15 +764,15 @@ export function City({ cluster, selected, onSelect, powerGrid, theme, onHover, s
   const { layout, roads, obstacles, lamps } = useMemo(() => {
     const calls = cluster.edges.map((e) => ({ from: e.from, to: e.to }))
     const layout = layoutCity(deployments.map((d) => ({ namespace: d.metadata.namespace!, name: d.metadata.name })),
-      nodes.map((n) => n.metadata.name), calls)
+      nodes.map((n) => n.metadata.name), calls, calls.filter((c) => c.from.startsWith('ingress:')))
     const roads = buildRoads(layout, calls)
     if (import.meta.env.DEV) checkRoads(layout, roads)
-    const lots = [...Object.values(layout.lots), ...Object.values(layout.stations)]
+    const lots = [...Object.values(layout.lots), ...Object.values(layout.stations), ...Object.values(layout.gates), ...(layout.hall ? [layout.hall] : [])]
     const clear = (p: THREE.Vector3) => lots.every((l) => Math.abs(p.x - l.center.x) > BUILDING.halfW + 1 ||
       p.z < l.center.z + BUILDING.back - 1 || p.z > l.center.z + BUILDING.front + 1)
     // Lamps every ~9 units on the left kerb of each Road, wherever that is clear of Buildings.
     const lamps = Object.values(roads).flatMap((r) => {
-      const kerb = new Path(offsetPath(r, -(ROAD_W / 2 + 0.6)))
+      const kerb = new Path(offsetPath(r, -(ROAD_W / 2 + KERB + 0.3)))
       return Array.from({ length: Math.floor(kerb.length / 9) }, (_, i) => {
         const v = new THREE.Vector3()
         kerb.at(4.5 + i * 9, v)
@@ -495,14 +783,41 @@ export function City({ cluster, selected, onSelect, powerGrid, theme, onHover, s
     const obstacles = [
       ...Object.values(layout.lots).map((l) => ({ x: l.center.x, z: l.center.z - 0.4, rad: 9.5 })),
       ...Object.values(layout.stations).map((l) => ({ x: l.center.x, z: l.center.z, rad: 8 })),
-      ...Object.values(roads).flatMap((r) => r.filter((_, i) => i % 2 === 0).map((p) => ({ x: p.x, z: p.z, rad: 2.4 }))),
+      ...Object.values(layout.gates).map((l) => ({ x: l.center.x, z: l.center.z, rad: 7 })),
+      ...(layout.hall ? [{ x: layout.hall.center.x, z: layout.hall.center.z, rad: 11 }] : []),
+      ...Object.values(roads).flatMap((r) => r.filter((_, i) => i % 2 === 0).map((p) => ({ x: p.x, z: p.z, rad: ROAD_W / 2 + KERB + 1.2 }))),
     ]
     return { layout, roads, obstacles, lamps }
   }, [layoutKey]) // eslint-disable-line react-hooks/exhaustive-deps
   const edges = cluster.edges.filter((e) => roads[`${e.from}>${e.to}`])
-  const focus = selected && layout.lots[selected] ? layout.lots[selected].center : null
+  const focus = !selected ? null : selected === 'city-hall' ? layout.hall?.center ?? null
+    : selected.startsWith('node:') ? layout.stations[selected.slice(5)]?.center ?? null : layout.lots[selected]?.center ?? null
   const podsOn = (node: string) => pods.filter((p) => p.spec.nodeName === node && !p.metadata.deletionTimestamp).length
   const ready = deployments.length > 0
+  const ingresses = all.filter((o) => o.kind === 'Ingress')
+  const claims = all.filter((o) => o.kind === 'PersistentVolumeClaim').sort((a, b) => a.metadata.name.localeCompare(b.metadata.name))
+  const events = all.filter((o) => o.kind === 'Event')
+  // Where each control-plane decision flies from and to.
+  const objects = cluster.objects
+  const place = useCallback((e: K8sObject): [THREE.Vector3, THREE.Vector3] | null => {
+    const lift = (v: THREE.Vector3 | undefined, y: number) => v?.clone().add(new THREE.Vector3(0, y, 0))
+    const hall = lift(layout.hall?.center, 9)
+    const station = (n?: string) => lift(n ? layout.stations[n]?.center : undefined, 6)
+    const io = e.involvedObject
+    if (!io) return null
+    const podApp = (name: string) => Object.values(objects).find((o) => o.kind === 'Pod' && o.metadata.name === name)?.metadata.labels?.app
+      ?? name.replace(/-\d+$/, '')
+    const building = (app: string) => lift(layout.lots[`${io.namespace}/${app}`]?.center, 4)
+    const target = io.kind === 'Node' ? station(io.name) : io.kind === 'Pod' ? building(podApp(io.name)) : building(io.name)
+    const component = e.reportingComponent
+    let from = hall, to = target
+    if (component === 'kubelet') { from = station(e.reportingInstance || undefined); to = io.kind === 'Node' ? hall : target }
+    if (e.reason === 'Scheduled') to = station(/ to (\S+)$/.exec(e.message ?? '')?.[1])
+    return from && to ? [from, to] : null
+  }, [layout, objects])
+  // A Service's endpoints are its ready Pods: the only ones that receive requests.
+  const endpoints = (service: string) => pods.filter((p) => `${p.metadata.namespace}/${p.metadata.labels?.app}` === service &&
+    !p.metadata.deletionTimestamp && p.status?.containerStatuses?.[0]?.ready).map((p) => p.metadata.uid)
 
   return (
     <Canvas shadows camera={{ position: [0, 60, 80], fov: 45, near: 1, far: 900 }} onPointerMissed={() => onSelect(null)}>
@@ -511,7 +826,8 @@ export function City({ cluster, selected, onSelect, powerGrid, theme, onHover, s
       <ambientLight intensity={theme.ambient} />
       <hemisphereLight args={[theme.sky, theme.ground, theme.ambient * 0.5]} />
       <directionalLight position={[30, 45, 25]} intensity={theme.sun} color={theme.sunColor} castShadow
-        shadow-mapSize={[2048, 2048]} shadow-camera-left={-80} shadow-camera-right={80} shadow-camera-top={80} shadow-camera-bottom={-80} shadow-camera-far={220} />
+        shadow-mapSize={[2048, 2048]} shadow-camera-left={-80} shadow-camera-right={80} shadow-camera-top={80} shadow-camera-bottom={-80} shadow-camera-far={220}
+        shadow-bias={-0.0004} shadow-normalBias={0.04} />
       <Ground layout={layout} theme={theme} />
       {ready && <Scenery core={layout.core} districts={layout.districts} obstacles={obstacles} theme={theme} />}
       {ready && <Lamps points={lamps} theme={theme} />}
@@ -521,9 +837,19 @@ export function City({ cluster, selected, onSelect, powerGrid, theme, onHover, s
           emphasis={!selected ? 'normal' : e.from === selected || e.to === selected ? 'strong' : 'dim'} />
       ))}
       {nodes.map((n) => layout.stations[n.metadata.name] && (
-        <PowerStation readOnly={!!cluster.context} key={n.metadata.uid} node={n} pos={layout.stations[n.metadata.name].center} used={podsOn(n.metadata.name)}
-          color={nodeColors[n.metadata.name]} theme={theme} onHover={onHover} />
+        <PowerStation key={n.metadata.uid} node={n} pos={layout.stations[n.metadata.name].center} used={podsOn(n.metadata.name)}
+          color={nodeColors[n.metadata.name]} theme={theme} onHover={onHover}
+          selected={selected === `node:${n.metadata.name}`} onSelect={() => onSelect(`node:${n.metadata.name}`)} />
       ))}
+      {layout.hall && <CityHall pos={layout.hall.center} theme={theme} onHover={onHover}
+        selected={selected === 'city-hall'} onSelect={() => onSelect('city-hall')} />}
+      <Messengers events={events} place={place} />
+      {ingresses.map((ing) => {
+        const key = `ingress:${ing.metadata.namespace}/${ing.metadata.name}`
+        const gate = layout.gates[key]
+        return gate && <CityGate key={ing.metadata.uid} ingress={ing} pos={gate.center} theme={theme} onHover={onHover}
+          healthy={cluster.edges.find((e) => e.from === key)?.healthy ?? true} />
+      })}
       {deployments.map((dep) => {
         const key = keyOf(dep)
         const lot = layout.lots[key]
@@ -532,7 +858,8 @@ export function City({ cluster, selected, onSelect, powerGrid, theme, onHover, s
           <Building key={dep.metadata.uid} dep={dep} info={landmarkFor(dep.metadata.name)} pos={lot.center}
             selected={selected === key} onSelect={() => onSelect(key)} powerGrid={powerGrid} nodeColors={nodeColors}
             theme={theme} onHover={onHover} state={states[key]} metric={serviceMetrics[key]}
-            pods={pods.filter((p) => belongsTo(p, dep))} />
+            pods={podsOf(dep, pods)}
+            claims={claims.filter((c) => c.metadata.namespace === dep.metadata.namespace && c.metadata.labels?.app === dep.metadata.name)} />
         )
       })}
       {edges.map((e) => {
@@ -540,7 +867,8 @@ export function City({ cluster, selected, onSelect, powerGrid, theme, onHover, s
         if (replay && !metric) return null // replaying history: only routes with recorded traffic get Cars
         const edge = metric ? { ...e, rps: metric.rps, healthy: metric.error_rate < 0.1 } : e
         return <Traffic key={`${e.from}>${e.to}`} edge={edge} road={roads[`${e.from}>${e.to}`]} theme={theme} onHover={onHover}
-          accent={metric ? trafficColor(metric) : landmarkFor(nameOf(e.from)).accent} metric={metric} />
+          accent={metric ? trafficColor(metric) : e.from.startsWith('ingress:') ? CUSTOMER : landmarkFor(nameOf(e.from)).accent}
+          metric={metric} endpoints={endpoints(e.to)} />
       })}
       <OrbitControls makeDefault maxPolarAngle={Math.PI / 2.15} minDistance={10} maxDistance={170} />
       <CameraRig focus={focus} layout={layout} homeTick={homeTick} />

@@ -9,7 +9,8 @@ const COL = 34            // x distance between call-graph columns
 const ROW = 28            // z distance between Buildings in a column
 const PAD = 11            // District padding around its Buildings
 const DISTRICT_GAP = 7
-export const ROAD_W = 2.1
+export const ROAD_W = 3.2       // two lanes: requests go out on the right, failed ones come back on the left
+export const KERB = 0.7         // pavement on each side of a Road
 /** Room a Building can take at its largest size (10 replicas), Building-local, including its Unit rows. */
 export const BUILDING = { halfW: 7, back: -7.6, front: 6.8 }
 const SIDE_X = BUILDING.halfW + 2.5   // where a Road leaves/enters beside a Building
@@ -20,6 +21,8 @@ export interface District extends Rect { name: string }
 export interface CityLayout {
   lots: Record<string, Lot>      // service lots by "ns/name"
   stations: Record<string, Lot>  // Power Station positions by node name
+  gates: Record<string, Lot>     // City Gates (Ingresses) by "ingress:ns/name"
+  hall: Lot | null               // City Hall: the control plane
   districts: District[]
   core: Rect                     // everything meaningful; Scenery buildings stay outside it
 }
@@ -33,7 +36,8 @@ function hash(s: string, salt = 0) {
 }
 
 /** Pure and deterministic. `calls` must be from→to pairs only (no rates or health) so failures never rearrange the city. */
-export function layoutCity(deployments: { namespace: string; name: string }[], nodes: string[], calls: Call[]): CityLayout {
+export function layoutCity(deployments: { namespace: string; name: string }[], nodes: string[], calls: Call[],
+  gates: Call[] = []): CityLayout {
   const keys = deployments.map((d) => `${d.namespace}/${d.name}`).sort()
   const known = new Set(keys)
   const edges = calls.filter((c) => known.has(c.from) && known.has(c.to))
@@ -79,16 +83,21 @@ export function layoutCity(deployments: { namespace: string; name: string }[], n
     x = x1 + DISTRICT_GAP
   })
 
-  // Power Stations: a gently curved row behind the Districts.
+  // Behind the Districts: City Hall in the middle, Power Stations either side of it.
   const all: Rect = districts.length
     ? { x0: 0, x1: x - DISTRICT_GAP, z0: Math.min(...districts.map((d) => d.z0)), z1: Math.max(...districts.map((d) => d.z1)) }
     : { x0: 0, x1: 0, z0: 0, z1: 0 }
   const sorted = [...nodes].sort()
+  const midX = (all.x0 + all.x1) / 2
+  const hallPos = new THREE.Vector3(midX, 0, all.z0 - 21)
+  const half = Math.ceil(sorted.length / 2)
   const stationPos = sorted.map((_, i) => {
-    const t = i - (sorted.length - 1) / 2
-    return new THREE.Vector3((all.x0 + all.x1) / 2 + t * 19, 0, all.z0 - 19 + Math.abs(t) * 3)
+    const left = i < half, k = left ? half - 1 - i : i - half
+    return new THREE.Vector3(midX + (left ? -1 : 1) * (20 + k * 18), 0, all.z0 - 17 - k * 3)
   })
-  const core: Rect = { x0: all.x0 - 3, x1: all.x1 + 3, z0: sorted.length ? all.z0 - 30 : all.z0 - 3, z1: all.z1 + 3 }
+  // City Gates: on the western edge, level with the service each one routes customers to.
+  const gatePos = gates.filter((g) => pos[g.to]).map((g, i) => ({ key: g.from, at: new THREE.Vector3(all.x0 - 15, 0, pos[g.to].z + i * 12) }))
+  const core: Rect = { x0: all.x0 - (gatePos.length ? 24 : 3), x1: all.x1 + 3, z0: all.z0 - 32, z1: all.z1 + 3 }
 
   // Centre the city on the origin.
   const off = new THREE.Vector3((all.x0 + all.x1) / 2, 0, (all.z0 + all.z1) / 2)
@@ -96,6 +105,8 @@ export function layoutCity(deployments: { namespace: string; name: string }[], n
   return {
     lots: Object.fromEntries(keys.map((k) => [k, { key: k, center: pos[k].clone().sub(off) }])),
     stations: Object.fromEntries(sorted.map((n, i) => [n, { key: n, center: stationPos[i].clone().sub(off) }])),
+    gates: Object.fromEntries(gatePos.map((g) => [g.key, { key: g.key, center: g.at.clone().sub(off) }])),
+    hall: districts.length ? { key: 'city-hall', center: hallPos.clone().sub(off) } : null,
     districts: districts.map((d) => ({ name: d.name, ...moved(d) })),
     core: moved(core),
   }
@@ -114,23 +125,26 @@ function inBuilding(p: THREE.Vector3, c: THREE.Vector3, margin: number) {
  */
 export function buildRoads(layout: CityLayout, calls: Call[]): Record<string, THREE.Vector3[]> {
   const out: Record<string, THREE.Vector3[]> = {}
-  const valid = calls.filter((c) => layout.lots[c.from] && layout.lots[c.to])
+  const where = (k: string) => layout.lots[k] ?? layout.gates[k]
+  const valid = calls.filter((c) => where(c.from) && layout.lots[c.to])
   // Spread each Building's outgoing (and incoming) Roads along its side, ordered by where they head.
   const slots = (list: Call[], end: 'from' | 'to', other: 'from' | 'to') => {
     const m = new Map<Call, number>()
     const groups = new Map<string, Call[]>()
     for (const c of list) groups.set(c[end], [...(groups.get(c[end]) ?? []), c])
     for (const g of groups.values()) {
-      g.sort((a, b) => layout.lots[a[other]].center.z - layout.lots[b[other]].center.z)
-      g.forEach((c, i) => m.set(c, (i - (g.length - 1) / 2) * 3.2 - 1))
+      g.sort((a, b) => where(a[other]).center.z - where(b[other]).center.z)
+      g.forEach((c, i) => m.set(c, (i - (g.length - 1) / 2) * (ROAD_W + 1.6) - 1))
     }
     return m
   }
   const outZ = slots(valid, 'from', 'to'), inZ = slots(valid, 'to', 'from')
   for (const c of valid) {
-    const a = layout.lots[c.from].center, b = layout.lots[c.to].center
-    const za = a.z + outZ.get(c)!, zb = b.z + inZ.get(c)!
-    const start = new THREE.Vector3(a.x + 2, 0, za), exit = new THREE.Vector3(a.x + SIDE_X, 0, za)
+    const gate = !!layout.gates[c.from]
+    const a = where(c.from).center, b = layout.lots[c.to].center
+    const za = gate ? a.z : a.z + outZ.get(c)!, zb = b.z + inZ.get(c)!
+    // Customers come from beyond the city edge, through the gate's arch.
+    const start = new THREE.Vector3(gate ? a.x - 14 : a.x + 2, 0, za), exit = new THREE.Vector3(a.x + (gate ? 4 : SIDE_X), 0, za)
     const entry = new THREE.Vector3(b.x - SIDE_X, 0, zb), end = new THREE.Vector3(b.x - 2, 0, zb)
     // shortcut: assumes the callee is to the right (true for this layout); a call back to the left loops wide.
     const h = Math.max(6, (entry.x - exit.x) / 2)
