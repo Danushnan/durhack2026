@@ -3,8 +3,8 @@
  *
  * Each Car follows the one ahead in its lane with the Intelligent Driver Model: it accelerates towards
  * its own cruising speed, slows for bends ahead, and brakes smoothly to keep a safe time gap, so a slow
- * or blocked service builds a real queue that ripples back up the Road. At the callee's door the Car
- * learns its fate from the live state:
+ * or blocked service builds a real queue that ripples back up the Road. Each Car draws a number when
+ * it leaves; against the callee's live refused and error rates that decides what happens at the door:
  *  - served  → it drives in and a ready Unit answers it;
  *  - error   → the service is Impacted: it stops at the door, waits, then comes back (orange);
  *  - refused → nobody is ready to answer: it U-turns at once and comes back (red).
@@ -17,6 +17,7 @@ export interface CarAgent {
   a: number          // last acceleration (negative = braking: brake lights on)
   slot: number       // which pooled mesh draws it
   phase: 'out' | 'in' | 'wait' | 'back'
+  roll: number       // drawn when it leaves: below the refused rate it is refused, then errors, else served
   fate?: 'refused' | 'error'
   until: number      // when a waiting Car gets its error answer
 }
@@ -61,7 +62,7 @@ function drive(c: CarAgent, dt: number, v0: number, gap: number, vAhead: number)
 
 /** A new Car leaving the caller, slowly at first. Each driver cruises a little faster or slower. */
 export function newCar(slot: number, rand: () => number): CarAgent {
-  return { s: 0, v: 2, v0: DRIVE.speed * (0.85 + 0.3 * rand()), a: 0, slot, phase: 'out', until: 0 }
+  return { s: 0, v: 2, v0: DRIVE.speed * (0.85 + 0.3 * rand()), a: 0, slot, phase: 'out', roll: rand(), until: 0 }
 }
 
 /** The caller's exit is clear enough for another Car to pull out. */
@@ -81,11 +82,15 @@ export function admit(credit: number, rps: number, dt: number, cars: CarAgent[],
   return { credit: leave ? credit - (0.6 + 0.8 * rand()) : credit, leave }
 }
 
+/** The callee right now: the share of requests nobody answers, and the share answered with an error. */
+export interface Rates { refused: number; error: number }
+const fateOf = (c: CarAgent, r: Rates) => (c.roll < r.refused ? 'refused' : c.roll < r.refused + r.error ? 'error' : undefined)
+
 /**
- * Advance every Car by dt. `healthy`/`errors` describe the callee right now. Returns the Cars that
- * finished their trip this step (served ones were delivered to the callee) and the Cars still driving.
+ * Advance every Car by dt. Returns the Cars that finished their trip this step (served ones were
+ * delivered to the callee) and the Cars still driving.
  */
-export function stepCars(cars: CarAgent[], dt: number, now: number, trip: Trip, healthy: boolean, errors: boolean) {
+export function stepCars(cars: CarAgent[], dt: number, now: number, trip: Trip, rates: Rates) {
   const len = DRIVE.length
   // Outbound lane, front to back: everything not yet turned back, including Cars waiting at the door.
   let ahead: { s: number; v: number } | null = null
@@ -96,13 +101,14 @@ export function stepCars(cars: CarAgent[], dt: number, now: number, trip: Trip, 
     } else {
       // An Impacted service makes Cars stop at its door (IDM keeps minGap, so the line sits just past it);
       // a refused Car slows for the U-turn it is about to make.
-      const stopLine = c.phase === 'out' && healthy && errors ? trip.door + DRIVE.minGap + 0.2 - c.s : Infinity
+      const fate = c.phase === 'out' ? fateOf(c, rates) : undefined
+      const stopLine = fate === 'error' ? trip.door + DRIVE.minGap + 0.2 - c.s : Infinity
       const gap = Math.min(ahead ? ahead.s - c.s - len : Infinity, stopLine)
       const vAhead = ahead && ahead.s - c.s - len <= stopLine ? ahead.v : 0
-      drive(c, dt, target(c, c.phase === 'out' && !healthy ? trip.limitBack : trip.limitOk), gap, vAhead)
+      drive(c, dt, target(c, fate === 'refused' ? trip.limitBack : trip.limitOk), gap, vAhead)
       if (c.phase === 'out' && c.s >= trip.door) {
-        if (!healthy) { c.phase = 'back'; c.fate = 'refused' }
-        else if (errors) { c.phase = 'wait'; c.fate = 'error'; c.until = now + DRIVE.wait; c.s = Math.min(c.s, trip.door); c.v = 0 }
+        if (fate === 'refused') { c.phase = 'back'; c.fate = 'refused' }
+        else if (fate === 'error') { c.phase = 'wait'; c.fate = 'error'; c.until = now + DRIVE.wait; c.s = Math.min(c.s, trip.door); c.v = 0 }
         else c.phase = 'in'
       }
     }

@@ -28,6 +28,8 @@ HPA_DOWNSCALE_WINDOW_SECONDS = 20.0
 # shortcut: real CrashLoopBackOff grows 10s -> 5min; compressed to 1s -> 8s so a demo can watch it.
 BACKOFF_CAP_SECONDS = 8.0
 MAX_REPLICAS = 10
+POD_RPS = 4.0                # requests/second one Pod handles comfortably; beyond that requests queue
+REFUSED_MS = 3.0             # a refused call fails fast: nothing even answered
 # shortcut: node-monitor-grace-period is 40s and the default NoExecute toleration 300s; compressed for the demo.
 NODE_GRACE_SECONDS = 1.5     # no kubelet heartbeat for this long -> the node controller marks the Node NotReady
 TOLERATION_SECONDS = 2.0     # Pods tolerate an unreachable Node this long before they are evicted
@@ -106,6 +108,7 @@ class Deployment:
     max_unavailable: int | None = None                # PodDisruptionBudget, if any
     hpa: Autoscaler | None = None
     replica_sets: dict[str, int] = field(default_factory=dict)  # version -> desired replicas of its ReplicaSet
+    latency_ms: float = 20.0                          # its own work per request, unloaded
 
     def rs_name(self, version):
         return f"{self.name}-{suffix(f'{self.namespace}/{self.name}/{version}', 10)}"
@@ -159,10 +162,10 @@ class Simulator:
     def add_node(self, name, capacity):
         self.nodes[name] = Node(name, capacity, index=len(self.nodes) + 1)
 
-    def add_deployment(self, ns, name, replicas, calls=(), kind="Deployment", max_unavailable=None, hpa=None):
+    def add_deployment(self, ns, name, replicas, calls=(), kind="Deployment", max_unavailable=None, hpa=None, latency_ms=20.0):
         key = f"{ns}/{name}"
         self.deployments[key] = Deployment(ns, name, replicas, uid=f"dep-{next(self._ids)}", kind=kind,
-                                           max_unavailable=max_unavailable, hpa=hpa)
+                                           max_unavailable=max_unavailable, hpa=hpa, latency_ms=latency_ms)
         self.services[key] = name
         for target, rps in calls:
             self.calls.append((key, target, rps))
@@ -714,13 +717,32 @@ class Simulator:
             inbound = Counter({ing.service: customers for ing in self.ingresses})
             for (src, dst), rps in rates.items():
                 inbound[dst] += rps
-        edges = [{"from": src, "to": dst, "rps": rates[src, dst],
-                  "healthy": dst not in down, "errors": dst not in down and impacted(dst)}
-                 for src, dst, _ in self.calls]
+        # Latency and errors, as callers measure them. A service's own time grows sharply once its ready
+        # Pods get more than POD_RPS each; it then waits on what it calls, in proportion to how often.
+        share = {(src, dst): min(1.0, rps / base_in[src]) if base_in[src] else 1.0 for src, dst, rps in self.calls}
+        def own(key):
+            util = inbound[key] / max(ready(key), 1) / POD_RPS
+            return self.deployments[key].latency_ms * (1 + min(util ** 4, 24))
+        def latency(key, seen=()):
+            return own(key) + sum(share[src, dst] * (REFUSED_MS if dst in down else latency(dst, (*seen, key)))
+                                  for src, dst, _ in self.calls if src == key and dst not in seen)
+        def failing(key, seen=()):  # share of its requests that fail because something it needs is down
+            ok = 1.0
+            for src, dst, _ in self.calls:
+                if src == key and dst not in seen:
+                    ok *= 1 - share[src, dst] * (1.0 if dst in down else failing(dst, (*seen, key)))
+            return 1 - ok
+        def measured(dst, rps):
+            if dst in down:
+                return {"rps": rps, "healthy": False, "errors": False, "error_rate": 0.0, "refused_rate": 1.0,
+                        "latency_ms": REFUSED_MS if rps else None}
+            fail = round(failing(dst), 3)
+            return {"rps": rps, "healthy": True, "errors": fail > 0, "error_rate": fail, "refused_rate": 0.0,
+                    "latency_ms": round(latency(dst), 1) if rps else None}
+        edges = [{"from": src, "to": dst, **measured(dst, rates[src, dst])} for src, dst, _ in self.calls]
         # Customers arrive through each Ingress; it only works while its Service has ready Pods.
         for ing in self.ingresses:
-            edges.append({"from": f"ingress:{ing.namespace}/{ing.name}", "to": ing.service, "rps": customers,
-                          "healthy": ing.service not in down, "errors": ing.service not in down and impacted(ing.service)})
+            edges.append({"from": f"ingress:{ing.namespace}/{ing.name}", "to": ing.service, **measured(ing.service, customers)})
         return edges
 
     def _diff(self) -> list[dict]:
@@ -751,11 +773,11 @@ def demo_cluster() -> Simulator:
     for i in range(1, 4):
         sim.add_node(f"node-{i}", capacity=6)  # room to drain one Power Station without leaving Pods Pending
     sim.add_deployment("shop", "frontend", 3, [("shop/cart", 6), ("shop/checkout", 3)], max_unavailable=1,
-                       hpa=Autoscaler(min=3, max=7, target_rps=4.0))
-    sim.add_deployment("shop", "cart", 2, [("data/redis", 5)], max_unavailable=1)
-    sim.add_deployment("shop", "checkout", 2, [("shop/payments", 2), ("data/postgres", 3)], max_unavailable=1)
-    sim.add_deployment("shop", "payments", 2, max_unavailable=1)
-    sim.add_deployment("data", "postgres", 1, kind="StatefulSet")
-    sim.add_deployment("data", "redis", 1)
+                       hpa=Autoscaler(min=3, max=7, target_rps=4.0), latency_ms=25)
+    sim.add_deployment("shop", "cart", 2, [("data/redis", 5)], max_unavailable=1, latency_ms=12)
+    sim.add_deployment("shop", "checkout", 2, [("shop/payments", 2), ("data/postgres", 3)], max_unavailable=1, latency_ms=35)
+    sim.add_deployment("shop", "payments", 2, max_unavailable=1, latency_ms=110)
+    sim.add_deployment("data", "postgres", 1, kind="StatefulSet", latency_ms=8)
+    sim.add_deployment("data", "redis", 1, latency_ms=2)
     sim.add_ingress("shop", "storefront", "shop.portkube.local", "shop/frontend")
     return sim

@@ -25,6 +25,7 @@ def call(target, rps):
     url = f"http://{target}:8080/"
     while True:
         time.sleep(random.expovariate(rps))
+        started = time.monotonic()
         try:
             with urllib.request.urlopen(url, timeout=2) as response:
                 status = response.status
@@ -37,6 +38,7 @@ def call(target, rps):
         else:
             failing.pop(target, None)
         print(json.dumps({"source": NAME, "target": target, "status": status,
+                          "latency_ms": round((time.monotonic() - started) * 1000, 1),
                           "timestamp_ms": int(time.time() * 1000)}), flush=True)
 
 for target, rps in CALLS:

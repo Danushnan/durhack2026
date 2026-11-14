@@ -266,3 +266,23 @@ def test_traffic_only_flows_where_requests_arrive():
     run(sim, t, 4)
     rates = {(e["from"], e["to"]): e["rps"] for e in sim.traffic()}
     assert rates[("shop/frontend", "shop/cart")] == 0 and rates[("shop/cart", "data/redis")] == 0  # no customers get past the frontend
+
+
+def test_latency_rises_with_load_and_errors_spread_by_share():
+    sim = demo_cluster()
+    sim.deployments["shop/frontend"].hpa = None
+    t = run(sim, 0, 6)
+    calm = {(e["from"], e["to"]): e for e in sim.traffic()}
+    gate = calm[("ingress:shop/storefront", "shop/frontend")]
+    assert 25 < gate["latency_ms"] < 200 and gate["error_rate"] == 0
+    sim.rush_hour(True)
+    t = run(sim, t, 2)
+    rush = {(e["from"], e["to"]): e for e in sim.traffic()}
+    assert rush[("ingress:shop/storefront", "shop/frontend")]["latency_ms"] > 3 * gate["latency_ms"]  # overloaded
+    sim.rush_hour(False)
+    sim.sabotage("shop", "payments", True)
+    run(sim, t, 4)
+    e = {(e["from"], e["to"]): e for e in sim.traffic()}
+    assert e[("shop/checkout", "shop/payments")]["refused_rate"] == 1
+    assert e[("shop/frontend", "shop/checkout")]["error_rate"] == round(2 / 3, 3)    # 2 of its 3 req/s go to payments
+    assert 0 < e[("ingress:shop/storefront", "shop/frontend")]["error_rate"] < 0.5   # only checkout traffic fails

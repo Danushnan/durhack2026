@@ -9,7 +9,7 @@ function simulate(trip: Trip, healthy: boolean, errors: boolean, seconds: number
   let cars: CarAgent[] = [], served = 0, minGap = Infinity, next = 0, slot = 0
   for (let t = 0; t < seconds; t += 1 / 60) {
     if (t >= next && exitClear(cars)) { cars.push(newCar(slot++, () => 0.5)); next = t + every }
-    const r = stepCars(cars, 1 / 60, t, trip, healthy, errors)
+    const r = stepCars(cars, 1 / 60, t, trip, { refused: healthy ? 0 : 1, error: errors ? 1 : 0 })
     cars = r.cars; served += r.served.length
     for (const lane of [cars.filter((c) => c.phase !== 'back'), cars.filter((c) => c.phase === 'back')]) {
       const s = lane.map((c) => c.s).sort((a, b) => a - b)
@@ -64,7 +64,7 @@ test('rush hour puts clearly more Cars on a Road, up to what the exit lets out',
       const a = admit(credit, rps, 1 / 60, cars, () => 0.5)
       credit = a.credit
       if (a.leave) cars.push(newCar(n++, () => 0.5))
-      cars = stepCars(cars, 1 / 60, t, straight(40), true, false).cars
+      cars = stepCars(cars, 1 / 60, t, straight(40), { refused: 0, error: 0 }).cars
     }
     return n / 60
   }
@@ -88,4 +88,55 @@ test('the demo city: no Road runs through another Building', async () => {
   console.assert = (ok?: boolean, ...msg: unknown[]) => { if (!ok) failures.push(String(msg[0])) }
   try { checkRoads(layout, roads) } finally { console.assert = realAssert }
   assert.deepEqual(failures, [])
+})
+
+test('MiniShop: no Road runs through another Building', async () => {
+  const { buildRoads, checkRoads, layoutCity } = await import('../src/layout.ts')
+  const fs = await import('node:fs')
+  const arch = JSON.parse(fs.readFileSync(new URL('../../minishop/architecture.json', import.meta.url), 'utf8'))
+  const deps = arch.components.map((c: { deployment: string }) => ({ namespace: arch.namespace, name: c.deployment }))
+  const calls = arch.components.flatMap((c: { deployment: string; dependencies: string[] }) =>
+    c.dependencies.map((d) => ({ from: `${arch.namespace}/${c.deployment}`, to: `${arch.namespace}/${d}` })))
+  const layout = layoutCity(deps, ['minishop-control-plane', 'minishop-worker'], calls)
+  const roads = buildRoads(layout, calls)
+  assert.equal(Object.keys(roads).length, 10)
+  const failures: string[] = []
+  const realAssert = console.assert
+  console.assert = (ok?: boolean, ...msg: unknown[]) => { if (!ok) failures.push(String(msg[0])) }
+  try { checkRoads(layout, roads) } finally { console.assert = realAssert }
+  assert.deepEqual(failures, [])
+})
+
+test('partial error rates: about that share of Cars come back orange', () => {
+  let cars: CarAgent[] = [], seed = 1, n = 0, errors = 0, served = 0
+  const rand = () => ((seed = (seed * 16807) % 2147483647) / 2147483647)
+  for (let t = 0; t < 120; t += 1 / 60) {
+    if (exitClear(cars) && t * 1.2 > n) cars.push(newCar(n++, rand))
+    const r = stepCars(cars, 1 / 60, t, straight(30), { refused: 0, error: 0.25 })
+    served += r.served.length
+    errors += r.cars.length < cars.length ? cars.filter((c) => !r.cars.includes(c) && c.fate === 'error').length : 0
+    cars = r.cars
+  }
+  const share = errors / (errors + served)
+  assert.ok(share > 0.12 && share < 0.4, `error share ${share}`)
+})
+
+test('health signals: refused beats errors beats slow; idle when quiet', async () => {
+  const { affected, combine, overview, serviceFlow, signalOf, SLOW_MS } = await import('../src/health.ts')
+  assert.equal(signalOf({ rps: 0, healthy: true }), 'idle')
+  assert.equal(signalOf({ rps: 0, healthy: false }), 'refused')
+  assert.equal(signalOf({ rps: 5, error_rate: 0.2, latency_ms: SLOW_MS * 2 }), 'errors')
+  assert.equal(signalOf({ rps: 5, error_rate: 0, latency_ms: SLOW_MS * 2 }), 'slow')
+  assert.equal(signalOf({ rps: 5, errors: false, healthy: true }), 'ok')                 // an older backend: booleans only
+  const c = combine([{ rps: 3, latency_ms: 100, error_rate: 0 }, { rps: 1, latency_ms: null, error_rate: 1 }])
+  assert.equal(c.latency_ms, 100); assert.equal(c.error_rate, 0.25)
+  const flows = [{ from: 'gate', to: 'a', rps: 8, latency_ms: 50 }, { from: 'a', to: 'b', rps: 4, latency_ms: 20, error_rate: 0.5 }]
+  assert.deepEqual([overview(flows).rps, overview(flows).latency_ms], [8, 50])         // users feel the entry
+  assert.equal(serviceFlow('gate', flows).basis, 'sent')                               // nobody calls it: judge its calls
+  assert.equal(affected({ ready: 2, want: 2, signal: 'errors' })?.label, 'Errors in its answers') // Pods fine, requests failing
+  assert.equal(affected({ ready: 0, want: 2, signal: 'idle' })?.rank, 6)
+  assert.equal(affected({ ready: 0, want: 0, signal: 'idle' })?.label, 'Down: scaled to zero')            // matches the banner
+  assert.equal(affected({ ready: 1, want: 1, signal: 'errors', basis: 'sent' })?.label, 'Errors in the calls it makes')
+  assert.equal(overview([{ from: 'gate', to: 'a', rps: 10, error_rate: 0.1 }, { from: 'a', to: 'b', rps: 10 }]).failing, 0.1)
+  assert.equal(affected({ ready: 2, want: 2, signal: 'ok' }), null)
 })

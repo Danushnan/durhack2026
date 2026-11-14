@@ -98,14 +98,22 @@ logs one JSON line per call (`200` served, `500` answered with an error, `503` r
    **Release buggy v3** → the rollout stalls with v2 still serving; **Roll back** returns to v2.
 6. Customers (yellow taxis) enter through the **City Gate** (an Ingress). Each delivered request flashes the ready Unit
    that served it (round-robin). Press **🚦** for rush hour: customers triple, the frontend's autoscaler adds Units
-   (the Building grows), Roads fill up, and it scales back down afterwards.
+   (the Building grows), Roads fill up, and it scales back down afterwards. Cart and checkout have no autoscaler, so
+   they stay **Slow** (ringed) for the whole rush: the bottleneck moves downstream. Add Units to cart by hand and watch
+   its latency and ring go away.
 7. The database (`postgres`, the Archive) is a **StatefulSet**: Demolish `postgres-0` and the same name returns with the
    same **storage tank**. Cut its Power Station's power and it is *not* copied elsewhere; it waits until power returns.
 8. Click a **Power Station** (a Node): **Maintenance** (`kubectl drain`) moves Units out gently, never breaking a
    service's disruption budget; **Cut power** is the sudden version: Kubernetes only notices once the heartbeats stop,
    marks the Node NotReady, takes its Units out of rotation, and evicts them when their toleration runs out.
    Toggle **⚡ Power Grid** to colour Units by Node.
-9. The city is drawn isometrically: drag to pan, scroll or pinch to zoom.
+9. Request health is shown apart from Pod health. A Building glows (and each Road's edges are coloured) by its
+   requests: healthy, slow (≥ 300 ms), errors (≥ 1% answered with an error), refused (nobody answered) or idle; its Units
+   show its Pods. Each tag has a Pods line and a requests line. A pulsing ring (with a light beam when serious) marks every
+   Building that needs attention, and the **overview** (bottom left) gives requests/s, latency and the failing share, and
+   lists the affected services. Hover a Road for its numbers; **◧** opens the legend with the thresholds.
+10. The city is isometric by default: drag to pan, scroll or pinch to zoom. **3D** switches to a free 3D view (drag to
+   orbit, right-drag to pan); **ISO** switches back.
    **⟲** resets the city; **🌙 / ☀️** switches night and day; **⌂** returns the camera to the overview. The ticker at
    the bottom explains each thing Kubernetes does; click it for the full list.
 
@@ -130,7 +138,16 @@ Not simulated: CPU and memory requests (Nodes have Pod slots instead), liveness 
 and ConfigMaps/Secrets.
 Timings are compressed for the demo (see `shortcut:` comments in `backend/sim.py`).
 
-Both modes stream Kubernetes-shaped updates (`ADDED`/`MODIFIED`/`DELETED`) over `/ws`.
+Both modes stream Kubernetes-shaped updates (`ADDED`/`MODIFIED`/`DELETED`) over `/ws`. Each `TRAFFIC` edge carries
+`rps`, `latency_ms`, `error_rate` (answered with an error) and `refused_rate` (nobody answered). The simulator models
+latency from load per ready Pod and spreads failures to callers by how often they need the broken service.
+
+In live mode, Roads are the union of the calls each app declares (an `architecture.json` manifest such as
+`minishop/architecture.json`, or a workload's `CALLS`/`DEPENDENCIES` env var), the calls seen since the backend started,
+and the last five seconds of logs. A known call keeps its Road at 0 req/s when traffic stops, so the topology never
+disappears. Log lines may report `latency_ms`, `duration_ms` or `duration_seconds`; a call counts as refused only when
+the caller got no HTTP answer (a 504, a plain 503, or an exception such as a connection error), and as an error when the
+callee answered with one (e.g. MiniShop's 402 payment declines, which leave every Pod Ready).
 
 ## TigerData network analytics
 

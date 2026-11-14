@@ -163,7 +163,8 @@ export function buildRoads(layout: CityLayout, calls: Call[]): Record<string, TH
     const h = Math.max(6, (entry.x - exit.x) / 2)
     const others = Object.values(layout.lots).filter((l) => l.key !== c.from && l.key !== c.to)
     let best: THREE.Vector3[] = []
-    for (const bend of [0, 9, -9, 18, -18, 27, -27, 36, -36]) {
+    // Straight if possible, else bend out further and further (a call that skips columns may need a wide detour).
+    for (const bend of [0, ...Array.from({ length: 10 }, (_, i) => [9 * (i + 1), -9 * (i + 1)]).flat()]) {
       const curve = new THREE.CubicBezierCurve3(exit, new THREE.Vector3(exit.x + h, 0, exit.z + bend),
         new THREE.Vector3(entry.x - h, 0, entry.z + bend), entry)
       const pts = [start, ...curve.getPoints(40), end]

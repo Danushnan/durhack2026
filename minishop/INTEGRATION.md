@@ -8,7 +8,7 @@ Inspected without changes: `../backend/live.py`, `../backend/main.py`, `../backe
 
 MiniShop therefore uses Deployments for all seven components, including single-replica Recreate PostgreSQL and Redis with PVCs. A scaled Checkout pod gets a real UID and maps to the existing Checkout Deployment UID. PostgreSQL/Redis pod replacement retains data on the PVC within the same cluster; it does not provide database high availability.
 
-KubeVerse’s traffic building IDs are `namespace/deployment-name`, for example `minishop/checkout-api`. Service names equal Deployment names. Every Pod has the same `app` selector as its Service. The [architecture manifest](architecture.json) maps source paths, deployments, Services, ports, persistent claims and known dependencies. This is a file for future integration: the existing adapter does **not** automatically import it.
+KubeVerse’s traffic building IDs are `namespace/deployment-name`, for example `minishop/checkout-api`. Service names equal Deployment names. Every Pod has the same `app` selector as its Service. The [architecture manifest](architecture.json) maps source paths, deployments, Services, ports, persistent claims and known dependencies. The live adapter imports it: its dependencies become Roads before the first request and stay when traffic stops.
 
 ## Log ingestion contract
 
@@ -51,7 +51,7 @@ Nginx emits JSON access logs with upstream address/status and duration in second
 
 The frontend generates a UUID for each API request. Every FastAPI request accepts a valid `X-Request-ID` or generates a fresh UUID and echoes it in the response. Internal HTTPX calls propagate the same ID and add `X-Source-Service`. All database/Redis events inside that request carry the same context-local ID. The order confirmation/error state exposes the reference for log lookup. `X-Served-By` identifies the actual serving pod in Kubernetes.
 
-This is request correlation, **not** a complete OpenTelemetry trace: there are no span/parent IDs, W3C `traceparent`, collector, exporter or trace storage. The existing KubeVerse live adapter consumes aggregate edge health/rate, not individual trace IDs or latency. Its TigerData analytics are currently tied to simulated mode and disabled in live mode. MiniShop neither writes fabricated TigerData measurements nor modifies that behavior.
+This is request correlation, **not** a complete OpenTelemetry trace: there are no span/parent IDs, W3C `traceparent`, collector, exporter or trace storage. The KubeVerse live adapter consumes aggregate edge rate, latency and error/refused shares, not individual trace IDs. It leaves `orders.transaction` out of PostgreSQL latency, because that timer spans the whole checkout. Its TigerData analytics are currently tied to simulated mode and disabled in live mode. MiniShop neither writes fabricated TigerData measurements nor modifies that behavior.
 
 Real local browser evidence is preserved in [docs/checkout-events.jsonl](docs/checkout-events.jsonl) and [docs/checkout-database.json](docs/checkout-database.json). It was captured from independent local HTTP processes, **not Kubernetes pods**. The targets are consequently loopback hosts for those local calls. Kubernetes uses Service DNS from `k8s/01-config.yaml` instead; no evidence was relabelled to look like a cluster run.
 
@@ -76,13 +76,10 @@ To inspect one checkout:
 ./scripts/demo.sh logs | python3 scripts/filter-events.py REQUEST_UUID
 ```
 
-Only calls actually made produce edges; an idle shop produces none. Roads are transient within the current five-second log window. Readiness/liveness probes report process/data-store health and do not turn an expected simulated payment decline into a pod crash. A real 402 payment call makes the checkout→payment road unhealthy while all pods can remain Ready.
+Measurements come only from calls actually made; an idle shop shows its Roads at 0 req/s (from this manifest), not an empty city. Readiness/liveness probes report process/data-store health and do not turn an expected simulated payment decline into a pod crash. A real 402 payment call makes the checkout→payment road unhealthy while all pods can remain Ready.
 
-## Existing KubeVerse live-view limitations
+## KubeVerse live-view status
 
-Source inspection found two incompatibilities outside MiniShop’s permitted edit scope:
-
-1. `backend/live.py:LiveCluster.initial_events()` prepends a `SOURCE` event with no `object`. `frontend/src/k8s.ts:useCluster()` handles only `TRAFFIC`, `DELETED` and object events, so its current fallback dereferences `ev.object.metadata.uid` for `SOURCE`. The initial live snapshot can therefore throw instead of rendering.
-2. `LiveCluster.refresh()` strips `metadata.labels` from Pods and adds `deploymentUid`. `frontend/src/City.tsx` and `frontend/src/App.tsx` still associate pods using `metadata.labels.app`; the frontend type/store does not consume `deploymentUid`. Even though MiniShop’s actual Kubernetes labels are correct, the current live stream removes them before rendering.
-
-MiniShop cannot solve either by changing its own pod labels or logs. Correcting KubeVerse would require separately authorized edits to handle `SOURCE` and resolve pods by `deploymentUid` or preserve the pod app label. Those edits were **not made**. Resource/log format compatibility is implemented here, but end-to-end visualization in the current KubeVerse frontend is not claimed to work. The MiniShop website, direct kubectl views, logs and independent cluster demonstration do not require KubeVerse.
+Both incompatibilities found earlier are fixed in KubeVerse: the frontend handles the `SOURCE` event, and it associates
+live Pods with their Deployment by `deploymentUid` (Pod → ReplicaSet → Deployment). The live view has been checked
+end to end against the `k8s/` demo shop on Docker Desktop; a MiniShop cluster render has not been captured yet.

@@ -87,6 +87,14 @@ _Avoid_: Filler, background buildings
 A service that is itself running but cannot do its job because a service it depends on is down.
 _Avoid_: Degraded, cascading, broken
 
+**Request health**:
+How a service is doing at its job, judged by its requests: Healthy, Slow, Errors, Refused or Idle. It is shown apart from its Pods: every Pod can be ready while requests fail.
+_Avoid_: Status, uptime, app health
+
+**Affected**:
+A service that needs attention, for any reason: Down, refusing or failing requests, Impacted, slow, or missing Pods. It wears a pulsing ring and is listed in the overview.
+_Avoid_: Alerting, red, unhealthy
+
 ## Interactions
 
 **Demolish**:

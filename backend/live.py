@@ -1,9 +1,15 @@
 """Read cluster snapshots using the user's kubectl credentials."""
 
 import json
+import logging
 import subprocess
 import time
-import logging
+from pathlib import Path
+
+WINDOW_MS = 5000
+# Architecture manifests (like minishop/architecture.json) declare each app's dependencies, so its
+# Roads exist before the first request and stay when traffic stops.
+MANIFESTS = sorted(Path(__file__).resolve().parent.parent.glob("*/architecture.json"))
 
 
 def kubectl(*args):
@@ -19,6 +25,8 @@ class LiveCluster:
         self.objects = {}
         self.edges = []
         self.traffic_namespaces = set()
+        self.declared = set()   # (from, to) pairs the workloads say they call
+        self.learned = set()    # (from, to) pairs seen in logs since the backend started
 
     def refresh(self):
         raw = kubectl(
@@ -34,6 +42,7 @@ class LiveCluster:
         }
         deployments = {item["metadata"]["uid"] for item in resources
                        if item["kind"] == "Deployment"}
+        self.declared = declared_calls(resources)
 
         def controller(item):
             return next((ref["uid"] for ref in item["metadata"].get("ownerReferences", [])
@@ -75,8 +84,7 @@ class LiveCluster:
     def traffic(self):
         buildings = {f'{item["metadata"]["namespace"]}/{item["metadata"]["name"]}'
                      for item in self.objects.values() if item["kind"] == "Deployment"}
-        samples = {}
-        cutoff = time.time() * 1000 - 5000
+        samples = []
         for namespace in sorted(self.traffic_namespaces):
             try:
                 logs = kubectl("--context", self.context, "--request-timeout=5s",
@@ -87,24 +95,10 @@ class LiveCluster:
             except (OSError, subprocess.SubprocessError):
                 logging.getLogger(__name__).debug("Could not read demo logs in %s", namespace)
                 continue
-            for line in logs.splitlines():
-                try:
-                    sample = json.loads(line)
-                    target = sample["target"].split(".")
-                    source = f'{namespace}/{sample["source"]}'
-                    destination = f"{target[1] if len(target) > 1 else namespace}/{target[0]}"
-                    timestamp = sample["timestamp_ms"]
-                    if timestamp >= cutoff and source in buildings and destination in buildings:
-                        samples.setdefault((source, destination), []).append(int(sample["status"]))
-                except (ValueError, TypeError, KeyError):
-                    continue
-        # healthy: nobody refused the call (502/503/504 = no ready Pod answered).
-        # errors: it answered, but with an error (e.g. 500 because something it depends on is failing).
-        refused = {502, 503, 504}
-        return [{"from": source, "to": target, "rps": len(results) / 5,
-                 "healthy": not any(code in refused for code in results),
-                 "errors": any(code >= 400 and code not in refused for code in results)}
-                for (source, target), results in sorted(samples.items())]
+            samples += parse_samples(logs, namespace)
+        edges = summarize(samples, buildings, self.declared | self.learned, time.time() * 1000)
+        self.learned |= {(e["from"], e["to"]) for e in edges if e["requests"]}
+        return edges
 
     def initial_events(self):
         return [{"type": "SOURCE", "context": self.context}] + [
@@ -136,3 +130,94 @@ def kubectl_current():
         return kubectl("config", "current-context").strip()
     except subprocess.CalledProcessError:
         return None
+
+
+def service_key(target, namespace):
+    """`payments`, `redis.data` or `payment-api.minishop.svc.cluster.local` -> "namespace/name"."""
+    parts = target.split(".")
+    return f"{parts[1] if len(parts) > 1 else namespace}/{parts[0]}"
+
+
+def declared_calls(resources):
+    """Dependencies the workloads declare: a CALLS (JSON [[target, rps]]) or DEPENDENCIES (space-separated)
+    container env var, as the demo workloads use, plus every architecture manifest's dependency list."""
+    calls = set()
+    for item in resources:
+        if item["kind"] != "Deployment":
+            continue
+        namespace, name = item["metadata"]["namespace"], item["metadata"]["name"]
+        for container in item["spec"]["template"]["spec"].get("containers", []):
+            for env in container.get("env", []):
+                value = env.get("value") or ""
+                try:
+                    targets = ([t for t, *_ in json.loads(value)] if env.get("name") == "CALLS"
+                               else value.split() if env.get("name") == "DEPENDENCIES" else [])
+                except (ValueError, TypeError):
+                    targets = []
+                calls |= {(f"{namespace}/{name}", service_key(t, namespace)) for t in targets}
+    for manifest in MANIFESTS:
+        try:
+            spec = json.loads(manifest.read_text())
+            namespace = spec["namespace"]
+            calls |= {(f"{namespace}/{c['deployment']}", f"{namespace}/{d}")
+                      for c in spec["components"] for d in c.get("dependencies", [])}
+        except (OSError, ValueError, KeyError, TypeError):
+            logging.getLogger(__name__).warning("Ignoring unreadable architecture manifest %s", manifest)
+    return calls
+
+
+def outcome(sample):
+    """'ok', 'error' (the callee answered, with an error) or 'refused' (nobody answered at all)."""
+    status = int(sample["status"])
+    if status < 400:
+        return "ok"
+    if sample.get("event") == "http_server":   # logged by the callee itself: it answered
+        return "error"
+    error = sample.get("error")
+    if error:   # "HTTP 402" is an answer; an exception name (ConnectError, timeout) means no answer
+        return "error" if str(error).startswith("HTTP ") else "refused"
+    return "refused" if status in (503, 504) else "error"
+
+
+def latency(sample):
+    for field, scale in (("latency_ms", 1), ("duration_ms", 1), ("duration_seconds", 1000)):
+        if isinstance(sample.get(field), (int, float)):
+            return sample[field] * scale
+    return None
+
+
+def parse_samples(logs, namespace):
+    out = []
+    for line in logs.splitlines():
+        try:
+            sample = json.loads(line)
+            out.append({"from": f'{namespace}/{sample["source"]}', "to": service_key(sample["target"], namespace),
+                        "at": sample["timestamp_ms"], "outcome": outcome(sample),
+                        # Checkout's orders.transaction timer spans the whole checkout (payment call
+                        # included), so it says nothing about how fast PostgreSQL is.
+                        "latency": None if sample.get("operation") == "orders.transaction" else latency(sample)})
+        except (ValueError, TypeError, KeyError, AttributeError):
+            continue
+    return out
+
+
+def summarize(samples, buildings, known, now_ms):
+    """Edges for the last WINDOW_MS of samples. Every known call (declared or seen before) keeps its
+    Road even when idle (rps 0), so the topology never disappears when traffic stops."""
+    groups = {pair: [] for pair in known}
+    for s in samples:
+        if s["at"] >= now_ms - WINDOW_MS:
+            groups.setdefault((s["from"], s["to"]), []).append(s)
+    edges = []
+    for (source, target), group in sorted(groups.items()):
+        if source not in buildings or target not in buildings:
+            continue
+        n = len(group)
+        refused = sum(s["outcome"] == "refused" for s in group) / n if n else 0.0
+        errors = sum(s["outcome"] == "error" for s in group) / n if n else 0.0
+        timed = [s["latency"] for s in group if s["latency"] is not None]
+        edges.append({"from": source, "to": target, "rps": n / (WINDOW_MS / 1000), "requests": n,
+                      "healthy": refused < 0.5, "errors": errors > 0,
+                      "error_rate": round(errors, 3), "refused_rate": round(refused, 3),
+                      "latency_ms": round(sum(timed) / len(timed), 1) if timed else None})
+    return edges
