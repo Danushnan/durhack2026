@@ -7,6 +7,7 @@ import {
 import { landmarkFor } from './landmarks'
 import { downServices, explain, impactChain, nameOf, roleOf } from './teach'
 import { THEMES, useThemeMode } from './theme'
+import { routeKey, Telemetry, useTelemetry } from './Telemetry'
 
 export default function App() {
   const cluster = useCluster()
@@ -16,6 +17,12 @@ export default function App() {
   const [help, setHelp] = useState(false)
   const [sidebar, setSidebar] = useState(false)
   const [feedOpen, setFeedOpen] = useState(false)
+  const [homeTick, setHomeTick] = useState(0)
+  const [analyticsOpen, setAnalyticsOpen] = useState(false)
+  const [replayAt, setReplayAt] = useState<number | null>(null)
+  const telemetry = useTelemetry(replayAt)
+  const services = telemetry.status === 'ready' ? Object.fromEntries(telemetry.services.map((row) => [row.service, row])) : {}
+  const routes = telemetry.status === 'ready' ? Object.fromEntries(telemetry.routes.map((row) => [routeKey(row.caller, row.service), row])) : {}
   const [mode, setMode] = useThemeMode()
   const theme = THEMES[mode]
 
@@ -37,7 +44,8 @@ export default function App() {
   return (
     <div className={`app ${mode}`}>
       <City cluster={cluster} selected={selected} onSelect={setSelected} powerGrid={powerGrid} theme={theme}
-        onHover={setHover} states={states} />
+        onHover={setHover} states={states} homeTick={homeTick}
+        serviceMetrics={services} routeMetrics={routes} replay={replayAt !== null} />
 
       <header className="hud brand">
         <h1>Port Kube</h1>
@@ -46,16 +54,27 @@ export default function App() {
       </header>
 
       <nav className="hud controls" aria-label="View controls">
+        <button aria-label="Reset the camera to the overview" title="Reset view"
+          onClick={() => { setSelected(null); setHomeTick(homeTick + 1) }}>⌂</button>
         <button aria-label={`Switch to ${mode === 'night' ? 'day' : 'night'}`} title="Day / night"
           onClick={() => setMode(mode === 'night' ? 'day' : 'night')}>{mode === 'night' ? '🌙' : '☀️'}</button>
         <button aria-pressed={powerGrid} className={powerGrid ? 'on' : ''} title="Power Grid: colour each Unit by the Node it runs on"
           onClick={() => setPowerGrid(!powerGrid)}>⚡</button>
         <button aria-expanded={help} className={help ? 'on' : ''} title="How this city works" onClick={() => setHelp(!help)}>?</button>
+        <button aria-expanded={analyticsOpen} className={analyticsOpen ? 'on' : ''} title="Network analytics"
+          aria-label="Network analytics" onClick={() => {
+            if (analyticsOpen) setReplayAt(null)
+            setAnalyticsOpen(!analyticsOpen)
+          }}>▥</button>
       </nav>
 
       <Banner deployments={deployments} states={states} outages={outages} onPick={setSelected} />
 
       {help && <Help onClose={() => setHelp(false)} />}
+      {analyticsOpen && <Telemetry snapshot={telemetry} at={replayAt} onSeek={setReplayAt} onClose={() => {
+        setReplayAt(null)
+        setAnalyticsOpen(false)
+      }} />}
 
       <aside className={`hud services ${sidebar ? 'open' : ''}`} aria-label="Services">
         <button className="toggle" aria-expanded={sidebar} title={sidebar ? 'Collapse' : 'Show service names'}
@@ -135,9 +154,11 @@ function Help({ onClose }: { onClose: () => void }) {
       <h2>How Port Kube works</h2>
       <p>Port Kube is a shop's software running on <b>Kubernetes</b>, drawn as a city.</p>
       <ul>
-        <li>🏦 <b>Buildings</b> are services (Deployments). Each does one job: hover one to see what.</li>
+        <li>🏦 <b>Buildings</b> are services (Deployments). Each does one job: hover one to see what. A bigger Building means more copies were asked for.</li>
+        <li>🏙️ Towers, houses and trees around the edge are just scenery.</li>
         <li>▪️ <b>Units</b> in front are its Pods: identical copies doing the work. ⬚ An outlined <b>Plot</b> is a Pod still being created.</li>
-        <li>🚗 <b>Cars</b> are requests between services. A <span className="red">red car</span> turning back is a failed request.</li>
+        <li>🛣️ A <b>Road</b> exists only where one service calls another. Its centre line is blue while calls succeed and <span className="red">red</span> when they fail.</li>
+        <li>🚗 <b>Cars</b> are requests driving from the caller to the service it needs. A <span className="red">red car</span> turning back is a failed request.</li>
         <li>⚡ <b>Power Stations</b> are Nodes: the machines Pods run on. Their lights show used Pod slots.</li>
       </ul>
       <h3>How Kubernetes thinks</h3>

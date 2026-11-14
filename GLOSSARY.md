@@ -18,11 +18,11 @@ The whole 3D scene, named Port Kube; one City represents one cluster.
 _Avoid_: World, map, scene
 
 **District**:
-The region of the City representing one Namespace, marked by a street sign.
+The region of the City representing one Namespace, with its name painted on the ground.
 _Avoid_: Zone, neighbourhood, area
 
 **Building**:
-The landmark representing one Deployment; each service has a distinct, recognisable style (e.g. payments is a Bank).
+The landmark representing one Deployment; each service has a distinct, recognisable style (e.g. payments is a Bank), and its size grows with the number of replicas asked for.
 _Avoid_: Tower, block, node
 
 **Unit**:
@@ -30,19 +30,19 @@ A small block on a plot in front of a Building, representing one Pod; its appear
 _Avoid_: Floor, copy, instance, room
 
 **Plot**:
-An empty outlined space in front of a Building, representing a desired replica that has no Pod yet.
+A marked space in front of a Building, representing one desired replica; it is outlined while it has no Pod yet.
 _Avoid_: Slot, placeholder
 
-**Street**:
-The grid of roads Cars drive along between Buildings; it does not represent any cluster resource.
-_Avoid_: Road, lane, path
+**Road**:
+The route between two Buildings, representing one service calling another; a Road exists only where such a call exists.
+_Avoid_: Street, lane, path, connection, link
 
 **Car**:
-A moving object on a Street representing a request from one service to another; a red Car that turns back is a failed request.
+A moving object on a Road representing a request from the calling service to the one it needs; a red Car that turns back is a failed request.
 _Avoid_: Vehicle, packet, particle
 
 **Power Station**:
-The structure on the City's edge representing one Node; its lit meter shows how many of the Node's Pod slots are in use.
+The structure behind the Districts representing one Node; its lit meter shows how many of the Node's Pod slots are in use.
 _Avoid_: Server, machine building, generator
 
 **Power Grid**:
@@ -50,7 +50,7 @@ An optional overlay that tints each Unit by the Power Station (Node) its Pod run
 _Avoid_: Node view, infrastructure layer
 
 **Scenery**:
-Decorative buildings, houses and parks that fill out the City; they represent nothing in the cluster.
+Decorative towers, houses, warehouses, trees, ponds and street lamps that fill out the City; they represent nothing in the cluster.
 _Avoid_: Filler, background buildings
 
 **Impacted**:

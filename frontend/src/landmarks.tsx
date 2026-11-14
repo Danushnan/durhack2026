@@ -27,8 +27,8 @@ interface Mats { wall: THREE.Material; trim: THREE.Material; accent: THREE.Mater
 function useMats(info: LandmarkInfo, glow: string, theme: Theme): Mats {
   const night = theme.mode === 'night'
   const m = useMemo<Mats>(() => ({
-    wall: new THREE.MeshStandardMaterial({ color: night ? '#5b6b82' : '#f1ede4', roughness: 0.85 }),
-    trim: new THREE.MeshStandardMaterial({ color: night ? '#2a3445' : '#8b8f99', roughness: 0.7 }),
+    wall: new THREE.MeshStandardMaterial({ color: night ? '#8593ad' : '#f1ede4', roughness: 0.85 }),
+    trim: new THREE.MeshStandardMaterial({ color: night ? '#3d4963' : '#8b8f99', roughness: 0.7 }),
     accent: new THREE.MeshStandardMaterial({ color: info.accent, roughness: 0.5 }),
     glass: new THREE.MeshStandardMaterial({ color: night ? '#38bdf8' : '#9cc7e4', roughness: 0.1, metalness: 0.5, transparent: true, opacity: 0.85,
       emissive: night ? '#0c4a6e' : '#000000' }),
