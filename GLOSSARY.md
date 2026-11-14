@@ -1,4 +1,4 @@
-# KubeVerse
+# Kuebec
 
 An explorable 3D city that renders the state of a Kubernetes cluster, so developers can watch workloads communicate, scale, fail and recover.
 
@@ -9,7 +9,7 @@ A model of a Kubernetes cluster's resources and their behaviour, standing in for
 _Avoid_: Mock, fake cluster, backend
 
 **Namespace**, **Deployment**, **Pod**, **Service**, **Node**:
-Used with their standard Kubernetes meanings; these are the only resource kinds KubeVerse represents.
+Used with their standard Kubernetes meanings; these are the only resource kinds Kuebec represents.
 
 ## City (visual language)
 
@@ -34,16 +34,44 @@ A marked space in front of a Building, representing one desired replica; it is o
 _Avoid_: Slot, placeholder
 
 **Road**:
-The route between two Buildings, representing one service calling another; a Road exists only where such a call exists.
+The two-lane route between two Buildings, representing one service calling another; a Road exists only where such a call exists. Requests drive out in the right-hand lane; failed ones come back in the other.
 _Avoid_: Street, lane, path, connection, link
 
 **Car**:
-A moving object on a Road representing a request from the calling service to the one it needs; a red Car that turns back is a failed request.
+A moving object on a Road representing a request from the calling service to the one it needs. At the door it is served (it drives in), refused (it turns back red: nobody is ready to answer) or answered with an error (it waits, then turns back orange: the service needed something that is down).
 _Avoid_: Vehicle, packet, particle
 
 **Power Station**:
-The structure behind the Districts representing one Node; its lit meter shows how many of the Node's Pod slots are in use.
+The structure behind the Districts representing one Node; its lit meter shows how many of the Node's Pod slots are in use. Clicking it offers Maintenance or a Node Outage.
 _Avoid_: Server, machine building, generator
+
+**City Gate**:
+The structure on the City's edge representing an Ingress: where Customers from the internet enter and are routed to a service.
+_Avoid_: Entrance, gateway, load balancer
+
+**Customer**:
+A Car that enters through the City Gate, representing a request from outside the cluster.
+_Avoid_: User, visitor, external traffic
+
+**In rotation**:
+Said of a Unit whose Pod is ready, so its Service sends it requests; a Unit that is running but not yet ready is not in rotation.
+_Avoid_: Live, active, serving
+
+**City Hall**:
+The building representing the control plane (API server, etcd, scheduler and controllers): where Kubernetes decides, not where apps run.
+_Avoid_: Master, control tower, headquarters
+
+**Messenger**:
+A glowing orb flying from whoever made a decision to whoever must act on it, coloured by the control-plane part that reported the event.
+_Avoid_: Signal, packet, notification
+
+**Storage Tank**:
+A PersistentVolumeClaim beside a StatefulSet's Building: the disk holding one numbered Pod's data, which outlives the Pod.
+_Avoid_: Volume, database, disk
+
+**Rush Hour**:
+A period when Customers triple, used to show the autoscaler adding Units and removing them afterwards.
+_Avoid_: Load test, spike, surge
 
 **Power Grid**:
 An optional overlay that tints each Unit by the Power Station (Node) its Pod runs on.
@@ -64,12 +92,32 @@ The user action that deletes a Pod, exercising self-healing.
 _Avoid_: Kill, destroy
 
 **Sabotage**:
-The user action that makes a Deployment's Pods start failing, exercising crash-and-recover behaviour.
+The user action that makes every Pod of a Deployment crash, old and new alike, as a broken shared config or dependency would; unlike a buggy Release, no rollout can protect against it.
 _Avoid_: Inject failure, chaos, break
+
+**Version**:
+One Pod template of a Deployment (v1, v2, …), shown as the colour of each Unit's cap.
+_Avoid_: Build, image, tag
+
+**Release**:
+The user action that changes a Deployment to a new Version, which Kubernetes rolls out a few Units at a time; a buggy Release stalls with the old Version still serving.
+_Avoid_: Deploy, update, upgrade
+
+**Roll back**:
+The user action that returns a Deployment to its previous Version.
+_Avoid_: Undo, revert, downgrade
+
+**Reset**:
+The user action that puts the whole demo city back to its starting state.
+_Avoid_: Restart, refresh, clear
 
 **Repair**:
 The user action that undoes Sabotage, letting a Deployment's Pods start normally again.
 _Avoid_: Fix, heal
+
+**Maintenance**:
+The user action that drains a Node (`kubectl drain`): it is cordoned and its Units are moved elsewhere one budget at a time; ending it uncordons the Node.
+_Avoid_: Drain mode, shutdown, decommission
 
 **Node Outage**:
 The user action (clicking a Power Station) that makes a Node NotReady, evicting its Pods so they must be rescheduled elsewhere.

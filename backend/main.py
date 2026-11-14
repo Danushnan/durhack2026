@@ -65,7 +65,7 @@ async def lifespan(app):
             await stop_task(ingestion)
 
 
-app = FastAPI(title="KubeVerse Cluster", lifespan=lifespan)
+app = FastAPI(title="Kuebec Cluster", lifespan=lifespan)
 app.include_router(router)
 
 
@@ -116,6 +116,40 @@ def scale(ns: str, name: str, body: Scale):
 def sabotage(ns: str, name: str, body: Toggle):
     require_simulator()
     return ok(sim.sabotage(ns, name, body.enabled))
+
+
+class Release(BaseModel):
+    buggy: bool = False
+
+
+@app.post("/api/namespaces/{ns}/deployments/{name}/release")
+def release(ns: str, name: str, body: Release):
+    require_simulator()
+    return ok(sim.release(ns, name, body.buggy))
+
+
+@app.post("/api/namespaces/{ns}/deployments/{name}/rollback")
+def rollback(ns: str, name: str):
+    require_simulator()
+    return ok(sim.rollback(ns, name))
+
+
+@app.put("/api/nodes/{name}/drain")
+def drain(name: str, body: Toggle):
+    require_simulator()
+    return ok(sim.drain(name, body.enabled))
+
+
+@app.put("/api/rush-hour")
+def rush_hour(body: Toggle):
+    require_simulator()
+    return ok(sim.rush_hour(body.enabled))
+
+
+@app.post("/api/reset")
+def reset():
+    require_simulator()
+    return ok(sim.reset())
 
 
 @app.put("/api/nodes/{name}/outage")
