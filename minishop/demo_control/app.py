@@ -74,14 +74,15 @@ class Controller:
             return result.stdout
         return await asyncio.to_thread(run)
 
-    async def script(self, *args):
-        def run():
-            result = subprocess.run(['bash', str(ROOT / 'scripts/demo.sh'), *args], cwd=ROOT,
-                env={**os.environ, 'MINISHOP_CONTEXT': self.settings.context},
-                capture_output=True, text=True, timeout=140, check=False)
-            if result.returncode:
-                raise RuntimeError('Demo action failed: ' + result.stderr[-1500:])
-        await asyncio.to_thread(run)
+    async def set_payment(self, setting):
+        deployment = 'deployment/payment-api'
+        await self.command('set', 'env', deployment, setting)
+        await self.command('rollout', 'status', deployment, '--timeout=120s')
+
+    async def scale_checkout(self, replicas):
+        deployment = 'deployment/checkout-api'
+        await self.command('scale', deployment, f'--replicas={replicas}')
+        await self.command('rollout', 'status', deployment, '--timeout=120s')
 
     async def inspect(self):
         deployments = {}
@@ -145,18 +146,20 @@ class Controller:
                 await self.traffic.stop()
                 # Attempt every restoration even if a preceding action fails.
                 errors = []
-                for args in [('delay-payment', '100'), ('restore-payment',), ('scale', '1')]:
+                for action, value in [(self.set_payment, 'PAYMENT_DELAY_MS=100'),
+                                      (self.set_payment, 'PAYMENT_FAIL=false'),
+                                      (self.scale_checkout, 1)]:
                     try:
-                        await self.script(*args)
+                        await action(value)
                     except Exception as exc:
                         errors.append(str(exc))
                 if errors:
                     raise RuntimeError('; '.join(errors))
-            elif body.action == 'slowdown': await self.script('delay-payment', '2000')
-            elif body.action == 'restore-delay': await self.script('delay-payment', '100')
-            elif body.action == 'reject': await self.script('fail-payment')
-            elif body.action == 'accept': await self.script('restore-payment')
-            elif body.action == 'scale': await self.script('scale', str(body.replicas))
+            elif body.action == 'slowdown': await self.set_payment('PAYMENT_DELAY_MS=2000')
+            elif body.action == 'restore-delay': await self.set_payment('PAYMENT_DELAY_MS=100')
+            elif body.action == 'reject': await self.set_payment('PAYMENT_FAIL=true')
+            elif body.action == 'accept': await self.set_payment('PAYMENT_FAIL=false')
+            elif body.action == 'scale': await self.scale_checkout(body.replicas)
             observed = await self.inspect()
             expected = {'slowdown': {'delay_ms': 2000}, 'restore-delay': {'delay_ms': 100},
                         'reject': {'rejection': True}, 'accept': {'rejection': False},

@@ -47,7 +47,7 @@ def test_api_permissions_and_limits():
 def test_verified_operations_and_repeated_reset():
     async def run():
         controller = Controller(settings())
-        controller.script = AsyncMock()
+        controller.command = AsyncMock()
         for name, expected in [('slowdown', {'delay_ms':2000}), ('restore-delay', {}), ('reject', {'rejection':True}), ('accept', {}), ('scale', {'checkout_replicas':2}), ('reset', {}), ('reset', {})]:
             controller.inspect = AsyncMock(return_value=observed(**expected))
             controller.start_action(Action(action=name, replicas=2))
@@ -55,13 +55,17 @@ def test_verified_operations_and_repeated_reset():
             with pytest.raises(Exception): controller.start_action(Action(action=name))
             await controller.task
             assert controller.operation['status'] == 'succeeded'
-        assert [call.args for call in controller.script.call_args_list[-3:]] == [('delay-payment', '100'), ('restore-payment',), ('scale', '1')]
+        assert [call.args for call in controller.command.call_args_list[-6::2]] == [
+            ('set', 'env', 'deployment/payment-api', 'PAYMENT_DELAY_MS=100'),
+            ('set', 'env', 'deployment/payment-api', 'PAYMENT_FAIL=false'),
+            ('scale', 'deployment/checkout-api', '--replicas=1'),
+        ]
         controller.inspect = AsyncMock(return_value=observed(delay_ms=100))
         await controller.run_action(Action(action='slowdown'))
         assert controller.operation['status'] == 'failed'
-        controller.script = AsyncMock(side_effect=RuntimeError('rollout timeout'))
+        controller.command = AsyncMock(side_effect=RuntimeError('rollout timeout'))
         await controller.run_action(Action(action='reset'))
-        assert controller.script.call_count == 3
+        assert controller.command.call_count == 3
         assert controller.operation['status'] == 'failed'
         assert controller.verified is None
     asyncio.run(run())
@@ -165,7 +169,7 @@ def test_payment_api_actual_delay_rejection_and_recovery(monkeypatch):
     asyncio.run(run())
 
 
-def test_script_boundary_and_readback(monkeypatch):
+def test_command_boundary_and_readback(monkeypatch):
     async def run():
         commands=[]
         def execute(args, **kw):
@@ -174,11 +178,11 @@ def test_script_boundary_and_readback(monkeypatch):
             return SimpleNamespace(returncode=0, stdout='', stderr='')
         monkeypatch.setattr('subprocess.run',execute)
         control=Controller(settings())
-        await control.script('scale','3')
-        assert commands[0][0][-2:] == ['scale','3']
-        assert commands[0][1]['env']['MINISHOP_CONTEXT'] == 'disposable-test'
+        await control.scale_checkout(3)
+        assert commands[0][0][-3:] == ['scale', 'deployment/checkout-api', '--replicas=3']
+        assert commands[1][0][-4:] == ['rollout', 'status', 'deployment/checkout-api', '--timeout=120s']
         await control.command('get','deployment','payment-api','-o','json')
-        assert commands[1][0][:5] == ['kubectl','--context','disposable-test','-n','minishop']
+        assert all(args[:5] == ['kubectl', '--context', 'disposable-test', '-n', 'minishop'] for args, _ in commands)
     asyncio.run(run())
 
 

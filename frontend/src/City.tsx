@@ -646,20 +646,26 @@ function Traffic({ edge, road, theme, accent, onHover, endpoints, previewRefused
   const burstStarted = useRef(-Infinity)
   const credit = useRef(0) // visual admission credit, separate from measured counts
   const activityPeriod = useRef<DiscoveryActivityPeriod>({source:sourceId, active:false})
+  const liveBurst = useRef(false)
   useLayoutEffect(() => {
     if (preview) dispatched.current -= cars.current.length
     cars.current = []
     credit.current = 0
+    liveBurst.current = false
     burstStarted.current = -Infinity
     activityPeriod.current = {source:sourceId, active:false}
   }, [preview, trips, sourceId])
-  useLayoutEffect(() => { activityPeriod.current = {source:sourceId, active:false} }, [calm, sourceId])
+  useLayoutEffect(() => {
+    activityPeriod.current = {source:sourceId, active:false}
+    liveBurst.current = false
+  }, [calm, sourceId])
   const previousReset = useRef(resetKey)
   useLayoutEffect(() => {
     if (previousReset.current === resetKey) return
     previousReset.current = resetKey
     cars.current = []; credit.current = 0; burstStarted.current = -Infinity
     activityPeriod.current = {source:sourceId, active:false}
+    liveBurst.current = false
     // Abandon queued illustrations on reset; only newly requested previews may leave.
     if (preview) dispatched.current = previewCount ?? 0
   }, [resetKey, sourceId, preview, previewCount])
@@ -683,6 +689,7 @@ function Traffic({ edge, road, theme, accent, onHover, endpoints, previewRefused
   useFrame(({ clock }, rawDt) => {
     if (pause.current) {
       cars.current = []; credit.current = 0; burstStarted.current = -Infinity
+      liveBurst.current = false
       groups.current.forEach((g) => { if (g) g.visible = false })
       return
     }
@@ -691,6 +698,13 @@ function Traffic({ edge, road, theme, accent, onHover, endpoints, previewRefused
     const e = live.current
     const activityStarted = calm && startsDiscoveryActivity(activityPeriod.current, e, sourceId)
     if (calm && e.rps <= 0) credit.current = 0
+    if (liveMode && !calm && !preview) {
+      // A single measured request may leave the rolling window before its
+      // rate accumulates a full car. Queue the first car as activity appears.
+      if (e.rps > 0 && !liveBurst.current) credit.current = Math.max(1, credit.current)
+      if (e.rps <= 0) credit.current = 0
+      liveBurst.current = e.rps > 0
+    }
     // Arrivals at the request rate, jittered; a backlog waits (up to 3) while the caller's exit is blocked.
     const used = new Set(cars.current.map((c) => c.slot))
     const slot = [...Array(poolSize).keys()].find((i) => !used.has(i))

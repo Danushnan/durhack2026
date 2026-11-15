@@ -1,4 +1,4 @@
-import { DiscoveryActivity } from './DiscoveryActivity'
+import { DiscoveryActivity } from './DiscoveryActivityPanel'
 import { JourneyPanel, useJourney } from './Journey'
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { City, type HoverInfo, type RoadFlow, type ServiceState, type ViewMode } from './City'
