@@ -13,6 +13,7 @@ from pydantic import BaseModel, Field
 
 from live import discover
 from live_history import LiveHistory, router as live_history_router
+from journeys import router as journeys_router
 from sim import MAX_REPLICAS, demo_cluster
 from telemetry import TigerTelemetry, router, stop_task
 
@@ -121,6 +122,7 @@ async def lifespan(app):
 app = FastAPI(title="Kuebec Cluster", lifespan=lifespan)
 app.include_router(router)
 app.include_router(live_history_router)
+app.include_router(journeys_router)
 
 
 @app.websocket("/ws")
