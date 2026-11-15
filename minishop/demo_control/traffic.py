@@ -1,6 +1,7 @@
-"""Bounded async adaptation of Person C's scripts/traffic.py; only real storefront HTTP."""
+"""Generate real storefront HTTP requests for the local operator."""
 import asyncio
 import time
+from itertools import count
 from uuid import uuid4
 import httpx
 
@@ -29,7 +30,10 @@ class Traffic:
 
     async def run(self, rps, limit):
         try:
-            await asyncio.wait_for(self._run(rps, limit), timeout=300)
+            if limit is None:
+                await self._run(rps, limit)
+            else:
+                await asyncio.wait_for(self._run(rps, limit), timeout=300)
         except TimeoutError:
             self.state['error'] = 'Five-minute safety limit reached'
         finally:
@@ -37,12 +41,9 @@ class Traffic:
 
     async def _run(self, rps, limit):
         session, products, basket = str(uuid4()), [], False
-        deadline = time.monotonic() + 300
         try:
             async with httpx.AsyncClient(base_url=self.base, timeout=50, follow_redirects=False) as client:
-                for tick in range(limit):
-                    if time.monotonic() >= deadline:
-                        break
+                for tick in count() if limit is None else range(limit):
                     started = time.monotonic()
                     method, path, body, headers = 'GET', '/api/products', None, {}
                     if tick % 5 == 1 and products:

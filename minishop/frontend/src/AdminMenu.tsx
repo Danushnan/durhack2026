@@ -73,17 +73,20 @@ export function AdminMenu() {
             <button className="secondary" disabled={!status || busy} onClick={() => void run('packets/reset')}>Reset map traffic</button>
           </div>
         </section>
-        <section className="operator-card"><span className="operator-step">01 / Activity</span><h2>Traffic generation</h2><p>Real product browsing, baskets and checkout. One worker; at most 300 requests, 20 checkout attempts and five minutes per run.</p>
+        <section className="operator-card"><span className="operator-step">01 / Activity</span><h2>Traffic generation</h2><p>Traffic runs until stopped. Each run attempts up to 20 checkouts.</p>
           <label htmlFor="traffic-rate">Maximum storefront requests per second</label><select id="traffic-rate" value={rate} onChange={e=>setRate(e.target.value)}><option value="0.2">Gentle · 0.2/s</option><option value="1">Presentation · 1/s</option><option value="2">Busy · 2/s</option><option value="20">20/s</option></select>
-          <div className="operator-buttons"><button disabled={!status||running||status.traffic.running} onClick={()=>void run('traffic/start',{rps:Number(rate),requests:100})}>Start traffic</button><button className="secondary" disabled={!status||busy} onClick={()=>void run('traffic/stop')}>Stop traffic</button></div>
+          <div className="operator-buttons"><button disabled={!status||running||status.traffic.running} onClick={()=>void run('traffic/start',{rps:Number(rate),requests:null})}>Start traffic</button><button className="secondary" disabled={!status||busy} onClick={()=>void run('traffic/stop')}>Stop traffic</button></div>
           <dl className="operator-counters"><div><dt>Status</dt><dd>{status?status.traffic.running?'Running':'Stopped':'Unknown'}</dd></div><div><dt>Attempted</dt><dd>{status?.traffic.attempted??'—'}</dd></div><div><dt>Unsuccessful</dt><dd>{status?.traffic.failed??'—'}</dd></div><div><dt>Verified pod refusals</dt><dd>{status?.traffic.refused??'—'}</dd></div></dl>
           <p className="operator-note">Unsuccessful counts failed storefront attempts, including HTTP 402 declines, other HTTP errors and communication failures. Verified pod refusals is the subset checked after a network/gateway failure with zero Ready pods on a serving workload; it does not identify every failure’s cause. Checkout attempts: {status?.traffic.checkouts??'—'}. Last HTTP status: {status?.traffic.last_status??'—'}.</p>
           {status?.traffic.error&&<p role="alert" className="operator-error">{status.traffic.error}</p>}
         </section>
         <section className="operator-card"><span className="operator-step">02 / Experiments</span><h2>Payments</h2><p>Change the real payment Deployment configuration. Success is shown only after rollout and configuration verification.</p>
-          <h3>Latency</h3><p>Verified delay: <strong>{fault?`${fault.delay_ms} ms`:'Not checked'}</strong></p>
+          <h3>Latency</h3><p>{status?.operation?.status === 'running' && ['slowdown','restore-delay'].includes(status.operation.action)
+            ? 'Updating payment pods…'
+            : <>Verified delay: <strong>{fault?`${fault.delay_ms} ms`:'Not checked'}</strong></>}</p>
           <div className="operator-buttons"><button disabled={!status||running} onClick={()=>action('slowdown')}>Introduce 2,000 ms delay</button><button className="secondary" disabled={!status||running} onClick={()=>action('restore-delay')}>Restore normal delay</button></div>
-          <p className="operator-note">The delay adds two seconds to payment processing. A successful payment still completes, and KubeVerse shows it as slow traffic.</p>
+          <p className="operator-note">Once the delay is verified, place a checkout to see it in KubeVerse. Product browsing and basket requests don't call Payments.</p>
+          {(status?.traffic.checkouts ?? 0) >= 20 && <p className="operator-note">Generated traffic reached its checkout limit. Place a checkout in the storefront, or stop and restart traffic to generate more checkouts.</p>}
           <h3>Test-payment rejection</h3><p>Verified setting: <strong>{fault?fault.rejection?'Rejections enabled':'Accepting payments':'Not checked'}</strong>. A declined checkout returns HTTP 402.</p>
           <div className="operator-buttons"><button className="secondary" disabled={!status||running} onClick={()=>action('reject')}>Enable rejection</button><button className="secondary" disabled={!status||running} onClick={()=>action('accept')}>Disable rejection</button></div>
           <p className="operator-note">To see the explosion and red return in KubeVerse, enable rejection, wait for rollout verification, then run a checkout or start storefront traffic.</p>

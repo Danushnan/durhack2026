@@ -41,7 +41,7 @@ class Settings:
 class Start(BaseModel):
     model_config = ConfigDict(extra='forbid')
     rps: float = Field(default=1, ge=.2, le=20, allow_inf_nan=False)
-    requests: int = Field(default=100, ge=5, le=300, strict=True)
+    requests: int | None = Field(default=100, ge=5, le=300, strict=True)
 
 
 class Packets(BaseModel):
@@ -165,9 +165,12 @@ class Controller:
                         'reject': {'rejection': True}, 'accept': {'rejection': False},
                         'scale': {'checkout_replicas': body.replicas},
                         'reset': {'delay_ms': 100, 'rejection': False, 'checkout_replicas': 1}}.get(body.action, {})
-            if body.action != 'inspect' and (not observed['payment_ready'] or not observed['checkout_ready'] or
-                any(observed[k] != v for k, v in expected.items())):
-                raise RuntimeError('Rollout/configuration verification failed; inspect the demo cluster')
+            if body.action in {'slowdown', 'restore-delay', 'reject', 'accept', 'reset'} and not observed['payment_ready']:
+                raise RuntimeError('Payment rollout is not ready')
+            if body.action in {'scale', 'reset'} and not observed['checkout_ready']:
+                raise RuntimeError('Checkout rollout is not ready')
+            if any(observed[k] != v for k, v in expected.items()):
+                raise RuntimeError('The running configuration differs from the requested settings')
             self.verified = observed
             self.operation.update(status='succeeded', message='Configuration read back from Kubernetes; rollout verified' if body.action != 'inspect' else 'Configuration read back from Kubernetes')
         except Exception as exc:

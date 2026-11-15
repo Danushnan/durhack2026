@@ -48,7 +48,7 @@ def test_verified_operations_and_repeated_reset():
     async def run():
         controller = Controller(settings())
         controller.command = AsyncMock()
-        for name, expected in [('slowdown', {'delay_ms':2000}), ('restore-delay', {}), ('reject', {'rejection':True}), ('accept', {}), ('scale', {'checkout_replicas':2}), ('reset', {}), ('reset', {})]:
+        for name, expected in [('slowdown', {'delay_ms':2000, 'checkout_ready':False}), ('restore-delay', {}), ('reject', {'rejection':True}), ('accept', {}), ('scale', {'checkout_replicas':2, 'payment_ready':False}), ('reset', {}), ('reset', {})]:
             controller.inspect = AsyncMock(return_value=observed(**expected))
             controller.start_action(Action(action=name, replicas=2))
             assert controller.operation['status'] == 'running'
@@ -61,6 +61,9 @@ def test_verified_operations_and_repeated_reset():
             ('scale', 'deployment/checkout-api', '--replicas=1'),
         ]
         controller.inspect = AsyncMock(return_value=observed(delay_ms=100))
+        await controller.run_action(Action(action='slowdown'))
+        assert controller.operation['status'] == 'failed'
+        controller.inspect = AsyncMock(return_value=observed(delay_ms=2000, payment_ready=False))
         await controller.run_action(Action(action='slowdown'))
         assert controller.operation['status'] == 'failed'
         controller.command = AsyncMock(side_effect=RuntimeError('rollout timeout'))
@@ -123,6 +126,31 @@ def test_traffic_counts_all_failures_but_displays_only_confirmed_pod_refusals(mo
         assert worker.state['refused'] == 1
         assert verify.await_count == 2
         display.assert_awaited_once_with(*route)
+    asyncio.run(run())
+
+
+def test_continuous_traffic_passes_batch_limit_until_stopped(monkeypatch):
+    async def run():
+        past_batch_limit = asyncio.Event()
+        real_client = httpx.AsyncClient
+        worker = Traffic('http://127.0.0.1:8080')
+
+        def respond(request):
+            if worker.state['attempted'] == 301:
+                past_batch_limit.set()
+            return httpx.Response(200, json=[] if request.url.path == '/api/products' else {})
+
+        monkeypatch.setattr('demo_control.traffic.httpx.AsyncClient',
+                            lambda **kw: real_client(**kw, transport=httpx.MockTransport(respond)))
+        assert worker.start(10000, None)
+        try:
+            await asyncio.wait_for(past_batch_limit.wait(), timeout=5)
+            assert worker.state['running']
+        finally:
+            await worker.stop()
+        assert worker.task.done()
+        assert not worker.state['running']
+
     asyncio.run(run())
 
 

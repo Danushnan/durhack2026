@@ -365,16 +365,16 @@ spec:
           httpGet:
             path: /health/live
             port: http
-          periodSeconds: 5
+          periodSeconds: 1
           timeoutSeconds: 2
-          failureThreshold: 30
+          failureThreshold: 150
         readinessProbe:
           httpGet:
             path: /health/ready
             port: http
-          periodSeconds: 5
+          periodSeconds: 1
           timeoutSeconds: 2
-          failureThreshold: 3
+          failureThreshold: 15
         livenessProbe:
           httpGet:
             path: /health/live

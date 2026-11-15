@@ -45,7 +45,7 @@ All `/api/demo/*` routes require `MINISHOP_DEMO_ENABLED=1`, a loopback client, a
 | Endpoint | Method | Effect |
 |---|---|---|
 | `/api/demo/status` | GET | In-memory traffic counters, latest operation and timestamped verified configuration; no continuous Kubernetes health polling |
-| `/api/demo/traffic/start` | POST | `{rps:0.2..20, requests:5..300}`; defaults 1/s and 100. Repeated Start returns existing job rather than spawning another |
+| `/api/demo/traffic/start` | POST | `{rps:0.2..20, requests:5..300 or null}`. Defaults to 1/s and 100 requests. Send `null` to run until stopped. A repeated Start returns the existing job. |
 | `/api/demo/traffic/stop` | POST | Cancel and await the sole generator; repeatable |
 | `/api/demo/packets` | POST | `{count:1..100, cross_district:boolean}` queues illustrated vehicles on the open Kuebec map |
 | `/api/demo/packets/reset` | POST | Clear illustrated vehicles and their extra routes |
@@ -59,7 +59,7 @@ Ordinary `/api/products*`, `/api/carts/*`, `/api/checkout/*`, `/api/orders/*` ar
 
 ## Bounds and semantics
 
-One operator process/uvicorn worker owns one in-memory traffic job. Do not run multiple worker processes or operator instances. At most 20 storefront requests/s, 300 attempted requests, 20 checkout attempts, five minutes and one in-flight request. The default UI run is 100 requests. Requests browse products, add quantity one, read baskets and attempt genuine checkout; they consume real demo stock and persist orders. Reset never removes orders, baskets, database volumes or cluster resources. Repeated runs can eventually exhaust stock.
+One operator process owns one in-memory traffic job with at most 20 storefront requests/s, 20 checkout attempts and one in-flight request. Traffic started from the UI runs until you select Stop traffic or Reset, or shut down the operator. API runs with a request count also stop after five minutes. Requests browse products, add quantity one, read baskets and attempt genuine checkout. Successful checkouts consume demo stock and persist orders. Reset retains orders, baskets, database volumes and cluster resources.
 
 Each checkout uses a fresh idempotency key and is never automatically replayed after an ambiguous result. Stop cancels the client task, but an already received server request can finish; counts include attempted requests and confirmed HTTP/network failures, not a guarantee that every cancellation has a known outcome. Payment rejection is HTTP 402, separate from HTTP 5xx and infrastructure failure. Rollout success means readiness and configuration were read back, not that latency metrics were invented or a probe order was created. KubeVerse measures subsequent genuine traffic.
 
