@@ -1,7 +1,7 @@
-# Kuebec live demo: a tiny shop that really runs on Kubernetes. Start it with k8s/up.sh, remove it with k8s/down.sh.
+# KubeVerse live demo: a tiny shop that really runs on Kubernetes. Start it with k8s/up.sh, remove it with k8s/down.sh.
 #
 # Every Pod runs the same small Python program (k8s/workload.py, mounted from the "workload" ConfigMap). It serves HTTP on :8080, calls the services
-# it depends on, and logs one JSON line per call. Kuebec's live mode reads those lines to draw Cars:
+# it depends on, and logs one JSON line per call. KubeVerse's live mode reads those lines to draw Cars:
 #   status 200 -> served, 500 -> answered with an error (something further down failed), 503 -> refused.
 # Labels: app.kubernetes.io/part-of=kubeverse-demo marks the Pods whose logs carry traffic; the
 # container must be named "workload". (The label keeps its old name so existing setups keep working.)

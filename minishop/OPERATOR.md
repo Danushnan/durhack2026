@@ -34,7 +34,7 @@ Dedicated integration branch: `codex/minishop-demo-control`, based on main `f559
 5. Open `http://127.0.0.1:8090/#/admin` and select **Refresh verified settings** to confirm the target context. Open KubeVerse alongside it (default localhost:5173; set `VITE_KUEBEC_URL` before building to change it).
 6. Start traffic → introduce 2,000 ms delay → restore normal delay. Watch real measured aggregate activity in KubeVerse independently. Enable/disable payment rejection separately. Reset before finishing.
 
-The operator serves the existing built MiniShop UI and forwards its shopping API routes through the real Nginx storefront. Normal shopping is available at `http://127.0.0.1:8090/#/`; no extra application image is required. Original MiniShop on :8080 remains unchanged. The existing Nginx configuration does **not** forward privileged demo actions. The storefront build only serves shopping pages. The operator build adds the admin route. Vite development forwards `/api/demo` to :8090 and keeps its existing shopping proxies. The preset buttons send map previews through the Kuebec backend at `http://127.0.0.1:8000` by default. Set `MINISHOP_DEMO_CITY_URL` when the local backend uses another port.
+The operator serves the existing built MiniShop UI and forwards its shopping API routes through the real Nginx storefront. Normal shopping is available at `http://127.0.0.1:8090/#/`; no extra application image is required. Original MiniShop on :8080 remains unchanged. The existing Nginx configuration does **not** forward privileged demo actions. The storefront build only serves shopping pages. The operator build adds the admin route. Vite development forwards `/api/demo` to :8090 and keeps its existing shopping proxies. The preset buttons send map previews through the KubeVerse backend at `http://127.0.0.1:8000` by default. Set `MINISHOP_DEMO_CITY_URL` when the local backend uses another port.
 
 For CLI-only bounded activity: `python minishop/scripts/traffic.py --base http://127.0.0.1:8080 --rps 1 --count 100`. Do not run the CLI alongside the panel if you want one generator; its standalone process is outside the panel's ownership.
 
@@ -47,7 +47,7 @@ All `/api/demo/*` routes require `MINISHOP_DEMO_ENABLED=1`, a loopback client, a
 | `/api/demo/status` | GET | In-memory traffic counters, latest operation and timestamped verified configuration; no continuous Kubernetes health polling |
 | `/api/demo/traffic/start` | POST | `{rps:0.2..20, requests:5..300 or null}`. Defaults to 1/s and 100 requests. Send `null` to run until stopped. A repeated Start returns the existing job. |
 | `/api/demo/traffic/stop` | POST | Cancel and await the sole generator; repeatable |
-| `/api/demo/packets` | POST | `{count:1..100, cross_district:boolean}` queues illustrated vehicles on the open Kuebec map |
+| `/api/demo/packets` | POST | `{count:1..100, cross_district:boolean}` queues illustrated vehicles on the open KubeVerse map |
 | `/api/demo/packets/reset` | POST | Clear illustrated vehicles and their extra routes |
 | `/api/demo/actions` | POST | `{action:slowdown\|restore-delay\|reject\|accept\|reset\|scale\|inspect, replicas?:1..3}`; returns 202 while verification runs; overlapping operations get 409 |
 

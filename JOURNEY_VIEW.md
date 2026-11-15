@@ -120,7 +120,7 @@ journey panel scrolls independently on short screens.
 
 ## Exact local demonstration
 
-When running the [Demo Control Centre](minishop/OPERATOR.md) with a current operator build, Journey defaults to its storefront at `http://127.0.0.1:8090/`. Start the live Kuebec backend with `KUBEVERSE_JOURNEYS=1`, then open Journey and select **Open paired MiniShop**. The operator storefront proxies real requests to MiniShop on port 8080 and reports paired Add to Basket actions to the city.
+When running the [Demo Control Centre](minishop/OPERATOR.md) with a current operator build, Journey defaults to its storefront at `http://127.0.0.1:8090/`. Start the live KubeVerse backend with `KUBEVERSE_JOURNEYS=1`, then open Journey and select **Open paired MiniShop**. The operator storefront proxies real requests to MiniShop on port 8080 and reports paired Add to Basket actions to the city.
 
 From the repository root, leave the existing Kubernetes cluster running. These
 steps use separate ports for an isolated run without the operator.

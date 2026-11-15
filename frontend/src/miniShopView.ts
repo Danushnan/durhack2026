@@ -8,7 +8,8 @@ export const isMiniShopComponent = (object: K8sObject) =>
 /** Scope the presentation only; the watch and measured telemetry stay intact. */
 export function miniShopView(cluster: ClusterState): ClusterState {
   const objects = Object.values(cluster.objects)
-  if (typeof cluster.context !== 'string' || !cluster.metrics && !objects.some(isMiniShopComponent)) return cluster
+  // Scope only when MiniShop is really there: live mode always carries MiniShop metrics, even for other demos.
+  if (typeof cluster.context !== 'string' || !objects.some(isMiniShopComponent)) return cluster
   const visible = objects.filter(object => {
     if (object.kind === 'Node') return true
     if (object.metadata.namespace !== architecture.namespace) return false

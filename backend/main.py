@@ -119,7 +119,7 @@ async def lifespan(app):
                 await stop_task(ingestion)
 
 
-app = FastAPI(title="Kuebec Cluster", lifespan=lifespan)
+app = FastAPI(title="KubeVerse Cluster", lifespan=lifespan)
 app.include_router(router)
 app.include_router(live_history_router)
 app.include_router(journeys_router)
@@ -170,7 +170,7 @@ async def broadcast_demo(request: Request, event):
             or (origin is not None and urlsplit(origin).hostname not in local_hosts)):
         raise HTTPException(403, 'Local demo access only')
     if not telemetry_clients:
-        raise HTTPException(409, 'Open the Kuebec map and wait for it to connect first')
+        raise HTTPException(409, 'Open the KubeVerse map and wait for it to connect first')
     await broadcast([], event)
 
 
