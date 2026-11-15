@@ -1,5 +1,7 @@
 # Add to Basket Journey View
 
+This records the original Add to Basket milestone. Current educational content and Checkout support are documented in [JOURNEY_EDUCATION.md](JOURNEY_EDUCATION.md).
+
 Implemented on `codex/add-to-basket-journey`, based on verified integration baseline
 `015c9d0` (`cumit`). That baseline already contains Discovery, shared street geometry,
 functional roundabout lane paths, live monitoring, history, and demo controls. No

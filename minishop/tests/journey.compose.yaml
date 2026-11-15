@@ -1,0 +1,15 @@
+# Disposable local journey verification only; use project kv-journey-education.
+# Paths resolve relative to the first Compose file (minishop/compose.yaml).
+services:
+  postgres:
+    ports: ['127.0.0.1:55432:5432']
+  redis:
+    ports: ['127.0.0.1:56379:6379']
+  checkout-api:
+    volumes: ['./services:/app/services:ro']
+  payment-api:
+    environment:
+      PAYMENT_DELAY_MS: ${JOURNEY_TEST_PAYMENT_DELAY_MS:-100}
+      PAYMENT_FAIL: ${JOURNEY_TEST_PAYMENT_FAIL:-false}
+  minishop-web:
+    ports: !override ['127.0.0.1:18080:8080']

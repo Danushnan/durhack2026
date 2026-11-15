@@ -242,3 +242,7 @@ i { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin
 .journey-panel code { overflow-wrap: anywhere; }
 .journey-panel button:focus-visible, .journey-panel summary:focus-visible { outline: 2px solid #d6a53b; outline-offset: 3px; }
 @media (max-width: 600px) { .journey-controls { top: 214px; left: 72px; } .journey-panel { top: 264px; left: 72px; max-height: calc(100vh - 284px); } .app:has(.journey-panel) .overview { display: none; } }
+.journey-panel .journey-heading { font-size: 16px; color: var(--text); text-transform: none; letter-spacing: normal; }
+.journey-learning { font-size: 13px; line-height: 1.5; }
+.journey-learning dt { font-weight: 600; margin-top: 12px; }
+.journey-learning dd { margin: 4px 0 0; }

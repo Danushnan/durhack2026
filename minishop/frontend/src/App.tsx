@@ -1,4 +1,4 @@
-import { beginBasketAction, reportBasketAction } from './journey';
+import { beginBasketAction, beginCheckoutAction, reportBasketAction, type CheckoutAction } from './journey';
 import {useCallback, useEffect, useRef, useState} from 'react';
 import {ArrowLeft, ArrowRight, Bag, MagnifyingGlass, Plus} from '@phosphor-icons/react';
 import {api, ApiError, Cart, checkoutStorage, money, Order, Product, session} from './api';
@@ -21,6 +21,12 @@ export default function App() {
   const [query,setQuery] = useState('');
   const mainRef = useRef<HTMLElement>(null);
   const actionLock = useRef(false);
+  const checkoutReport = useRef<CheckoutAction | null>(null);
+  useEffect(() => {
+    if (route === '/confirmation' && order && checkoutReport.current) {
+      reportBasketAction(checkoutReport.current); checkoutReport.current = null;
+    }
+  }, [route, order]);
 
   useEffect(()=>{const navigate=()=>{const path=location.hash.slice(1);if(path&&!path.startsWith('/')){document.getElementById(path)?.scrollIntoView();return;}setRoute(path||'/');setError(undefined);window.scrollTo(0,0);mainRef.current?.focus();};window.addEventListener('hashchange',navigate);return()=>window.removeEventListener('hashchange',navigate);},[]);
   const refresh = useCallback(async()=> {
@@ -56,11 +62,15 @@ export default function App() {
   const remove = (p:Product)=>void action(async()=>{await api(`/carts/${session}/items/${p.id}`,{method:'DELETE'});setCart((await api<Cart>(`/carts/${session}`)).data);});
   const place = ()=>void action(async()=>{
     const key = localStorage.getItem(checkoutStorage)||crypto.randomUUID();localStorage.setItem(checkoutStorage,key);
-    const result = await api<Order>(`/checkout/${session}`,{method:'POST',headers:{'Idempotency-Key':key}});
-    setOrder(result.data);setLastRequest(result.requestId);
-    if(result.data.basket_cleared){localStorage.removeItem(checkoutStorage);setCart(emptyCart);}
-    // Confirmation must survive a subsequent basket-refresh failure.
-    location.hash='/confirmation';
+    const journey = await beginCheckoutAction();
+    try {
+      const result = await api<Order>(`/checkout/${session}`,{method:'POST',headers:{'Idempotency-Key':key}},journey.request_id);
+      checkoutReport.current = {...journey, checkout:'succeeded', ...(typeof result.data.basket_cleared === 'boolean' ? {basket_cleared:result.data.basket_cleared} : {})};
+      setOrder(result.data);setLastRequest(result.requestId);
+      if(result.data.basket_cleared){localStorage.removeItem(checkoutStorage);setCart(emptyCart);}
+      // Confirmation must survive a subsequent basket-refresh failure.
+      location.hash='/confirmation';
+    } catch(e) { reportBasketAction({...journey,checkout:'failed'}); throw e; }
   });
   const count=cart.items.reduce((sum,i)=>sum+i.quantity,0);
   const selectedId=route.startsWith('/product/')?route.split('/')[2]:null;

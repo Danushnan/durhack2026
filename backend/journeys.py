@@ -7,7 +7,9 @@ from uuid import UUID, uuid4
 from typing import Literal
 
 from fastapi import APIRouter, Header, HTTPException
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, model_validator
+from journey_education import educate
+from journey_evidence import public
 
 router = APIRouter(prefix="/api/journeys")
 TTL, COLLECTION, MAX_EVENTS = 300, 30, 128
@@ -16,10 +18,32 @@ TTL, COLLECTION, MAX_EVENTS = 300, 30, 128
 class Action(BaseModel):
     model_config = ConfigDict(extra="forbid")
     action_id: UUID
-    mutation_id: UUID
-    refresh_id: UUID
+    kind: Literal["add_to_basket", "checkout"] = "add_to_basket"
+    mutation_id: UUID | None = None
+    refresh_id: UUID | None = None
+    request_id: UUID | None = None
     mutation: Literal["pending", "succeeded", "failed"] = "pending"
     refresh: Literal["pending", "succeeded", "failed", "not_sent"] = "pending"
+    checkout: Literal["pending", "succeeded", "failed"] = "pending"
+    basket_cleared: bool | None = None
+
+    @model_validator(mode="after")
+    def validate_kind(self):
+        if self.kind == "add_to_basket":
+            if (not self.mutation_id or not self.refresh_id or self.mutation_id == self.refresh_id
+                    or self.request_id is not None or self.checkout != "pending" or self.basket_cleared is not None):
+                raise ValueError("Basket actions require two distinct request IDs and basket outcomes only")
+        elif (not self.request_id or self.mutation_id is not None or self.refresh_id is not None
+              or self.mutation != "pending" or self.refresh != "pending"
+              or (self.basket_cleared is not None and self.checkout != "succeeded")):
+            raise ValueError("Checkout requires one request ID and checkout browser outcomes only")
+        return self
+
+    def request_ids(self):
+        return {self.request_id} if self.kind == "checkout" else {self.mutation_id, self.refresh_id}
+
+    def identity(self):
+        return self.kind, self.mutation_id, self.refresh_id, self.request_id
 
 
 def root(row, method):
@@ -27,14 +51,10 @@ def root(row, method):
     return row.event == "http_server" and row.method == method and bool(re.fullmatch(pattern, row.route or ""))
 
 
-def public(row):
-    data = row.as_dict()
-    # Routes include basket session/product IDs. Do not expose those identifiers.
-    data["route"] = re.sub(r"[0-9a-fA-F]{8}-[0-9a-fA-F-]{27,}", "{id}", row.route or "") or None
-    return data
-
-
 def reconstruct(rows, action, namespace, collecting, truncated):
+    if action.kind == "checkout":
+        from checkout_journey import reconstruct_checkout
+        return reconstruct_checkout(rows, action, namespace, collecting, truncated)
     prefix = namespace + "/"
     cart, product, web, pg, redis = [prefix + n for n in ("cart-api", "product-api", "minishop-web", "postgres", "redis")]
     a = [r for r in rows if r.request_id == str(action.mutation_id)]
@@ -78,12 +98,13 @@ def reconstruct(rows, action, namespace, collecting, truncated):
     browser = action.refresh
     steps.append(dict(key="browser", description=("The browser reports that it updated the displayed basket." if browser == "succeeded" else
                      "The browser reports that the basket refresh failed; the mutation may still have succeeded." if browser == "failed" else
+                     "The browser did not send a basket refresh because its mutation request failed." if browser == "not_sent" else
                      "The browser has not reported a completed basket display update."), state=browser, event_ids=[],
                      from_service=None, to_service=None, basis="browser"))
     failed = any(r.status >= 400 for r in mutation_roots + refresh_roots) or "failed" in (action.mutation, action.refresh)
     complete = all(step["state"] == "observed" for step in steps[:-1]) and browser == "succeeded"
     state = "ambiguous" if ambiguous else "failed" if failed else "complete" if complete else "pending" if collecting else "partial"
-    return dict(state=state, collecting=collecting, truncated=truncated, steps=steps,
+    return dict(kind="add_to_basket", state=state, collecting=collecting, truncated=truncated, steps=educate(steps),
                 mutation_accepted=success(mutation_roots) and not ambiguous,
                 browser={"mutation": action.mutation, "refresh": action.refresh}, events=[public(r) for r in rows])
 
@@ -95,25 +116,27 @@ class JourneyStore:
         self.session = str(uuid4())
 
     def register(self, viewer, action, telemetry, now):
-        if action.mutation_id == action.refresh_id or any(v not in {"pending", "succeeded", "failed", "not_sent"} for v in (action.mutation, action.refresh)):
+        if (action.kind == "add_to_basket" and action.mutation_id == action.refresh_id) or any(v not in {"pending", "succeeded", "failed", "not_sent"} for v in (action.mutation, action.refresh)):
             raise HTTPException(422, "Distinct request IDs and valid browser outcomes required")
         with self.lock:
             self.actions = {key: value for key, value in self.actions.items() if value["created"] + TTL > now}
             key = (viewer, str(action.action_id))
             old = self.actions.get(key)
             if old:
-                if old["telemetry"] is not telemetry or (old["action"].mutation_id, old["action"].refresh_id) != (action.mutation_id, action.refresh_id):
+                if old["telemetry"] is not telemetry or old["action"].identity() != action.identity():
                     raise HTTPException(409, "Action source and request IDs are immutable")
-                for field in ("mutation", "refresh"):
+                for field in ("mutation", "refresh", "checkout"):
                     before, after = getattr(old["action"], field), getattr(action, field)
                     if before != "pending" and before != after:
                         raise HTTPException(409, "Browser outcome is already final")
+                if old["action"].basket_cleared is not None and old["action"].basket_cleared != action.basket_cleared:
+                    raise HTTPException(409, "Browser basket flag is already final")
                 old["action"] = action
             else:
                 if len(self.actions) >= 100 or sum(k[0] == viewer for k in self.actions) >= 20:
                     raise HTTPException(429, "Journey capacity reached; actions expire after five minutes")
-                ids = {action.mutation_id, action.refresh_id}
-                if any(ids & {v["action"].mutation_id, v["action"].refresh_id} for v in self.actions.values()):
+                ids = action.request_ids()
+                if any(ids & v["action"].request_ids() for v in self.actions.values()):
                     raise HTTPException(409, "Request ID already assigned to another action")
                 self.actions[key] = dict(action=action, telemetry=telemetry, created=now, events={}, truncated=False, finalized=False)
             return self.read(viewer, str(action.action_id), telemetry, now)
@@ -128,23 +151,26 @@ class JourneyStore:
                 raise HTTPException(409, "Collector source changed; pair a new action")
             action = entry["action"]
             # A small pre-registration allowance handles the browser relay reaching us after the HTTP request.
-            rows, truncated = telemetry.request_observations({str(action.mutation_id), str(action.refresh_id)},
-                         entry["created"] - 5, min(now, entry["created"] + COLLECTION), MAX_EVENTS + 1)
+            collection = 60 if action.kind == "checkout" else COLLECTION
+            rows, truncated = telemetry.request_observations({str(rid) for rid in action.request_ids()},
+                         entry["created"] - 5, min(now, entry["created"] + collection), MAX_EVENTS + 1)
             if not entry["finalized"]:
                 for row in rows:
                     if len(entry["events"]) < MAX_EVENTS or row.event_id in entry["events"]:
                         entry["events"][row.event_id] = row
                     else:
                         entry["truncated"] = True
-            if now >= entry["created"] + COLLECTION:
+            if now >= entry["created"] + collection:
                 entry["finalized"] = True
             entry["truncated"] |= truncated
             evidence = sorted(entry["events"].values(), key=lambda row: (row.observed_at, row.event_id))
-            result = reconstruct(evidence, action, telemetry.namespace, now < entry["created"] + COLLECTION, entry["truncated"])
+            result = reconstruct(evidence, action, telemetry.namespace, now < entry["created"] + collection, entry["truncated"])
             if result["truncated"] and result["state"] == "complete":
                 result["state"] = "partial"
             return dict(action_id=action_id, source=f"kubernetes:{telemetry.context}:{telemetry.namespace}",
-                        collector_session=self.session, expires_at=entry["created"] + TTL, **result)
+                        collector_session=self.session, collection_seconds=collection,
+                        requests=({"checkout": str(action.request_id)} if action.kind == "checkout" else
+                                  {"mutation": str(action.mutation_id), "refresh": str(action.refresh_id)}), expires_at=entry["created"] + TTL, **result)
 
 
 store = JourneyStore()

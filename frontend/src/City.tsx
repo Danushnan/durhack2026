@@ -975,7 +975,7 @@ function JourneyGuide({step, road, positions}: {step: JourneyStep; road?: Street
     else if (positions[0]) marker.current.position.copy(positions[0]).setY(8)
     marker.current.rotation.y += delta
   })
-  if (!positions.length || !['observed', 'failed', 'succeeded'].includes(step.state)) return null
+  if (!positions.length || !['observed', 'failed', 'succeeded', 'skipped'].includes(step.state)) return null
   return <group>
     {line && <primitive object={line} />}
     {positions.map((position, i) => <mesh key={i} position={[position.x, 0.3, position.z]} rotation-x={-Math.PI / 2}>
@@ -1175,7 +1175,7 @@ export function City({ cluster, selected, onSelect, powerGrid, theme, onHover, s
         </mesh>] : []
       })}
       {journeyActive && journeyStep && <JourneyGuide key={journeyPlaybackKey} step={journeyStep} road={journeyKey ? network.routes[journeyKey] : undefined}
-        positions={(journeyKey ? [journeyStep.from_service, journeyStep.to_service] : [journeyStep.key === 'browser' ? 'minishop-web' : 'cart-api'].map(name => workloadKeys.find(key => key.endsWith(`/${name}`))))
+        positions={(journeyKey ? [journeyStep.from_service, journeyStep.to_service] : journeyStep.focus_service ? [journeyStep.focus_service] : [journeyStep.key === 'browser' ? 'minishop-web' : 'cart-api'].map(name => workloadKeys.find(key => key.endsWith(`/${name}`))))
           .flatMap(key => key && layout.lots[key] ? [layout.lots[key].center] : [])} />}
       {mode === 'iso'
         // Isometric: no rotation. Drag (or one finger) pans, wheel (or pinch) zooms towards the cursor.

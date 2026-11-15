@@ -117,7 +117,7 @@ export default function App() {
         onHover={setHover} states={states} homeTick={homeTick} flows={flows} districtColors={districtColors} replay={simulatorSource && replayAt !== null} mode={view}
         journeyActive={journey.enabled && !!miniShopSource}
         journeyPlaybackKey={`${journey.journey?.action_id}:${journey.step}:${journey.replayTick}`}
-        journeyServices={journey.enabled && journey.journey?.state !== 'ambiguous' ? journey.journey?.steps.flatMap(step => [step.from_service, step.to_service].filter((key): key is string => !!key)) : undefined}
+        journeyServices={journey.enabled && journey.journey && journey.journey.source === miniShopSource && journey.journey.state !== 'ambiguous' ? journey.journey.steps.flatMap(step => [step.from_service, step.to_service].filter((key): key is string => !!key)) : undefined}
         journeyStep={journey.enabled && journey.journey && journey.journey.source === miniShopSource && journey.journey.state !== 'ambiguous' ? journey.journey.steps[journey.step] : undefined}
         discoveredRoads={activeDiscovery?.roads}
         trafficPaused={live && (!cluster.connected || !!cluster.awaitingSnapshot || !!cluster.stale || !!cluster.metricsStale ||

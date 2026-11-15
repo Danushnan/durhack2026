@@ -143,6 +143,7 @@ def test_generator_against_real_minishop_http_services(stack):
     import threading
     from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
     urls = stack['urls']
+    original_checkout = urls['checkout']
     requests = []
     class Forward(BaseHTTPRequestHandler):
         def log_message(self, *args): pass
@@ -176,6 +177,7 @@ def test_generator_against_real_minishop_http_services(stack):
         assert any('/checkout/' in path and code == 402 for _,path,code in requests)
     try: asyncio.run(run())
     finally:
+        urls['checkout'] = original_checkout
         server.shutdown(); server.server_close(); thread.join(timeout=2)
 
 

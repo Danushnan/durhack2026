@@ -7,7 +7,7 @@ const errors=[]
 try {
   const context=await browser.newContext({viewport:{width:1440,height:1000}})
   const page=await context.newPage()
-  page.setDefaultTimeout(10000)
+  page.setDefaultTimeout(30000)
   console.log('city open')
   page.on('pageerror',e=>errors.push(e.message))
   const reports=[]
