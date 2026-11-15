@@ -99,7 +99,8 @@ button.small { padding: 2px 8px; font-size: 11px; }
 .svc-text { display: flex; flex-direction: column; min-width: 140px; }
 .svc-text small { font-size: 11px; }
 
-.legend { bottom: 12px; right: 12px; display: flex; gap: 10px; flex-wrap: wrap; font-size: 11px; max-width: 360px; }
+.legend { top: 60px; right: 12px; display: flex; gap: 10px; flex-wrap: wrap; align-items: center; font-size: 11px; max-width: 360px; }
+.legend:not(.full) b { font-size: 11px; color: var(--muted); }
 i { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 5px; vertical-align: middle; }
 
 /* event ticker */
@@ -187,7 +188,7 @@ i { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin
 .affected { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 4px; max-height: 30vh; overflow: auto; }
 .affected button { width: 100%; text-align: left; border-left-width: 4px; font-size: 12px; }
 .affected button span { color: var(--muted); }
-.legend.full { display: block; width: 330px; max-height: calc(100vh - 150px); overflow: auto; padding: 10px 12px; }
+.legend.full { display: block; width: 330px; max-height: calc(100vh - 130px); overflow: auto; padding: 10px 12px; }
 .legend.full > div { margin: 3px 0; line-height: 1.35; }
 .legend.full h3:first-of-type { margin-top: 0; }
 .flows { width: 100%; border-collapse: collapse; font-size: 12px; }
@@ -278,3 +279,21 @@ i { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin
 .live-overview > .monitor-disclosure > summary { margin-top: 0; font-size: 12px; }
 .live-overview > .monitor-disclosure > summary .source-status { display: block; margin: 4px 0 0 16px; font-size: 11px; }
 .live-overview > .monitor-disclosure[open] > summary { margin-bottom: 8px; }
+
+/* Decluttered HUD: grouped toolbar, a key only when its layer is on, reference detail folded away. */
+.controls .sep { width: 1px; align-self: stretch; margin: 4px 2px; background: var(--line); }
+.controls button.wide { width: auto; padding: 0 10px; font-size: 13px; }
+details.more { margin-top: 10px; border-top: 1px solid var(--line); padding-top: 6px; }
+details.more > summary { cursor: pointer; font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px; color: var(--muted); padding: 4px 0; }
+details.more > summary small { text-transform: none; letter-spacing: 0; }
+details.more > summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+@media (min-width: 721px) {
+  /* Sit right of the overview instead of under it. */
+  .ticker { left: max(324px, calc(50% - 310px)); transform: none; width: min(620px, calc(100vw - 336px)); }
+}
+@media (max-width: 720px) {
+  .controls { gap: 4px; }
+  .controls .sep { display: none; }
+  .controls button.wide { padding: 0 6px; }
+  .legend.full { top: auto; bottom: 58px; left: 8px; right: 8px; width: auto; max-height: 60vh; z-index: 22; }
+}

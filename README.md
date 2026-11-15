@@ -109,11 +109,13 @@ logs one JSON line per call (`200` served, `500` answered with an error, `503` r
    Toggle **⚡ Power Grid** to colour Units by Node.
 9. Request health is shown apart from Pod health. A Building glows by its requests, and a shared Road shows the most
    affected route using it. The states are healthy, slow (≥ 300 ms), errors (≥ 1% answered with an error), refused
-   (nobody answered) and idle. A Building’s Units show its Pods. Each tag has a Pods line and a requests line. A pulsing ring (with a light beam when serious) marks every
+   (nobody answered) and idle. A Building’s Units show its Pods. A healthy Building's tag shows only its name; a Pods line and a requests line
+   appear when it needs attention, is rolling out, or is selected (hover always shows them). A pulsing ring (with a light beam when serious) marks every
    Building that needs attention, and the **overview** (bottom left) gives total requests/s in, latency, the failing share,
    counts of healthy, degraded (ring only: slow, missing Pods) and failed (ring and beam: down, refusing, errors, impacted)
    services, and lists the affected ones. A Building's inspect panel shows its **recent errors**: failed requests from the
-   Pods' logs (live mode) and Kubernetes warnings. Hover a Road for its numbers; **◧** opens the legend with the thresholds.
+   Pods' logs (live mode) and Kubernetes warnings. Hover a Road for its numbers; **Key** opens the legend with the thresholds. In a Building's inspect panel,
+   **More Kubernetes details** and **What Kubernetes did** are folded away until opened.
 10. The city is isometric by default: drag to pan, scroll or pinch to zoom. **3D** switches to a free 3D view (drag to
    orbit, right-drag to pan); **ISO** switches back.
    **⟲** resets the city; **🌙 / ☀️** switches night and day; **⌂** returns the camera to the overview. The ticker at
