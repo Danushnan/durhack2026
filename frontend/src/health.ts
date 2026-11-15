@@ -96,8 +96,8 @@ export interface Affected { rank: number; color: string; icon: string; label: st
  * Why a service needs attention, if it does, most serious first. Pod problems and request problems
  * are separate causes: a service can be Down (no Pod ready) or merely failing its requests.
  */
-export function affected(s: { ready: number; want: number; impactedBy?: string | null; signal: Signal; basis?: 'received' | 'sent' }): Affected | null {
-  if (s.ready === 0) return { rank: 6, color: SIGNAL.refused.color, icon: '✕', label: s.want ? 'Down: no Pod ready' : 'Down: scaled to zero' }
+export function affected(s: { ready: number; want: number; impactedBy?: string | null; signal: Signal; basis?: 'received' | 'sent'; missing?: boolean }): Affected | null {
+  if (s.ready === 0) return { rank: 6, color: SIGNAL.refused.color, icon: '✕', label: s.missing ? 'Not deployed' : s.want ? 'Down: no Pod ready' : 'Down: scaled to zero' }
   if (s.signal === 'refused') return { rank: 5, ...pick('refused'), label: s.basis === 'sent' ? 'Its calls are refused' : 'Refusing requests' }
   if (s.signal === 'errors') return { rank: 4, ...pick('errors'), label: s.impactedBy ? `Errors: needs ${s.impactedBy}`
     : s.basis === 'sent' ? 'Errors in the calls it makes' : 'Errors in its answers' }
@@ -105,6 +105,17 @@ export function affected(s: { ready: number; want: number; impactedBy?: string |
   if (s.signal === 'slow') return { rank: 2, ...pick('slow'), label: 'Slow answers' }
   if (s.ready < s.want) return { rank: 1, ...pick('slow'), label: `Pods ${s.ready}/${s.want} ready` }
   return null
+}
+/** Rank at which a Building also gets a light beam; the overview counts those as failed, the rest of the ringed ones as degraded. */
+export const SERIOUS = 3
+
+/** Healthy / degraded / failed service counts, cut where the city draws ring vs ring-and-beam. */
+export function tally(list: (Affected | null | undefined)[]) {
+  return {
+    healthy: list.filter((a) => !a).length,
+    degraded: list.filter((a) => a && a.rank < SERIOUS).length,
+    failed: list.filter((a) => a && a.rank >= SERIOUS).length,
+  }
 }
 const pick = (s: Signal) => ({ color: SIGNAL[s].color, icon: SIGNAL[s].icon })
 

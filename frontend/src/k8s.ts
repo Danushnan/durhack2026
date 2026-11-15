@@ -33,8 +33,13 @@ export interface K8sObject {
 /** healthy: the target has ready Pods to answer. errors: it answers, but with errors, because something it needs is down. */
 export interface Edge {
   from: string; to: string; rps: number; healthy: boolean; errors?: boolean
+  declared?: boolean // live: an architecture manifest or env var declares this call (absent in the simulator: all are)
+  recent_errors?: { at: number; status: number; outcome: 'error' | 'refused'; detail: string }[] // live: newest last
   requests?: number; latency_ms?: number | null; error_rate?: number; refused_rate?: number
 }
+
+/** Live: a component an architecture manifest lists but the cluster does not run. */
+export const notDeployed = (dep: K8sObject) => dep.metadata.annotations?.['kubeverse.io/not-deployed'] === 'true'
 
 export interface ClusterState {
   objects: Record<string, K8sObject> // by uid
@@ -116,6 +121,7 @@ export function deploymentHealth(dep: K8sObject): Health {
 
 export function describeDeployment(dep: K8sObject): string {
   const ready = dep.status?.readyReplicas ?? 0, want = dep.spec?.replicas ?? 0
+  if (notDeployed(dep)) return 'Not deployed: in architecture.json, missing from the cluster'
   if (want === 0) return 'Closed: scaled to zero Units'
   if (ready === 0) return `Down: none of ${want} Units working`
   if (ready < want) return `${ready} of ${want} Units working`

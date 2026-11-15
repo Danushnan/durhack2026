@@ -1,4 +1,4 @@
-import { connectionPurpose, recentConnections, TRAFFIC_WINDOW_SECONDS } from './discoveryActivity'
+import { connectionPurpose, recentConnections, TRAFFIC_WINDOW_SECONDS } from './discoveryActivity.ts'
 import { discoveryReady, roadKey, type RoadDiscovery } from './roadDiscovery'
 import type { ClusterState, Edge } from './k8s'
 

@@ -1,7 +1,7 @@
 import { trafficOutcomeRates } from './trafficOutcome'
 import { startsDiscoveryActivity, type DiscoveryActivityPeriod } from './discoveryTraffic'
 import { DiscoveryFocus } from './DiscoveryFocus'
-import { DISCOVERY_CAR_DENSITY } from './discoveryActivity'
+import { DISCOVERY_CAR_DENSITY } from './discoveryActivity.ts'
 import { JourneyGuide, JourneyFollowCamera } from './JourneyScene'
 import type { JourneyAnchor, JourneySpeed } from './journeyPlayback'
 import type { JourneyStep } from './Journey'
@@ -10,7 +10,7 @@ import { Edges, OrbitControls, OrthographicCamera, PerspectiveCamera } from '@re
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef } from 'react'
 import * as THREE from 'three'
 import {
-  type ClusterState, type Edge, type K8sObject, deploymentHealth, describePod, HEALTH_COLOR, isWorkload,
+  type ClusterState, type Edge, type K8sObject, deploymentHealth, describePod, HEALTH_COLOR, isWorkload, notDeployed,
   keyOf, NODE_COLORS, nodeReady, podsOf, podStatus, rolloutOf, STATUS_COLOR, versionColor,
 } from './k8s'
 import { FacadeSign, Landmark, type LandmarkInfo, landmarkFor } from './landmarks'
@@ -19,7 +19,7 @@ import { Scenery } from './scenery'
 import { COMPONENTS, componentOf, nameOf, roleOf } from './teach'
 import { textTexture, type TextLine } from './textures'
 import type { Theme } from './theme'
-import { type Affected, describeFlow, type Flow, type serviceFlow, SIGNAL, signalOf } from './health'
+import { type Affected, describeFlow, type Flow, SERIOUS, type serviceFlow, SIGNAL, signalOf } from './health'
 import { admit, bendLimit, type CarAgent, CARS_PER_REQUEST, DRIVE, exitClear, newCar, stepCars } from './traffic'
 import { label, latencyText, type LiveServiceView } from './liveMetrics'
 import { miniShopLayoutCalls } from './miniShopRoads'
@@ -115,11 +115,14 @@ function ribbon(pts: THREE.Vector3[], width: number, y: number) {
 
 // ---------- floating name tags (canvas sprites at a constant on-screen size) ----------
 
-function Tag({ lines, border, position, size = 0.043, theme }: {
+/** Canvas height of a two-line tag (56 px title + 40 px line): `size` is that tag's height, so every tag's text is the same size whatever its line count. */
+const TAG_REF_PX = 156
+function Tag({ lines, border, position, size: twoLine = 0.0326, theme }: {
   lines: TextLine[]; border: string; position: [number, number, number]; size?: number; theme: Theme
 }) {
   const key = JSON.stringify(lines) + border + theme.mode
-  const { texture, aspect } = useMemo(() => textTexture(lines, { bg: theme.labelBg, border }), [key]) // eslint-disable-line react-hooks/exhaustive-deps
+  const { texture, aspect, height } = useMemo(() => textTexture(lines, { bg: theme.labelBg, border }), [key]) // eslint-disable-line react-hooks/exhaustive-deps
+  const size = twoLine * height / TAG_REF_PX
   useEffect(() => () => texture.dispose(), [texture])
   const ref = useRef<THREE.Sprite>(null)
   // An orthographic camera ignores sizeAttenuation, so scale by the zoom to keep a constant on-screen size.
@@ -341,24 +344,30 @@ function Plot({ position, empty, theme }: { position: THREE.Vector3; empty: bool
   )
 }
 
+/** A healthy Building's tag is just its name; detail lines appear when it needs attention, is changing, or is selected (hover always has them). */
 function tagFor(dep: K8sObject, info: LandmarkInfo, state: ServiceState[string] | undefined, theme: Theme,
-  rollout: ReturnType<typeof rolloutOf>): { lines: TextLine[]; border: string } {
+  rollout: ReturnType<typeof rolloutOf>, selected: boolean): { lines: TextLine[]; border: string } {
   const ready = dep.status?.readyReplicas ?? 0, want = dep.spec.replicas
   const health = deploymentHealth(dep)
   const title: TextLine = { text: `${state?.affected ? `${state.affected.icon} ` : ''}${info.emoji} ${dep.metadata.name}`, px: 56, color: theme.labelFg }
   if (state?.live) {
     const live = state.live, m = live.metrics
+    if (!selected && !live.affected) return { lines: [title], border: live.color }
     return { lines: [title,
       { text: `Infrastructure: ${label(live.infrastructure)} · ${m?.ready_replicas ?? ready}/${m?.desired_replicas ?? want} Ready`, px: 40, color: theme.labelFg },
       { text: `App: ${label(live.application)} · ${label(live.availability)}${m?.p95_latency_ms == null ? '' : ` · p95 ${latencyText(m.p95_latency_ms)}`}`, px: 40, color: live.color }],
       border: live.affected?.color ?? live.color }
   }
+  const rolling = rollout.rolling && Object.keys(rollout.byVersion).length > 1
+  if (!selected && !state?.affected && !state?.down && !notDeployed(dep) && !rollout.stalled && !rolling && ready === want)
+    return { lines: [title], border: HEALTH_COLOR[health] }
   const night = theme.mode === 'night'
   const amber = night ? AMBER : '#b45309', red = night ? '#f87171' : '#dc2626', green = night ? '#4ade80' : '#15803d' // text needs more contrast on the light tag
   // Line 2: the Pods (are copies running and ready?).
-  const pods: TextLine = state?.down ? { text: `PODS DOWN · ${ready}/${want} ready`, px: 40, color: red }
+  const pods: TextLine = notDeployed(dep) ? { text: 'NOT DEPLOYED · in architecture.json', px: 40, color: red }
+    : state?.down ? { text: `PODS DOWN · ${ready}/${want} ready`, px: 40, color: red }
     : rollout.stalled ? { text: `⚠ ${rollout.version} STUCK · old version serving`, px: 40, color: amber }
-      : rollout.rolling && Object.keys(rollout.byVersion).length > 1
+      : rolling
         ? { text: `ROLLING OUT ${rollout.version} · ${rollout.byVersion[rollout.version]?.ready ?? 0}/${want} ready`, px: 40, color: amber }
         : ready !== want ? { text: `Pods ${ready}/${want} ready · fixing…`, px: 40, color: amber }
           : { text: `Pods ${ready}/${want} ready · ${rollout.version}`, px: 40, color: health === 'healthy' ? green : amber }
@@ -440,7 +449,7 @@ function Building({ dep, info, pods, pos, selected, related, onSelect, powerGrid
       `If it stops: ${role.ifDown}`, 'Click to inspect',
     ], ...at(e) })
   }
-  const tag = tagFor(dep, info, state, theme, rolloutOf(dep, pods))
+  const tag = tagFor(dep, info, state, theme, rolloutOf(dep, pods), selected)
   const size = sizeFor(desired)
   const body = useRef<THREE.Group>(null)
   useFrame((_, dt) => { body.current?.scale.lerp(new THREE.Vector3(size, size, size), Math.min(1, dt * 4)) })
@@ -448,7 +457,7 @@ function Building({ dep, info, pods, pos, selected, related, onSelect, powerGrid
     <group position={pos}>
       {selected && <Pad w={17} d={17} r={3.5} position={[0, 0.008, -0.6]} color={info.accent} opacity={0.4} />}
       {!selected && related && <Pad w={17} d={17} r={3.5} position={[0, 0.008, -0.6]} color={info.accent} opacity={0.16} />}
-      {state?.affected && <Alarm color={state.affected.color} strong={state.affected.rank >= 3 && state.live?.infrastructure !== 'scaled_down'} />}
+      {state?.affected && <Alarm color={state.affected.color} strong={state.affected.rank >= SERIOUS && state.live?.infrastructure !== 'scaled_down'} />}
       <group ref={body} position={[0, 0, -2]} scale={size}>
         <Landmark info={info} glow={glow} theme={theme} />
         {/* One invisible hit-box for hover/click instead of handlers on every part */}
@@ -552,10 +561,10 @@ function PowerStation({ node, pos, used, color, theme, onHover, selected, onSele
       </mesh>
       <Tag theme={theme} position={[-0.5, 7, 0]} border={ready ? color : RED} size={0.036}
         lines={[{ text: `⚡ ${name}`, px: 56, color: theme.labelFg },
-          !ready ? { text: 'POWER CUT · NotReady', px: 40, color: RED }
-            : unnoticed ? { text: 'POWER CUT · heartbeats stopping…', px: 40, color: RED }
-            : cordoned ? { text: `MAINTENANCE · ${drain.startsWith('blocked') ? 'waiting on a budget' : drain}`, px: 40, color: night ? AMBER : '#b45309' }
-              : { text: `Node · ${used}/${capacity} slots used`, px: 40, color: night ? '#cbd5e1' : '#334155' }]} />
+          ...(!ready ? [{ text: 'POWER CUT · NotReady', px: 40, color: RED }]
+            : unnoticed ? [{ text: 'POWER CUT · heartbeats stopping…', px: 40, color: RED }]
+            : cordoned ? [{ text: `MAINTENANCE · ${drain.startsWith('blocked') ? 'waiting on a budget' : drain}`, px: 40, color: night ? AMBER : '#b45309' }]
+              : selected ? [{ text: `Node · ${used}/${capacity} slots used`, px: 40, color: night ? '#cbd5e1' : '#334155' }] : [])]} />
     </group>
   )
 }
@@ -996,11 +1005,15 @@ function Lamps({ points, theme }: { points: THREE.Vector3[]; theme: Theme }) {
 
 interface Controls extends THREE.EventDispatcher<{ start: object }> { target: THREE.Vector3; update(): void }
 
+/** How far past the core the view may reach: about where the Scenery thins out. */
+const VIEW_MARGIN = 45
+const clamp = (v: number, lo: number, hi: number) => lo > hi ? (lo + hi) / 2 : Math.min(hi, Math.max(lo, v))
+
 /**
  * Flies the camera to the overview or to a selected Building. Isometric: the view direction never
  * changes; flying moves the look-at point and the zoom. 3D: it moves the camera itself.
  */
-function CameraRig({ focus, layout, homeTick, mode, disabled, journeyMode }: { disabled?: boolean; journeyMode?: boolean; focus: THREE.Vector3 | null; layout: CityLayout; homeTick: number; mode: ViewMode }) {
+function CameraRig({ focus, layout, homeTick, mode, disabled, journeyMode, fogEnd }: { disabled?: boolean; journeyMode?: boolean; focus: THREE.Vector3 | null; layout: CityLayout; homeTick: number; mode: ViewMode; fogEnd: number }) {
   const view = useThree((s) => s.size)
   const fov = useThree((s) => (s.camera as THREE.PerspectiveCamera).fov ?? 45)
   const controls = useThree((s) => s.controls) as unknown as Controls | null
@@ -1013,15 +1026,24 @@ function CameraRig({ focus, layout, homeTick, mode, disabled, journeyMode }: { d
     flying.current = true
   }
   const { x0, x1, z0, z1 } = layout.core
+  const homeZoom = useRef(5)
+  // Isometric bounds in screen space (along ISO_RIGHT and ISO_UP) of the city plus its Scenery.
+  const bounds = useMemo(() => {
+    const corners = [x0 - VIEW_MARGIN, x1 + VIEW_MARGIN].flatMap((x) => [z0 - VIEW_MARGIN, z1 + VIEW_MARGIN].map((z) => new THREE.Vector3(x, 0, z)))
+    const r = corners.map((c) => c.dot(ISO_RIGHT)), u = corners.map((c) => c.dot(ISO_UP))
+    return { r0: Math.min(...r), r1: Math.max(...r), u0: Math.min(...u), u1: Math.max(...u) }
+  }, [x0, x1, z0, z1])
   // Overview: the whole core (and the tallest Buildings on it) fits the viewport.
   useEffect(() => {
     if (disabled) return
     const corners = [x0, x1].flatMap((x) => [z0, z1].flatMap((z) => [0, 14].map((y) => new THREE.Vector3(x, y, z))))
     const span = (axis: THREE.Vector3) => { const d = corners.map((c) => c.dot(axis)); return Math.max(...d) - Math.min(...d) }
     const zoom = 0.94 * Math.min(view.width / span(ISO_RIGHT), view.height / span(ISO_UP))
+    homeZoom.current = zoom
     const wide = Math.max(x1 - x0, (z1 - z0) * 1.5, 40)
     const dist = (wide * 0.62) / (Math.tan((fov * Math.PI) / 360) * Math.min(view.width / view.height, 2))
-    fly(new THREE.Vector3((x0 + x1) / 2, 0, (z0 + z1) / 2), zoom, new THREE.Vector3(0, dist * 0.62, dist * 0.78))
+    // 3D: looking 40° off vertical keeps the horizon (empty sky) above the top of the view.
+    fly(new THREE.Vector3((x0 + x1) / 2, 0, (z0 + z1) / 2), zoom, new THREE.Vector3(0, dist * 0.77, dist * 0.64))
   }, [x0, x1, z0, z1, homeTick, mode, journeyMode]) // eslint-disable-line react-hooks/exhaustive-deps
   // Fly-to: look slightly right of the Building so it is not hidden behind the inspect panel.
   useEffect(() => {
@@ -1049,6 +1071,34 @@ function CameraRig({ focus, layout, homeTick, mode, disabled, journeyMode }: { d
     const there = (camera as THREE.OrthographicCamera).isOrthographicCamera
       ? Math.abs(camera.zoom - goal.current.zoom) < 0.01 : camera.position.distanceTo(goal.current.cam) < 0.05
     if (controls.target.distanceTo(goal.current.target) < 0.05 && there) flying.current = false
+  })
+  // Registered after the fly-to, so the bounds have the last word each frame.
+  // Keep the view on the city: never zoom out or pan past the Scenery into the empty background.
+  useFrame(({ camera, size }) => {
+    if (disabled || !controls) return
+    const t = controls.target
+    if ((camera as THREE.OrthographicCamera).isOrthographicCamera) {
+      const { r0, r1, u0, u1 } = bounds
+      // The home view always stays reachable, even on a tall phone screen where it shows a little more.
+      const minZoom = Math.min(Math.max(size.width / (r1 - r0), size.height / (u1 - u0)), homeZoom.current)
+      if (camera.zoom < minZoom) { camera.zoom = minZoom; camera.updateProjectionMatrix() }
+      const hw = size.width / (2 * camera.zoom), hh = size.height / (2 * camera.zoom)
+      const sr = t.dot(ISO_RIGHT), su = t.dot(ISO_UP)
+      const dr = clamp(sr, r0 + hw, r1 - hw) - sr, du = clamp(su, u0 + hh, u1 - hh) - su
+      if (Math.abs(dr) + Math.abs(du) > 1e-4) {
+        const shift = ISO_RIGHT.clone().multiplyScalar(dr).addScaledVector(ISO_UP, du)
+        t.add(shift); camera.position.add(shift)
+      }
+      return
+    }
+    // 3D: the look-at point stays over the city, and the camera stays close enough that the top of the
+    // view still meets the ground before the fog turns it into sky.
+    const look = new THREE.Vector3(clamp(t.x, x0 - VIEW_MARGIN / 2, x1 + VIEW_MARGIN / 2), clamp(t.y, 0, 15), clamp(t.z, z0 - VIEW_MARGIN / 2, z1 + VIEW_MARGIN / 2))
+    camera.position.add(look.clone().sub(t)); t.copy(look)
+    const offset = camera.position.clone().sub(t), d = offset.length()
+    const tilt = Math.acos(offset.y / d), top = tilt + 1.3 * ((camera as THREE.PerspectiveCamera).fov * Math.PI) / 360 // 1.3: the corners reach further than the centre
+    const far = top < Math.PI / 2 - 0.02 ? (fogEnd * Math.cos(top)) / Math.cos(tilt) : 0
+    if (d > Math.max(far, 12)) camera.position.copy(t).addScaledVector(offset, Math.max(far, 12) / d)
   })
   return null
 }
@@ -1266,12 +1316,12 @@ export function City({ cluster, selected, onSelect, powerGrid, theme, onHover, s
           .flatMap(key => key && layout.lots[key] ? [layout.lots[key].center] : [])} />}
       {mode === 'iso'
         // Isometric: no rotation. Drag (or one finger) pans, wheel (or pinch) zooms towards the cursor.
-        ? <OrbitControls key="controls-iso" makeDefault enableRotate={false} screenSpacePanning zoomToCursor minZoom={1.5} maxZoom={60}
+        ? <OrbitControls key="controls-iso" makeDefault enableRotate={false} screenSpacePanning zoomToCursor maxZoom={60}
           mouseButtons={{ LEFT: THREE.MOUSE.PAN, MIDDLE: THREE.MOUSE.DOLLY, RIGHT: THREE.MOUSE.PAN }}
           touches={{ ONE: THREE.TOUCH.PAN, TWO: THREE.TOUCH.DOLLY_PAN }} />
-        // 3D: drag orbits, right-drag pans, wheel zooms; the camera never goes below the ground.
-        : <OrbitControls key="controls-3d" makeDefault maxPolarAngle={Math.PI / 2.15} minDistance={10} maxDistance={170} />}
-      <CameraRig focus={focus} layout={cameraLayout} homeTick={homeTick} mode={mode}
+        // 3D: drag orbits, right-drag pans, wheel zooms; tilting stops well above the horizon (CameraRig keeps the sky out of view).
+        : <OrbitControls key="controls-3d" makeDefault maxPolarAngle={Math.PI / 3.4} minDistance={10} maxDistance={170} />}
+      <CameraRig focus={focus} layout={cameraLayout} homeTick={homeTick} mode={mode} fogEnd={theme.fog[1]}
         disabled={journeyActive && journeyFollowing && !!journeyStep} journeyMode={journeyActive} />
       <JourneyFollowCamera anchor={journeyAnchor} active={!!journeyActive && !!journeyFollowing && !!journeyStep} onManualCamera={onJourneyManualCamera} />
     </Canvas>

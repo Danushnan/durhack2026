@@ -2,10 +2,10 @@ import { DiscoveryActivity } from './DiscoveryActivityPanel'
 import { JourneyPanel, useJourney } from './Journey'
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { City, type HoverInfo, type RoadFlow, type ServiceState, type ViewMode } from './City'
-import { affected, describeFlow, ERROR_RATE, overview, serviceFlow, SIGNAL, type Signal, signalOf, SLOW_MS } from './health'
+import { affected, describeFlow, ERROR_RATE, overview, serviceFlow, SIGNAL, type Signal, signalOf, SLOW_MS, tally } from './health'
 import {
   ACTION_FAILED, api, type ClusterState, deploymentHealth, describeDeployment, describePod, FRIENDLY, HEALTH_COLOR, isWorkload, type K8sObject, keyOf, NODE_COLORS,
-  nodeReady, podsOf, type PodStatus, podStatus, rolloutOf, versionColor, STATUS_COLOR, useCluster,
+  nodeReady, notDeployed, podsOf, type PodStatus, podStatus, rolloutOf, versionColor, STATUS_COLOR, useCluster,
 } from './k8s'
 import { landmarkFor } from './landmarks'
 import { COMPONENTS, componentOf, downServices, explain, impactChain, kubectl, nameOf, roleOf } from './teach'
@@ -97,9 +97,8 @@ export default function App() {
     const flow = serviceFlow(k, flows)
     if (flow.signal === 'ok' && services[k]?.anomaly) flow.signal = 'slow' // TigerData: far slower than its own baseline
     const ready = d.status?.readyReplicas ?? 0, want = d.spec?.replicas ?? 0
-    return [k, { down: down.has(k), chain, flow, affected: affected({ ready, want, signal: flow.signal, basis: flow.basis, impactedBy: chain ? nameOf(chain[chain.length - 1]) : null }) }]
+    return [k, { down: down.has(k), chain, flow, affected: affected({ ready, want, missing: notDeployed(d), signal: flow.signal, basis: flow.basis, impactedBy: chain ? nameOf(chain[chain.length - 1]) : null }) }]
   }))
-  const unhealthyPods = all.some((o) => o.kind === 'Pod' && podStatus(o) !== 'Running')
   const outages = nodes.filter((n) => !nodeReady(n))
   const live = typeof cluster.context === 'string'
   const [discovery, setDiscovery] = useState<RoadDiscovery | null>(null)
@@ -138,7 +137,7 @@ export default function App() {
           !!cluster.metricsError || (!!activeDiscovery && !discoveryReady(cluster)))} />
 
       <header className="hud brand">
-        <h1>Kuebec <small>Port Kube</small></h1>
+        <h1>KubeVerse <small>Port Kube</small></h1>
         <span className={`dot ${cluster.connected ? 'on' : ''}`} title={cluster.connected ? 'WebSocket connected; source health shown separately' : 'WebSocket reconnecting…'}
           aria-label={cluster.connected ? 'WebSocket connected' : 'WebSocket reconnecting'} />
         {cluster.context && <span className="badge" title="Watching a real Kubernetes cluster through kubectl. Simulator controls are hidden.">
@@ -157,12 +156,14 @@ export default function App() {
           onClick={() => setMode(mode === 'night' ? 'day' : 'night')}>{mode === 'night' ? '🌙' : '☀️'}</button>
         <button aria-pressed={powerGrid} className={powerGrid ? 'on' : ''} title="Power Grid: colour each Unit by the Node it runs on"
           onClick={() => setPowerGrid(!powerGrid)}>⚡</button>
+        {sim && <span className="sep" aria-hidden />}
         {sim && <button aria-pressed={rush} className={rush ? 'on' : ''} aria-label={rush ? 'End rush hour' : 'Start rush hour'}
           title="Rush hour: triple the customers at the City Gate and watch the autoscaler react" onClick={() => api.rushHour(!rush)}>🚦</button>}
         {sim && <button aria-label="Reset the city to its starting state" title="Reset city"
           onClick={() => { if (window.confirm('Reset Port Kube to its starting state? Every change you made will be undone.')) { setSelected(null); api.reset() } }}>⟲</button>}
-        <button aria-expanded={legendOpen} className={legendOpen ? 'on' : ''} title="Legend: what every colour means" aria-label="Legend"
-          onClick={() => setLegendOpen(!legendOpen)}>◧</button>
+        <span className="sep" aria-hidden />
+        <button aria-expanded={legendOpen} className={`wide ${legendOpen ? 'on' : ''}`} title="Key: what every colour means" aria-label="Legend"
+          onClick={() => setLegendOpen(!legendOpen)}>Key</button>
         <button aria-expanded={help} className={help ? 'on' : ''} title="How this city works" onClick={() => setHelp(!help)}>?</button>
         {simulatorSource && <button aria-expanded={analyticsOpen} className={analyticsOpen ? 'on' : ''} title="Network analytics · simulated TigerData history"
           aria-label="Network analytics" onClick={() => {
@@ -248,11 +249,11 @@ export default function App() {
       {selected === 'city-hall' && <HallPanel events={events} onClose={() => setSelected(null)} />}
       {dep && <Inspect dep={dep} cluster={cluster} all={all} events={events} states={states} edges={flows} sim={sim} onPick={pickService} onClose={() => setSelected(null)} />}
 
-      {legendOpen ? <Legend live={live} districtColors={districtColors} onClose={() => setLegendOpen(false)} /> : (powerGrid || unhealthyPods) && (
-        <div className="hud legend" aria-label="Legend">
-          {powerGrid
-            ? nodes.map((n, i) => <span key={n.metadata.uid}><i style={{ background: NODE_COLORS[i % NODE_COLORS.length] }} />{n.metadata.name}</span>)
-            : (Object.keys(STATUS_COLOR) as PodStatus[]).map((s) => <span key={s}><i style={{ background: STATUS_COLOR[s] }} />{FRIENDLY[s]}</span>)}
+      {legendOpen ? <Legend live={live} onClose={() => setLegendOpen(false)} />
+        : powerGrid && !selected && !help && !analyticsOpen && (
+        <div className="hud legend" aria-label="Power Grid: Unit colour is its Node">
+          <b>Units by Node</b>
+          {nodes.map((n, i) => <span key={n.metadata.uid}><i style={{ background: NODE_COLORS[i % NODE_COLORS.length] }} />{n.metadata.name}</span>)}
         </div>
       )}
 
@@ -307,7 +308,7 @@ function Banner({ deployments, states, outages, edges, onPick }: {
     <div className="hud banner" role="status">
       {d ? (
         <>
-          <b>💥 {d.metadata.name} is down.</b> {roleOf(d.metadata.name).ifDown}
+          <b>💥 {d.metadata.name} is {notDeployed(d) ? 'not deployed' : 'down'}.</b> {roleOf(d.metadata.name).ifDown}
           {affected.length > 0 && <> Knock-on effect: {affected.map((a, i) => (
             <span key={a.metadata.uid}>{i > 0 && ', '}<button className="link" onClick={() => onPick(keyOf(a))}>{a.metadata.name}</button></span>
           ))} {affected.length === 1 ? 'is' : 'are'} impacted.</>}
@@ -332,7 +333,7 @@ function Help({ live, onClose }: { live: boolean; onClose: () => void }) {
         <li>🏦 <b>Buildings</b> are services (Deployments). Each does one job: hover one to see what. A bigger Building means more copies were asked for.</li>
         <li>🏙️ Towers, houses and trees around the edge are just scenery.</li>
         <li>▪️ <b>Units</b> in front are its Pods: identical copies doing the work. ⬚ An outlined <b>Plot</b> is a Pod still being created.</li>
-        <li>🛣️ Requests share <b>Roads</b> and drive through roundabouts. Lorries take the highway between districts. Edge lines show the most affected route on each street. Hover to see the individual calls, or open ◧ for the legend.</li>
+        <li>🛣️ Requests share <b>Roads</b> and drive through roundabouts. Lorries take the highway between districts. Edge lines show the most affected route on each street. Hover to see the individual calls, or open <b>Key</b> for the legend.</li>
         <li>💡 A Building glows with how its <b>requests</b> are going; its <b>Units</b> show its <b>Pods</b>. They are separate: every Pod can be ready while the app answers with errors.</li>
         <li>🚨 A pulsing ring (and a light beam when serious) marks every Building that needs attention; the overview at the bottom left lists them.</li>
         <li>🚗 <b>Cars</b> illustrate aggregate request activity. They are not individual traced requests or proof of which Pod served a request.</li>
@@ -425,8 +426,9 @@ function Inspect({ dep, cluster, all, events, states, edges, sim, onPick, onClos
   const replicaSets = all.filter((o) => o.kind === 'ReplicaSet' && o.metadata.namespace === ns &&
     o.metadata.ownerReferences?.[0]?.uid === dep.metadata.uid)
     .sort((a, b) => a.metadata.name.localeCompare(b.metadata.name))
-  const mine = events.filter((e) => e.involvedObject?.namespace === ns &&
-    (e.involvedObject.name === name || e.involvedObject.name.startsWith(`${name}-`))).slice(0, 6)
+  const allMine = events.filter((e) => e.involvedObject?.namespace === ns &&
+    (e.involvedObject.name === name || e.involvedObject.name.startsWith(`${name}-`)))
+  const mine = allMine.slice(0, 6)
   const sabotaged = dep.metadata.annotations?.['kubeverse.io/sabotaged'] === 'true'
   const replicas: number = dep.spec.replicas
   const dependsOn = edges.filter((e) => e.from === key).map((e) => e.to)
@@ -441,8 +443,9 @@ function Inspect({ dep, cluster, all, events, states, edges, sim, onPick, onClos
   const r = rolloutOf(dep, pods)
   const next = `v${Number((dep.metadata.annotations?.['kubeverse.io/latest-version'] ?? r.version).slice(1)) + 1}`
   const endpoints = pods.filter((p) => !p.metadata.deletionTimestamp && p.status?.containerStatuses?.[0]?.ready).length
-  const podsNow = state?.down
-    ? { cls: 'bad', text: `Pods: 💥 none ready. ${role.ifDown}` }
+  const missing = notDeployed(dep)
+  const podsNow = missing ? { cls: 'bad', text: `Pods: ${describeDeployment(dep)}. ${role.ifDown}` }
+    : state?.down ? { cls: 'bad', text: `Pods: 💥 none ready. ${role.ifDown}` }
     : { cls: deploymentHealth(dep) === 'healthy' ? 'ok' : 'warn', text: `Pods: ${describeDeployment(dep)}` }
   const flow = state?.flow, signal = flow ? SIGNAL[flow.signal] : null
   const requestsNow = state?.chain && !state.down
@@ -480,28 +483,10 @@ function Inspect({ dep, cluster, all, events, states, edges, sim, onPick, onClos
         <FlowTable title="Calls it makes" rows={edges.filter((e) => e.from === key)} end="to" onPick={onPick} />
         <FlowTable title="Called by" rows={edges.filter((e) => e.to === key)} end="from" onPick={onPick} />
       </>}
-      <h3>Desired vs actual</h3>
+      <RecentErrors edges={edges} k={key} events={allMine} />
+      {!missing && <><h3>Desired vs actual</h3>
       {state?.live ? <p className="endpoints">Kubernetes resource snapshot: {dep.spec?.replicas ?? '—'} desired replicas · {dep.status?.readyReplicas ?? 0} Ready. Pod details below describe the last resource observation.</p>
-        : <DesiredActual dep={dep} pods={pods} />}
-      {hpa && (
-        <div className="note">
-          <b>📈 Autoscaled</b> (HorizontalPodAutoscaler): {hpa.status.currentMetrics[0].pods.current.averageValue} requests/s per ready Unit,
-          target {hpa.spec.metrics[0].pods.target.averageValue}. Keeps between {hpa.spec.minReplicas} and {hpa.spec.maxReplicas} Units
-          and wants {hpa.status.desiredReplicas} now. Try 🚦 rush hour. <code>{kubectl.hpa(ns, name)}</code>
-        </div>
-      )}
-      {stateful && (
-        <div className="note">
-          <b>🗄️ StatefulSet</b>: its Units are numbered ({name}-0, {name}-1…), start one at a time in order, and each keeps its own
-          storage tank ({claims.map((c) => c.metadata.name).join(', ') || 'none yet'}). Demolish one and the same name comes back with the same data.
-          It is never run twice at once, so on a failed Power Station it waits instead of being copied elsewhere.
-        </div>
-      )}
-      {pdb && <p className="endpoints">Disruption budget: at most <b>{pdb.spec.maxUnavailable}</b> Unit may be taken away on purpose (e.g. by maintenance) at a time.</p>}
-      {replicaSets.length > 0 && <p className="endpoints">ReplicaSets (one per version; old ones are kept for roll back): {replicaSets.map((rs, i) => (
-        <span key={rs.metadata.uid}>{i > 0 && ' · '}<code>{rs.metadata.name}</code> {rs.metadata.labels?.version} {rs.status?.readyReplicas ?? 0}/{rs.spec?.replicas}</span>
-      ))}</p>}
-      <p className="endpoints">Service <code>{name}</code> sends requests to <b>{endpoints} of {pods.filter((p) => !p.metadata.deletionTimestamp).length}</b> Units: only ready ones are in rotation.</p>
+        : <DesiredActual dep={dep} pods={pods} />}</>}
       {sim ? <>
         <h3>Try it <small>· each button is a kubectl command</small></h3>
         <div className="actions">
@@ -543,8 +528,32 @@ function Inspect({ dep, cluster, all, events, states, edges, sim, onPick, onClos
           })}
         </tbody>
       </table>
-      <h3>What Kubernetes did</h3>
-      {mine.map((e) => <EventRow key={e.metadata.uid} e={e} />)}
+      <details className="more">
+        <summary>More Kubernetes details</summary>
+      {hpa && (
+        <div className="note">
+          <b>📈 Autoscaled</b> (HorizontalPodAutoscaler): {hpa.status.currentMetrics[0].pods.current.averageValue} requests/s per ready Unit,
+          target {hpa.spec.metrics[0].pods.target.averageValue}. Keeps between {hpa.spec.minReplicas} and {hpa.spec.maxReplicas} Units
+          and wants {hpa.status.desiredReplicas} now. Try 🚦 rush hour. <code>{kubectl.hpa(ns, name)}</code>
+        </div>
+      )}
+      {stateful && (
+        <div className="note">
+          <b>🗄️ StatefulSet</b>: its Units are numbered ({name}-0, {name}-1…), start one at a time in order, and each keeps its own
+          storage tank ({claims.map((c) => c.metadata.name).join(', ') || 'none yet'}). Demolish one and the same name comes back with the same data.
+          It is never run twice at once, so on a failed Power Station it waits instead of being copied elsewhere.
+        </div>
+      )}
+      {pdb && <p className="endpoints">Disruption budget: at most <b>{pdb.spec.maxUnavailable}</b> Unit may be taken away on purpose (e.g. by maintenance) at a time.</p>}
+      {replicaSets.length > 0 && <p className="endpoints">ReplicaSets (one per version; old ones are kept for roll back): {replicaSets.map((rs, i) => (
+        <span key={rs.metadata.uid}>{i > 0 && ' · '}<code>{rs.metadata.name}</code> {rs.metadata.labels?.version} {rs.status?.readyReplicas ?? 0}/{rs.spec?.replicas}</span>
+      ))}</p>}
+      <p className="endpoints">Service <code>{name}</code> sends requests to <b>{endpoints} of {pods.filter((p) => !p.metadata.deletionTimestamp).length}</b> Units: only ready ones are in rotation.</p>
+      </details>
+      <details className="more">
+        <summary>What Kubernetes did <small>· {mine.length} recent</small></summary>
+        {mine.map((e) => <EventRow key={e.metadata.uid} e={e} />)}
+      </details>
     </aside>
   )
 }
@@ -658,21 +667,59 @@ function FlowTable({ title, rows, end, onPick }: { title: string; rows: RoadFlow
   </>
 }
 
+/** Failed requests (live: from the Pods' logs) and Kubernetes warnings, newest first. Both separate, as they mean different things. */
+function RecentErrors({ edges, k, events }: { edges: RoadFlow[]; k: string; events: K8sObject[] }) {
+  const requests = edges.filter((e) => e.to === k || e.from === k)
+    .flatMap((e) => (e.recent_errors ?? []).map((r) => ({ ...r, other: e.to === k ? e.from : e.to, inbound: e.to === k })))
+    .sort((a, b) => b.at - a.at).slice(0, 6)
+  const warnings = events.filter((e) => e.type === 'Warning').slice(0, 4)
+  // Failing Roads without logged samples are already in the Calls tables, so only logged failures and warnings show here.
+  if (!requests.length && !warnings.length) return null
+  return <>
+    <h3>Recent errors</h3>
+    {requests.length > 0 && <table className="flows"><tbody>
+      {requests.map((r) => (
+        <tr key={`${r.at}${r.other}${r.detail}`}>
+          <td><i style={{ background: SIGNAL[r.outcome === 'refused' ? 'refused' : 'errors'].color }} aria-hidden />
+            {r.outcome === 'refused' ? '✕ refused' : `⚠ ${r.status}`}</td>
+          <td>{r.inbound ? 'from' : 'calling'} {nameOf(r.other)}<small>{r.detail}</small></td>
+          <td>{new Date(r.at).toLocaleTimeString()}</td>
+        </tr>
+      ))}
+    </tbody></table>}
+    {warnings.map((e) => <EventRow key={e.metadata.uid} e={e} />)}
+  </>
+}
+
 /** Bottom-left: the whole city's traffic at a glance, and every service that needs attention. */
 function Overview({ flows, deployments, states, onPick }: {
   flows: RoadFlow[]; deployments: K8sObject[]; states: ServiceState; onPick: (k: string) => void
 }) {
   const o = overview(flows)
+  const count = tally(deployments.map((d) => states[keyOf(d)]?.affected))
+  // The service rail stops above the overview (whose height varies with the affected list) instead of hiding it.
+  const ref = useRef<HTMLElement>(null)
+  useEffect(() => {
+    const el = ref.current
+    if (!el) return
+    const ro = new ResizeObserver(() => document.documentElement.style.setProperty('--overview-h', `${el.offsetHeight}px`))
+    ro.observe(el)
+    return () => ro.disconnect()
+  }, [])
   const list = deployments.filter((d) => states[keyOf(d)]?.affected).sort((a, b) => states[keyOf(b)].affected!.rank - states[keyOf(a)].affected!.rank)
   return (
-    <section className="hud overview" aria-label="Traffic overview">
-      <Tiles items={[
-        { label: 'req/s coming in', value: o.rps < 10 ? o.rps.toFixed(1) : String(Math.round(o.rps)) },
+    <section ref={ref} className="hud overview" aria-label="Traffic overview">
+      <div title={`Coming in: where requests enter the app. All ${flows.length} routes: ${o.allRps.toFixed(1)} req/s, ${pct(o.allFailing)} failing.`}><Tiles items={[
+        { label: 'req/s in', value: o.rps < 10 ? o.rps.toFixed(1) : String(Math.round(o.rps)) },
         { label: 'avg latency', value: o.latency_ms == null ? '—' : `${Math.round(o.latency_ms)} ms`, status: o.rps > 0 && (o.latency_ms ?? 0) >= SLOW_MS ? 'slow' : undefined },
         { label: 'failing', value: pct(o.failing), status: o.failing >= ERROR_RATE ? 'errors' : undefined },
-      ]} />
-      <p className="muted small">Coming in: where requests enter the app. All {flows.length} routes: {o.allRps.toFixed(1)} req/s, {pct(o.allFailing)} failing.</p>
-      {list.length ? (
+      ]} /></div>
+      <p className="counts" aria-label="Services by health">
+        {([['ok', count.healthy, 'healthy'], ['slow', count.degraded, 'degraded'], ['refused', count.failed, 'failed']] as const).map(([s, n, label]) => (
+          <span key={label} className={n ? '' : 'muted'}><i style={{ background: n ? SIGNAL[s].color : 'transparent' }} aria-hidden />{SIGNAL[s].icon} <b>{n}</b> {label}</span>
+        ))}
+      </p>
+      {list.length > 0 && (
         <ul className="affected" aria-label="Services that need attention">
           {list.map((d) => {
             const a = states[keyOf(d)].affected!
@@ -683,42 +730,37 @@ function Overview({ flows, deployments, states, onPick }: {
             )
           })}
         </ul>
-      ) : <p className="small">✓ Every service is healthy</p>}
+      )}
     </section>
   )
 }
 
 /** What every colour and mark in the city means, with the thresholds behind them. */
-function Legend({ live, districtColors, onClose }: { live: boolean; districtColors: ReadonlyMap<string, string>; onClose: () => void }) {
+function Legend({ live, onClose }: { live: boolean; onClose: () => void }) {
   return (
     <aside className="hud legend full" aria-label="Legend">
       <button className="close" onClick={onClose} aria-label="Close legend">×</button>
       {live && <>
-        <h3>Building · application health</h3>
-        <div><i style={{ background: '#0ca30c' }} />Healthy: backend reports usable healthy observations.</div>
-        <div><i style={{ background: '#fab219' }} />Degraded: backend reports degraded application behaviour. Inspect measured p95 and HTTP 5xx.</div>
-        <div><i style={{ background: '#d03b3b' }} />Unavailable: backend reports application unavailable.</div>
-        <div><i style={{ background: '#94a3b8' }} />Unknown, idle or stale: no current healthy application claim.</div>
-        <div>Data stores show Kubernetes health; HTTP application metrics do not apply. A 402 decline is a checkout outcome, not an infrastructure failure.</div>
+        <h3>Buildings · application health</h3>
+        <div><i style={{ background: '#0ca30c' }} />Healthy</div>
+        <div><i style={{ background: '#fab219' }} />Degraded: check p95 and HTTP 5xx</div>
+        <div><i style={{ background: '#d03b3b' }} />Unavailable</div>
+        <div><i style={{ background: '#94a3b8' }} />Unknown, idle or stale</div>
+        <p className="muted small">Data stores show Kubernetes health; HTTP application metrics do not apply. A 402 decline is a checkout outcome, not an infrastructure failure.</p>
       </>}
       <h3>{live ? 'Road response activity · separate from application health' : 'Roads and Building glow · requests'}</h3>
       {(['ok', 'slow', 'errors', 'refused', 'idle'] as Signal[]).map((s) => (
         <div key={s}><i style={{ background: SIGNAL[s].color }} />{SIGNAL[s].icon} <b>{SIGNAL[s].label}</b>: {SIGNAL[s].means}</div>
       ))}
       <h3>Needs attention</h3>
-      <div>🚨 A pulsing ring around the Building, plus a beam of light when it is down, refusing or failing requests. Listed bottom left.</div>
+      <div>🚨 Pulsing ring: needs attention (counted as <b>degraded</b>: slow, or missing Pods)</div>
+      <div>🔦 Ring and light beam: serious (counted as <b>failed</b>: down, refusing, errors or impacted)</div>
       <h3>Units · Pods</h3>
-      {(Object.keys(STATUS_COLOR) as PodStatus[]).map((s) => <div key={s}><i style={{ background: STATUS_COLOR[s] }} />{FRIENDLY[s]} <small>({s})</small></div>)}
-      {districtColors.size > 1 && <>
-        <h3>Lorry destinations</h3>
-        <div>The glow matches the colour beside the district name on the map.</div>
-        {[...districtColors].map(([name, color]) => <div key={name}><i style={{ background: color }} />{name}</div>)}
-      </>}
-      <h3>Cars · requests</h3>
-      <div>Aggregate activity illustration, not request-level traces. Car count, travel time and Pod flashes are illustrative.</div>
-      <div>🚕 Yellow taxis are customers; other Cars wear their caller's colour.</div>
-      <div><i style={{ background: SIGNAL.refused.color }} />Failed requests burst at the door and return in a glowing red vehicle. Inspect the route for HTTP error replies versus failed communication; HTTP 402 is a payment decline, not evidence of a pod outage.</div>
-      <div>🔴 Brake lights: slowing, or queuing behind the Car ahead.</div>
+      {(Object.keys(STATUS_COLOR) as PodStatus[]).map((s) => <div key={s}><i style={{ background: STATUS_COLOR[s] }} />{FRIENDLY[s]}</div>)}
+      <h3>Vehicles</h3>
+      <div>🚕 Customers · other Cars wear their caller's colour</div>
+      <div><i style={{ background: SIGNAL.refused.color }} />Glowing red: a failed request going back</div>
+      <p className="muted small">Cars illustrate activity; they are not traced requests.{live && ' HTTP 402 is a payment decline, not evidence of a pod outage.'} Press ? for how the city works.</p>
     </aside>
   )
 }

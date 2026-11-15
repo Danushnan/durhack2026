@@ -1,4 +1,4 @@
-# Kuebec — Watch Kubernetes Think
+# KubeVerse — Watch Kubernetes Think
 
 Port Kube is a 3D city that renders a (simulated) Kubernetes cluster live. Namespaces are Districts, each service
 (Deployment) is a distinct landmark Building, its Pods are Units on plots out front, and requests are Cars driving between Buildings on shared Roads and roundabouts. Lorries carry requests across districts on highways.
@@ -109,9 +109,13 @@ logs one JSON line per call (`200` served, `500` answered with an error, `503` r
    Toggle **⚡ Power Grid** to colour Units by Node.
 9. Request health is shown apart from Pod health. A Building glows by its requests, and a shared Road shows the most
    affected route using it. The states are healthy, slow (≥ 300 ms), errors (≥ 1% answered with an error), refused
-   (nobody answered) and idle. A Building’s Units show its Pods. Each tag has a Pods line and a requests line. A pulsing ring (with a light beam when serious) marks every
-   Building that needs attention, and the **overview** (bottom left) gives requests/s, latency and the failing share, and
-   lists the affected services. Hover a Road for its numbers; **◧** opens the legend with the thresholds.
+   (nobody answered) and idle. A Building’s Units show its Pods. A healthy Building's tag shows only its name; a Pods line and a requests line
+   appear when it needs attention, is rolling out, or is selected (hover always shows them). A pulsing ring (with a light beam when serious) marks every
+   Building that needs attention, and the **overview** (bottom left) gives total requests/s in, latency, the failing share,
+   counts of healthy, degraded (ring only: slow, missing Pods) and failed (ring and beam: down, refusing, errors, impacted)
+   services, and lists the affected ones. A Building's inspect panel shows its **recent errors**: failed requests from the
+   Pods' logs (live mode) and Kubernetes warnings. Hover a Road for its numbers; **Key** opens the legend with the thresholds. In a Building's inspect panel,
+   **More Kubernetes details** and **What Kubernetes did** are folded away until opened.
 10. The city is isometric by default: drag to pan, scroll or pinch to zoom. **3D** switches to a free 3D view (drag to
    orbit, right-drag to pan); **ISO** switches back.
    **⟲** resets the city; **🌙 / ☀️** switches night and day; **⌂** returns the camera to the overview. The ticker at
@@ -145,7 +149,8 @@ latency from load per ready Pod and spreads failures to callers by how often the
 In live mode, request routes are the union of the calls each app declares (an `architecture.json` manifest such as
 `minishop/architecture.json`, or a workload's `CALLS`/`DEPENDENCIES` env var), the calls seen since the backend started,
 and the last five seconds of logs. A known route stays visible at 0 req/s when traffic stops. Hover a shared Road
-to see the calls that use it. Log lines may report `latency_ms`, `duration_ms` or `duration_seconds`; a call counts as refused only when
+to see the calls that use it. A manifest component missing from its (existing) namespace is still drawn, marked
+**Not deployed**. Log lines may report `latency_ms`, `duration_ms` or `duration_seconds`; a call counts as refused only when
 the caller got no HTTP answer (a 504, a plain 503, or an exception such as a connection error), and as an error when the
 callee answered with one (e.g. MiniShop's 402 payment declines, which leave every Pod Ready).
 

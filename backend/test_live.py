@@ -53,3 +53,26 @@ def test_env_declared_calls_and_rates():
     samples = [{"from": "a/x", "to": "a/y", "at": 1000, "outcome": o, "latency": 10.0} for o in ("ok", "ok", "error", "refused")]
     [e] = summarize(samples, {"a/x", "a/y"}, set(), 1000)
     assert (e["error_rate"], e["refused_rate"], e["healthy"], e["rps"]) == (0.25, 0.25, True, 0.8)
+
+
+def test_undeployed_components_keep_their_buildings_and_errors_are_deduped(monkeypatch):
+    import live
+    from test_live_pipeline import resources
+    from test_live_telemetry import NOW, pod, record
+    # Only minishop-web (its Deployment, ReplicaSet and Pod) runs; the other manifest components are missing.
+    items = [i for i in json.loads(resources([pod("minishop-web")]))["items"] if i["metadata"]["name"].startswith("minishop-web")]
+    items.append({"kind": "Namespace", "metadata": {"uid": "n1", "name": "minishop"}})
+    line = json.dumps(record(service="minishop-web", event="http_client", source="minishop-web", target="checkout-api",
+                             status=402, error="HTTP 402", route="/api/checkout"))
+    monkeypatch.setattr(live, "kubectl", lambda *a: json.dumps({"items": items}) if "get" in a else line)
+    monkeypatch.setattr("live.time.time", lambda: NOW)
+    cluster = live.LiveCluster("test")
+    cluster.refresh()
+    cluster.refresh()   # overlapping log poll: the same line again
+    deployments = [o for o in cluster.objects.values() if o["kind"] == "Deployment"]
+    assert len(deployments) == 7
+    assert sum(o["metadata"].get("annotations", {}).get("kubeverse.io/not-deployed") == "true" for o in deployments) == 6
+    assert len(cluster.edges) == 10 and all(e["declared"] for e in cluster.edges)
+    [edge] = [e for e in cluster.edges if e["to"] == "minishop/checkout-api" and e["from"] == "minishop/minishop-web"]
+    assert edge["recent_errors"] == [{"at": edge["recent_errors"][0]["at"], "status": 402, "outcome": "error",
+                                      "detail": "/api/checkout HTTP 402"}]
