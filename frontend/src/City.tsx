@@ -634,10 +634,12 @@ function Traffic({ edge, road, theme, accent, onHover, endpoints, unavailable, p
   const cars = useRef<CarAgent[]>([])
   const burstStarted = useRef(-Infinity)
   const credit = useRef(0) // requests waiting to leave as a Car
+  const liveBurst = useRef(false)
   useLayoutEffect(() => {
     if (preview) dispatched.current -= cars.current.length
     cars.current = []
     credit.current = 0
+    liveBurst.current = false
     burstStarted.current = -Infinity
   }, [preview, trips])
   const live = useRef(edge)
@@ -653,12 +655,20 @@ function Traffic({ edge, road, theme, accent, onHover, endpoints, unavailable, p
   useFrame(({ clock }, rawDt) => {
     if (pause.current) {
       cars.current = []; credit.current = 0; burstStarted.current = -Infinity
+      liveBurst.current = false
       groups.current.forEach((g) => { if (g) g.visible = false })
       return
     }
     const dt = Math.min(rawDt, 0.1) // a hidden tab must not dump a burst of Cars
     const now = clock.elapsedTime
     const e = live.current
+    if (liveMode) {
+      // A single measured request may leave the rolling window before its
+      // rate accumulates a full car. Queue the first car as activity appears.
+      if (e.rps > 0 && !liveBurst.current) credit.current = Math.max(1, credit.current)
+      if (e.rps <= 0) credit.current = 0
+      liveBurst.current = e.rps > 0
+    }
     // Arrivals at the request rate, jittered; a backlog waits (up to 3) while the caller's exit is blocked.
     const used = new Set(cars.current.map((c) => c.slot))
     const slot = [...Array(poolSize).keys()].find((i) => !used.has(i))

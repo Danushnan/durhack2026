@@ -118,8 +118,10 @@ journey panel scrolls independently on short screens.
 
 ## Exact local demonstration
 
+When running the [Demo Control Centre](minishop/OPERATOR.md) with a current operator build, Journey defaults to its storefront at `http://127.0.0.1:8090/`. Start the live Kuebec backend with `KUBEVERSE_JOURNEYS=1`, then open Journey and select **Open paired MiniShop**. The operator storefront proxies real requests to MiniShop on port 8080 and reports paired Add to Basket actions to the city.
+
 From the repository root, leave the existing Kubernetes cluster running. These
-ports intentionally differ from the existing shared demo.
+steps use separate ports for an isolated run without the operator.
 
 ```bash
 # Terminal 1: only if the existing MiniShop forward on 8080 is not running
@@ -146,7 +148,7 @@ package-lock files). In this session the Python runtime was
 Those local runtime paths are environment-specific, not deployment requirements.
 
 1. Open `http://127.0.0.1:5181`. Discovery is selected automatically.
-2. Click Journey, keep MiniShop URL `http://127.0.0.1:5182`, then Open paired MiniShop.
+2. Click Journey, set MiniShop URL to `http://127.0.0.1:5182`, then Open paired MiniShop.
 3. Arrange the two windows side by side. Click Add to basket once.
 4. Wait for real collector events (typically several seconds). Inspect the separate
    mutation acceptance and browser-refresh report.

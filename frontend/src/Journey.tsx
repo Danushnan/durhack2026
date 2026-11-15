@@ -89,7 +89,7 @@ export function useJourney(source: string | undefined | null) {
 
 export function JourneyPanel({controller}: {controller: ReturnType<typeof useJourney>}) {
   const {journey, step, setStep, error, actions, actionId} = controller
-  const [shop, setShop] = useState('http://127.0.0.1:5182')
+  const [shop, setShop] = useState(import.meta.env.VITE_MINISHOP_URL || 'http://127.0.0.1:8090/')
   const current = journey?.steps[step]
   return <aside className="hud journey-panel" aria-label="Guided shopping journey">
     <h2>Journey View</h2>
