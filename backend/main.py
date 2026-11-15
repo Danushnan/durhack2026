@@ -11,6 +11,7 @@ from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel, Field
 
 from live import discover
+from live_history import LiveHistory, router as live_history_router
 from sim import MAX_REPLICAS, demo_cluster
 from telemetry import TigerTelemetry, router, stop_task
 
@@ -99,18 +100,26 @@ async def lifespan(app):
         sim.tick(time.time())
     dsn = os.environ.get("TIGERDATA_DATABASE_URL")
     app.state.telemetry = TigerTelemetry(dsn, sim) if dsn and live is None else None
+    history_dsn = os.getenv("KUBEVERSE_LIVE_HISTORY_DATABASE_URL")
+    app.state.live_history_dsn = history_dsn
+    history = LiveHistory(history_dsn, live.telemetry) if history_dsn and live else None
     task = asyncio.create_task(loop())
     ingestion = asyncio.create_task(app.state.telemetry.ingest()) if app.state.telemetry is not None else None
     try:
         yield
     finally:
-        await stop_task(task)
-        if ingestion is not None:
-            await stop_task(ingestion)
+        try:
+            await stop_task(task)
+        finally:
+            if history is not None:
+                await asyncio.to_thread(history.stop)
+            if ingestion is not None:
+                await stop_task(ingestion)
 
 
 app = FastAPI(title="Kuebec Cluster", lifespan=lifespan)
 app.include_router(router)
+app.include_router(live_history_router)
 
 
 @app.websocket("/ws")
