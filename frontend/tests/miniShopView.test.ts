@@ -28,6 +28,9 @@ test('simulator and live clusters without MiniShop retain their original present
   assert.strictEqual(miniShopView(state),state)
   const other={...state,context:'another-cluster',objects:{search:workload('search','other')}}
   assert.strictEqual(miniShopView(other),other)
+  // The live backend always sends MiniShop telemetry, even when MiniShop is not deployed (k8s/up.sh demo).
+  const withMetrics={...other,metrics:{source_id:'live',services:[]} as unknown as ClusterState['metrics']}
+  assert.strictEqual(miniShopView(withMetrics),withMetrics)
 })
 test('map-preview controls choose visible MiniShop services instead of hidden demo workloads', async () => {
   const {reduceWatchMessage} = await import('../src/watch.ts')

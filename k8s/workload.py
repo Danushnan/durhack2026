@@ -1,5 +1,5 @@
-"""Kuebec live-demo workload: serves HTTP on :8080, calls its dependencies, logs one JSON line per call."""
-import json, os, random, threading, time, urllib.error, urllib.request
+"""KubeVerse live-demo workload: serves HTTP on :8080, calls its dependencies, logs one JSON line per call."""
+import json, os, random, signal, sys, threading, time, urllib.error, urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 NAME = os.environ["SERVICE"]
@@ -43,4 +43,6 @@ def call(target, rps):
 
 for target, rps in CALLS:
     threading.Thread(target=call, args=(target, rps), daemon=True).start()
+# As PID 1, Python ignores SIGTERM; without this a deleted Pod keeps serving for the whole 30s grace period.
+signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
 ThreadingHTTPServer(("", 8080), Handler).serve_forever()

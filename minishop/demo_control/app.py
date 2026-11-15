@@ -233,9 +233,9 @@ def create_app(settings=None):
                 response = await client.post(settings.city + path, json=body)
                 result = response.json()
         except (httpx.HTTPError, ValueError):
-            raise HTTPException(502, 'Kuebec is unavailable. Check that the map and backend are running.')
+            raise HTTPException(502, 'KubeVerse is unavailable. Check that the map and backend are running.')
         if not response.is_success:
-            raise HTTPException(response.status_code, result.get('detail', 'Kuebec could not deliver the demo command.'))
+            raise HTTPException(response.status_code, result.get('detail', 'KubeVerse could not deliver the demo command.'))
         return result
 
     @app.post('/api/demo/packets', dependencies=[Depends(require_local_demo)])

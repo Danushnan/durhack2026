@@ -7,7 +7,7 @@ request correlation, persistence or demo-controller code was changed.
 
 ## Changes
 
-- `frontend/src/DiscoveryActivity.tsx`: Recent Activity panel, always-present
+- `frontend/src/DiscoveryActivityPanel.tsx`: Recent Activity panel, always-present
   guidance, typical-purpose descriptions, five-second counts/rates, timing and
   outcome shares, selection controls and a direct switch to Journey.
 - `frontend/src/discoveryActivity.ts`: reviewed MiniShop relationship dictionary

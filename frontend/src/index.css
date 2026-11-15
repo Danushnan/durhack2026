@@ -82,6 +82,8 @@ button.small { padding: 2px 8px; font-size: 11px; }
 
 .banner { top: 82px; left: 72px; max-width: min(640px, max(240px, calc(100vw - 570px)));
   border-color: var(--red); line-height: 1.5; padding: 8px 14px; }
+/* The open services rail is ~200px wide; move the banner beside it so its first words stay visible. */
+@media (min-width: 721px) { .app:has(.services.open) .banner { left: 222px; max-width: min(640px, max(240px, calc(100vw - 720px))); } }
 
 .help { top: 60px; right: 12px; width: 380px; max-width: calc(100vw - 24px); max-height: calc(100vh - 140px); overflow: auto; line-height: 1.5; }
 .help h2 { margin: 0 24px 6px 0; font-size: 16px; }

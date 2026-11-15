@@ -133,7 +133,7 @@ function Tag({ lines, border, position, size: twoLine = 0.0326, theme }: {
   })
   return (
     <sprite ref={ref} position={position} scale={[size * aspect, size, 1]} center={[0.5, 0]} renderOrder={10}>
-      <spriteMaterial map={texture} depthTest={false} transparent sizeAttenuation={false} />
+      <spriteMaterial map={texture} depthTest={false} transparent sizeAttenuation={false} toneMapped={false} />
     </sprite>
   )
 }

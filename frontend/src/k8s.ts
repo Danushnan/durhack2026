@@ -92,7 +92,7 @@ export const STATUS_COLOR: Record<PodStatus, string> = {
   Pending: '#64748b',
   CrashLoopBackOff: '#ef4444',
   Terminating: '#f97316',
-  NotReady: '#eab308',
+  NotReady: '#a3e635', // lime: must stay distinct from ContainerCreating's yellow
 }
 
 /** Plain-English wording for each status, shown with the Kubernetes term underneath. */

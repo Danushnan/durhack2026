@@ -1,4 +1,4 @@
-# Kuebec
+# KubeVerse
 
 An explorable 3D city that renders the state of a Kubernetes cluster, so developers can watch workloads communicate, scale, fail and recover.
 
@@ -9,7 +9,7 @@ A model of a Kubernetes cluster's resources and their behaviour, standing in for
 _Avoid_: Mock, fake cluster, backend
 
 **Namespace**, **Deployment**, **Pod**, **Service**, **Node**:
-Used with their standard Kubernetes meanings; these are the resource kinds Kuebec draws. The Simulated Cluster also
+Used with their standard Kubernetes meanings; these are the resource kinds KubeVerse draws. The Simulated Cluster also
 streams the ReplicaSets, EndpointSlices, StatefulSets, Ingresses, HorizontalPodAutoscalers, PodDisruptionBudgets and
 PersistentVolumeClaims behind them, in their real shapes.
 
