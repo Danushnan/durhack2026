@@ -38,6 +38,7 @@ export interface Edge {
 export interface ClusterState {
   objects: Record<string, K8sObject> // by uid
   edges: Edge[]
+  demoPackets?: { cars: number; lorries: number; reset: number }
   connected: boolean
   context?: string | null // kubectl context when watching a real cluster (read-only); null/absent for the simulator
   stale?: boolean          // live mode: the last refresh from the cluster failed

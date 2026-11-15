@@ -5,9 +5,10 @@ import subprocess
 import time
 from contextlib import asynccontextmanager
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel, Field
 
 from live import discover
@@ -145,6 +146,35 @@ async def watch(ws: WebSocket):
         pass
     finally:
         discard_client(ws)
+
+
+class DemoPackets(BaseModel):
+    count: int = Field(ge=1, le=100, strict=True)
+    cross_district: bool = Field(default=False, strict=True)
+
+
+async def broadcast_demo(request: Request, event):
+    # These commands change the illustration only and never enter the telemetry pipeline.
+    local_hosts = {'localhost', '127.0.0.1', '::1'}
+    origin = request.headers.get('origin')
+    if (not request.client or request.client.host not in local_hosts or request.url.hostname not in local_hosts
+            or (origin is not None and urlsplit(origin).hostname not in local_hosts)):
+        raise HTTPException(403, 'Local demo access only')
+    if not telemetry_clients:
+        raise HTTPException(409, 'Open the Kuebec map and wait for it to connect first')
+    await broadcast([], event)
+
+
+@app.post('/api/demo/packets')
+async def send_demo_packets(body: DemoPackets, request: Request):
+    await broadcast_demo(request, {'type': 'DEMO_PACKETS', **body.model_dump()})
+    return {'sent': body.count}
+
+
+@app.post('/api/demo/packets/reset')
+async def reset_demo_packets(request: Request):
+    await broadcast_demo(request, {'type': 'DEMO_PACKETS_RESET'})
+    return {'reset': True}
 
 
 def require_simulator():

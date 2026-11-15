@@ -1,0 +1,9 @@
+INFO:     Started server process [76156]
+INFO:     Waiting for application startup.
+INFO:     Application startup complete.
+INFO:     Uvicorn running on http://127.0.0.1:8000 (Press CTRL+C to quit)
+INFO:     127.0.0.1:56924 - "WebSocket /ws?telemetry=1" [accepted]
+INFO:     connection open
+INFO:     127.0.0.1:63562 - "WebSocket /ws?telemetry=1" [accepted]
+INFO:     connection open
+Log collection failed for minishop/minishop-web-745bf5565b-z5cvs (CalledProcessError)

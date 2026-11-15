@@ -1,19 +1,19 @@
 import * as THREE from 'three'
+import type { StreetRoute } from './streetNetwork.ts'
 
 /**
- * Port Kube has no street grid. Buildings are placed by the call graph (callers on the left, the
- * services they call to the right), staggered by a hash of their name so the town never lines up,
- * each namespace is one rounded District, and a Road exists only where one service calls another.
+ * Buildings are placed by the call graph, staggered by name, with one District per namespace.
+ * Shared streets are routed after the lots are positioned.
  */
 const COL = 34            // x distance between call-graph columns
 const ROW = 28            // z distance between Buildings in a column
 const PAD = 11            // District padding around its Buildings
 const DISTRICT_GAP = 16    // room for a row of Scenery between Districts
+export const STREET_GRID = 8
 export const ROAD_W = 3.2       // two lanes: requests go out on the right, failed ones come back on the left
 export const KERB = 0.7         // pavement on each side of a Road
 /** Room a Building can take at its largest size (10 replicas), Building-local, including its Unit rows. */
 export const BUILDING = { halfW: 7, back: -7.6, front: 6.8 }
-const SIDE_X = BUILDING.halfW + 2.5   // where a Road leaves/enters beside a Building
 
 export interface Lot { key: string; center: THREE.Vector3 }
 export interface Rect { x0: number; x1: number; z0: number; z1: number }
@@ -105,7 +105,11 @@ export function layoutCity(deployments: { namespace: string; name: string }[], n
   return {
     lots: Object.fromEntries(keys.map((k) => [k, { key: k, center: pos[k].clone().sub(off) }])),
     stations: Object.fromEntries(sorted.map((n, i) => [n, { key: n, center: stationPos[i].clone().sub(off) }])),
-    gates: Object.fromEntries(gatePos.map((g) => [g.key, { key: g.key, center: g.at.clone().sub(off) }])),
+    gates: Object.fromEntries(gatePos.map(({ key, at }) => {
+      const center = at.clone().sub(off)
+      center.z = Math.round(center.z / STREET_GRID) * STREET_GRID
+      return [key, { key, center }]
+    })),
     hall: districts.length ? { key: 'city-hall', center: hallPos.clone().sub(off) } : null,
     districts: districts.map((d) => ({ name: d.name, ...moved(d) })),
     core: moved(core),
@@ -131,51 +135,6 @@ function inBuilding(p: THREE.Vector3, c: THREE.Vector3, margin: number) {
   return dx < BUILDING.halfW + margin && dz > BUILDING.back - margin && dz < BUILDING.front + margin
 }
 
-/**
- * One Road per call. Each Road has its own lane out of the caller's right side and into the callee's
- * left side (so Roads never share a stretch), joined by a smooth S-curve that bends around any other
- * Building in the way. The Road starts and ends under the two Buildings, so Cars appear from inside.
- */
-export function buildRoads(layout: CityLayout, calls: Call[]): Record<string, THREE.Vector3[]> {
-  const out: Record<string, THREE.Vector3[]> = {}
-  const where = (k: string) => layout.lots[k] ?? layout.gates[k]
-  const valid = calls.filter((c) => where(c.from) && layout.lots[c.to])
-  // Spread each Building's outgoing (and incoming) Roads along its side, ordered by where they head.
-  const slots = (list: Call[], end: 'from' | 'to', other: 'from' | 'to') => {
-    const m = new Map<Call, number>()
-    const groups = new Map<string, Call[]>()
-    for (const c of list) groups.set(c[end], [...(groups.get(c[end]) ?? []), c])
-    for (const g of groups.values()) {
-      g.sort((a, b) => where(a[other]).center.z - where(b[other]).center.z)
-      g.forEach((c, i) => m.set(c, (i - (g.length - 1) / 2) * (ROAD_W + 1.6) - 1))
-    }
-    return m
-  }
-  const outZ = slots(valid, 'from', 'to'), inZ = slots(valid, 'to', 'from')
-  for (const c of valid) {
-    const gate = !!layout.gates[c.from]
-    const a = where(c.from).center, b = layout.lots[c.to].center
-    const za = gate ? a.z : a.z + outZ.get(c)!, zb = b.z + inZ.get(c)!
-    // Customers come from beyond the city edge, through the gate's arch.
-    const start = new THREE.Vector3(gate ? a.x - 14 : a.x + 2, 0, za), exit = new THREE.Vector3(a.x + (gate ? 4 : SIDE_X), 0, za)
-    const entry = new THREE.Vector3(b.x - SIDE_X, 0, zb), end = new THREE.Vector3(b.x - 2, 0, zb)
-    // shortcut: assumes the callee is to the right (true for this layout); a call back to the left loops wide.
-    const h = Math.max(6, (entry.x - exit.x) / 2)
-    const others = Object.values(layout.lots).filter((l) => l.key !== c.from && l.key !== c.to)
-    let best: THREE.Vector3[] = []
-    // Straight if possible, else bend out further and further (a call that skips columns may need a wide detour).
-    for (const bend of [0, ...Array.from({ length: 10 }, (_, i) => [9 * (i + 1), -9 * (i + 1)]).flat()]) {
-      const curve = new THREE.CubicBezierCurve3(exit, new THREE.Vector3(exit.x + h, 0, exit.z + bend),
-        new THREE.Vector3(entry.x - h, 0, entry.z + bend), entry)
-      const pts = [start, ...curve.getPoints(40), end]
-      if (!best.length) best = pts
-      if (pts.every((p) => others.every((l) => !inBuilding(p, l.center, ROAD_W)))) { best = pts; break }
-    }
-    out[`${c.from}>${c.to}`] = best
-  }
-  return out
-}
-
 /** Shift a polyline sideways (positive = to the right of travel). */
 export function offsetPath(pts: THREE.Vector3[], d: number): THREE.Vector3[] {
   return pts.map((p, i) => {
@@ -185,7 +144,7 @@ export function offsetPath(pts: THREE.Vector3[], d: number): THREE.Vector3[] {
 }
 
 /** A Car's full trip: out along the right lane, and for a failed request a U-turn and back along the other lane. */
-export function carTrip(road: THREE.Vector3[], turnBack: boolean): THREE.Vector3[] {
+export function carTrip(road: THREE.Vector3[], turnBack: boolean, inbound = [...road].reverse()): THREE.Vector3[] {
   const lane = ROAD_W / 4
   const out = offsetPath(road, lane)
   if (!turnBack) return out
@@ -196,7 +155,7 @@ export function carTrip(road: THREE.Vector3[], turnBack: boolean): THREE.Vector3
     const t = (i / 8) * Math.PI
     return c.clone().addScaledVector(right, lane * Math.cos(t)).addScaledVector(dir, lane * 1.6 * Math.sin(t))
   })
-  return [...out.slice(0, -1), ...arc, ...offsetPath([...road].reverse(), lane).slice(1)]
+  return [...out.slice(0, -1), ...arc, ...offsetPath(inbound, lane).slice(1)]
 }
 
 /** A polyline you can sample by distance travelled. */
@@ -220,22 +179,14 @@ export class Path {
   }
 }
 
-/** Dev self-check: no Road runs through another Building's reserved room; logs Road–Road crossings too. */
-export function checkRoads(layout: CityLayout, roads: Record<string, THREE.Vector3[]>) {
-  for (const [key, road] of Object.entries(roads)) {
+/** Check that request paths stay clear of other Buildings. */
+export function checkRoads(layout: CityLayout, routes: Record<string, StreetRoute>) {
+  for (const [key, { outbound, inbound }] of Object.entries(routes)) {
     const [from, to] = key.split('>')
     for (const lot of Object.values(layout.lots)) {
       if (lot.key === from || lot.key === to) continue
-      const hit = road.find((p) => inBuilding(p, lot.center, ROAD_W / 2))
+      const hit = [...outbound, ...inbound].find((p) => inBuilding(p, lot.center, ROAD_W / 2))
       console.assert(!hit, `road ${key} crosses ${lot.key}`, hit)
     }
   }
-  const segs = Object.entries(roads).flatMap(([k, r]) => r.slice(1).map((p, i) => ({ k, a: r[i], b: p })))
-  const cross = (s: typeof segs[0], t: typeof segs[0]) => {
-    const d = (p: THREE.Vector3, q: THREE.Vector3, r: THREE.Vector3) => (q.x - p.x) * (r.z - p.z) - (q.z - p.z) * (r.x - p.x)
-    return d(s.a, s.b, t.a) * d(s.a, s.b, t.b) < 0 && d(t.a, t.b, s.a) * d(t.a, t.b, s.b) < 0
-  }
-  let crossings = 0
-  for (let i = 0; i < segs.length; i++) for (let j = i + 1; j < segs.length; j++) if (segs[i].k !== segs[j].k && cross(segs[i], segs[j])) crossings++
-  if (crossings) console.info(`roads: ${crossings} road-road crossing(s)`)
 }

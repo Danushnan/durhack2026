@@ -12,4 +12,5 @@ function Root() {
   }, []);
   return admin ? <AdminMenu/> : <App/>;
 }
-createRoot(document.getElementById('root')!).render(<StrictMode><Root/></StrictMode>);
+const operator = import.meta.env.DEV || import.meta.env.MODE === 'operator';
+createRoot(document.getElementById('root')!).render(<StrictMode>{operator ? <Root/> : <App/>}</StrictMode>);

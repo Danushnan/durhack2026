@@ -89,36 +89,38 @@ test('quiet live activity can produce an illustration without changing simulator
 })
 
 test('the demo city: no Road runs through another Building', async () => {
-  const { buildRoads, checkRoads, layoutCity } = await import('../src/layout.ts')
+  const { checkRoads, layoutCity } = await import('../src/layout.ts')
+  const { buildStreetNetwork } = await import('../src/streetNetwork.ts')
   const deps = ['shop/frontend', 'shop/cart', 'shop/checkout', 'shop/payments', 'data/postgres', 'data/redis']
     .map((k) => ({ namespace: k.split('/')[0], name: k.split('/')[1] }))
   const calls = [['shop/frontend', 'shop/cart'], ['shop/frontend', 'shop/checkout'], ['shop/cart', 'data/redis'],
     ['shop/checkout', 'shop/payments'], ['shop/checkout', 'data/postgres'], ['ingress:shop/storefront', 'shop/frontend']]
     .map(([from, to]) => ({ from, to }))
   const layout = layoutCity(deps, ['node-1', 'node-2', 'node-3'], calls, calls.filter((c) => c.from.startsWith('ingress:')))
-  const roads = buildRoads(layout, calls)
-  assert.equal(Object.keys(roads).length, calls.length)
+  const { routes } = buildStreetNetwork(layout, calls)
+  assert.equal(Object.keys(routes).length, calls.length)
   const failures: string[] = []
   const realAssert = console.assert
   console.assert = (ok?: boolean, ...msg: unknown[]) => { if (!ok) failures.push(String(msg[0])) }
-  try { checkRoads(layout, roads) } finally { console.assert = realAssert }
+  try { checkRoads(layout, routes) } finally { console.assert = realAssert }
   assert.deepEqual(failures, [])
 })
 
 test('MiniShop: no Road runs through another Building', async () => {
-  const { buildRoads, checkRoads, layoutCity } = await import('../src/layout.ts')
+  const { checkRoads, layoutCity } = await import('../src/layout.ts')
+  const { buildStreetNetwork } = await import('../src/streetNetwork.ts')
   const fs = await import('node:fs')
   const arch = JSON.parse(fs.readFileSync(new URL('../../minishop/architecture.json', import.meta.url), 'utf8'))
   const deps = arch.components.map((c: { deployment: string }) => ({ namespace: arch.namespace, name: c.deployment }))
   const calls = arch.components.flatMap((c: { deployment: string; dependencies: string[] }) =>
     c.dependencies.map((d) => ({ from: `${arch.namespace}/${c.deployment}`, to: `${arch.namespace}/${d}` })))
   const layout = layoutCity(deps, ['minishop-control-plane', 'minishop-worker'], calls)
-  const roads = buildRoads(layout, calls)
-  assert.equal(Object.keys(roads).length, 10)
+  const { routes } = buildStreetNetwork(layout, calls)
+  assert.equal(Object.keys(routes).length, 10)
   const failures: string[] = []
   const realAssert = console.assert
   console.assert = (ok?: boolean, ...msg: unknown[]) => { if (!ok) failures.push(String(msg[0])) }
-  try { checkRoads(layout, roads) } finally { console.assert = realAssert }
+  try { checkRoads(layout, routes) } finally { console.assert = realAssert }
   assert.deepEqual(failures, [])
 })
 

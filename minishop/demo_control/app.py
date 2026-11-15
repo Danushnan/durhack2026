@@ -1,6 +1,5 @@
 """Local-only MiniShop operator. Run one uvicorn worker; disabled unless explicitly enabled."""
 import asyncio
-import hmac
 import ipaddress
 import os
 import subprocess
@@ -31,17 +30,23 @@ def local_url(value):
 class Settings:
     def __init__(self):
         self.enabled = os.getenv('MINISHOP_DEMO_ENABLED') == '1'
-        self.token = os.getenv('MINISHOP_DEMO_TOKEN', '')
         self.context = os.getenv('MINISHOP_CONTEXT', '')
         self.base = local_url(os.getenv('MINISHOP_DEMO_SHOP_URL', 'http://127.0.0.1:8080'))
-        if self.enabled and (len(self.token) < 24 or not self.context or self.context.startswith('-')):
-            raise RuntimeError('Demo requires a token of at least 24 characters and explicit MINISHOP_CONTEXT')
+        self.city = local_url(os.getenv('MINISHOP_DEMO_CITY_URL', 'http://127.0.0.1:8000'))
+        if self.enabled and (not self.context or self.context.startswith('-')):
+            raise RuntimeError('Demo requires explicit MINISHOP_CONTEXT')
 
 
 class Start(BaseModel):
     model_config = ConfigDict(extra='forbid')
     rps: float = Field(default=1, ge=.2, le=2, allow_inf_nan=False)
     requests: int = Field(default=100, ge=5, le=300, strict=True)
+
+
+class Packets(BaseModel):
+    model_config = ConfigDict(extra='forbid')
+    count: int = Field(ge=1, le=100, strict=True)
+    cross_district: bool = Field(strict=True)
 
 
 class Action(BaseModel):
@@ -163,7 +168,7 @@ def create_app(settings=None):
     app.state.control = control
     app.add_middleware(TrustedHostMiddleware, allowed_hosts=['localhost', '127.0.0.1', '[::1]'])
 
-    def authorize(request: Request):
+    def require_local_demo(request: Request):
         if not settings.enabled:
             raise HTTPException(404, 'Demo controls are disabled')
         try:
@@ -173,34 +178,51 @@ def create_app(settings=None):
         origin = request.headers.get('origin')
         if not local or (origin and urlsplit(origin).hostname not in ('localhost', '127.0.0.1', '::1')):
             raise HTTPException(403, 'Local operator access only')
-        if not hmac.compare_digest(request.headers.get('authorization', '').encode(), ('Bearer ' + settings.token).encode()):
-            raise HTTPException(401, 'Enter the operator token')
 
-    @app.get('/api/demo/status', dependencies=[Depends(authorize)])
+    @app.get('/api/demo/status', dependencies=[Depends(require_local_demo)])
     async def status():
         return {'traffic': control.traffic.state, 'operation': control.operation, 'verified': control.verified,
                 'namespace': 'minishop', 'context': settings.context}
 
-    @app.post('/api/demo/traffic/start', dependencies=[Depends(authorize)])
+    @app.post('/api/demo/traffic/start', dependencies=[Depends(require_local_demo)])
     async def start(body: Start):
         if control.task and not control.task.done():
             raise HTTPException(409, 'Wait for the current operation before starting traffic')
         created = control.traffic.start(body.rps, body.requests)
         return {'started': created, 'traffic': control.traffic.state}
 
-    @app.post('/api/demo/traffic/stop', dependencies=[Depends(authorize)])
+    @app.post('/api/demo/traffic/stop', dependencies=[Depends(require_local_demo)])
     async def stop():
         await control.traffic.stop()
         return {'traffic': control.traffic.state}
 
-    @app.post('/api/demo/actions', status_code=202, dependencies=[Depends(authorize)])
+    @app.post('/api/demo/actions', status_code=202, dependencies=[Depends(require_local_demo)])
     async def action(body: Action):
         control.start_action(body)
         return control.operation
 
+    async def forward_packets(path, body=None):
+        try:
+            async with httpx.AsyncClient(timeout=5, follow_redirects=False) as client:
+                response = await client.post(settings.city + path, json=body)
+                result = response.json()
+        except (httpx.HTTPError, ValueError):
+            raise HTTPException(502, 'Kuebec is unavailable. Check that the map and backend are running.')
+        if not response.is_success:
+            raise HTTPException(response.status_code, result.get('detail', 'Kuebec could not deliver the demo command.'))
+        return result
+
+    @app.post('/api/demo/packets', dependencies=[Depends(require_local_demo)])
+    async def send_packets(body: Packets):
+        return await forward_packets('/api/demo/packets', body.model_dump())
+
+    @app.post('/api/demo/packets/reset', dependencies=[Depends(require_local_demo)])
+    async def reset_packets():
+        return await forward_packets('/api/demo/packets/reset')
+
     @app.api_route('/api/{path:path}', methods=['GET', 'POST', 'PUT', 'DELETE'])
     async def storefront(path: str, request: Request):
-        # Same-origin storefront proxy; operator credentials are never forwarded.
+        # Forward only headers used by the storefront API.
         if path.split('/')[0] not in ('products', 'carts', 'checkout', 'orders') or '..' in path or '//' in path:
             raise HTTPException(404)
         data = await request.body()

@@ -61,7 +61,7 @@ export default function App() {
   const sim = cluster.connected && simulatorSource && !cluster.awaitingSnapshot
   const rush = all.some((o) => o.kind === 'Ingress' && o.status?.['kubeverse.io/rush-hour'])
 
-  // Every Road's traffic. With TigerData, its measured rows win (and are all there is during replay).
+  // Traffic for each request route. With TigerData, its measured rows win (and are all there is during replay).
   const flows: RoadFlow[] = cluster.edges.map((e) => {
     const m = routes[routeKey(e.from, e.to)]
     return m ? { ...e, rps: m.rps, latency_ms: m.latency_ms, measured: true,
@@ -142,7 +142,7 @@ export default function App() {
         {activeDiscovery && <>
           <button type="button" onClick={beginDiscovery}>Reset Discovery</button>
           <span role="status">
-            {activeDiscovery.roads.size} discovered
+            {activeDiscovery.roads.size} routes discovered
             {!discoveryReady(cluster) ? ' · Waiting for live telemetry'
               : !activeDiscovery.armed ? ' · Arming for a fresh window' : ' · Ready to observe'}
           </span>
@@ -285,7 +285,7 @@ function Help({ live, onClose }: { live: boolean; onClose: () => void }) {
         <li>🏦 <b>Buildings</b> are services (Deployments). Each does one job: hover one to see what. A bigger Building means more copies were asked for.</li>
         <li>🏙️ Towers, houses and trees around the edge are just scenery.</li>
         <li>▪️ <b>Units</b> in front are its Pods: identical copies doing the work. ⬚ An outlined <b>Plot</b> is a Pod still being created.</li>
-        <li>🛣️ A <b>Road</b> exists only where one service calls another, and stays while traffic is quiet. Its edge lines show how the calls are going: healthy, slow, errors, refused or idle (◧ shows the legend).</li>
+        <li>🛣️ Requests share <b>Roads</b> and drive through roundabouts. Lorries take the highway between districts. Edge lines show the most affected route on each street. Hover to see the individual calls, or open ◧ for the legend.</li>
         <li>💡 A Building glows with how its <b>requests</b> are going; its <b>Units</b> show its <b>Pods</b>. They are separate: every Pod can be ready while the app answers with errors.</li>
         <li>🚨 A pulsing ring (and a light beam when serious) marks every Building that needs attention; the overview at the bottom left lists them.</li>
         <li>🚗 <b>Cars</b> illustrate aggregate request activity. They are not individual traced requests or proof of which Pod served a request.</li>
@@ -591,7 +591,7 @@ function Tiles({ items }: { items: { label: string; value: string; status?: Sign
   )
 }
 
-/** One row per Road in or out of a service: who, how much, how fast, how well. */
+/** One row per request route in or out of a service. */
 function FlowTable({ title, rows, end, onPick }: { title: string; rows: RoadFlow[]; end: 'from' | 'to'; onPick: (k: string) => void }) {
   if (!rows.length) return null
   return <>
@@ -624,7 +624,7 @@ function Overview({ flows, deployments, states, onPick }: {
         { label: 'avg latency', value: o.latency_ms == null ? '—' : `${Math.round(o.latency_ms)} ms`, status: o.rps > 0 && (o.latency_ms ?? 0) >= SLOW_MS ? 'slow' : undefined },
         { label: 'failing', value: pct(o.failing), status: o.failing >= ERROR_RATE ? 'errors' : undefined },
       ]} />
-      <p className="muted small">Coming in: where requests enter the app. All {flows.length} Roads: {o.allRps.toFixed(1)} req/s, {pct(o.allFailing)} failing.</p>
+      <p className="muted small">Coming in: where requests enter the app. All {flows.length} routes: {o.allRps.toFixed(1)} req/s, {pct(o.allFailing)} failing.</p>
       {list.length ? (
         <ul className="affected" aria-label="Services that need attention">
           {list.map((d) => {

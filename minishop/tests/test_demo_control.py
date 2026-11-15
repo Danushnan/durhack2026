@@ -10,12 +10,8 @@ import pytest
 from demo_control.app import create_app, Controller, Action, Settings
 from demo_control.traffic import Traffic
 
-TOKEN = 'test-operator-token-at-least-24-characters'
-HEADERS = {'Authorization': 'Bearer ' + TOKEN}
-
-
 def settings(enabled=True):
-    return SimpleNamespace(enabled=enabled, token=TOKEN, context='disposable-test', base='http://127.0.0.1:8080')
+    return SimpleNamespace(enabled=enabled, context='disposable-test', base='http://127.0.0.1:8080')
 
 
 def observed(**changes):
@@ -27,19 +23,19 @@ def test_api_permissions_and_limits():
     async def run():
         app = create_app(settings())
         async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app, client=('127.0.0.1', 123)), base_url='http://127.0.0.1') as c:
-            assert (await c.get('/api/demo/status')).status_code == 401
-            assert (await c.get('/api/demo/status', headers={**HEADERS, 'Origin':'https://evil.example'})).status_code == 403
-            assert (await c.get('/api/demo/status', headers={**HEADERS, 'Host':'evil.example'})).status_code == 400
-            assert (await c.post('/api/demo/actions', headers=HEADERS, json={'action':'shell','command':'rm'})).status_code == 422
-            assert (await c.post('/api/demo/actions', headers=HEADERS, json={'action':'scale','replicas':4})).status_code == 422
-            assert (await c.post('/api/demo/actions', headers=HEADERS, json={'action':'scale','namespace':'other'})).status_code == 422
-            assert (await c.post('/api/demo/traffic/start', headers=HEADERS, json={'rps':20})).status_code == 422
-            assert (await c.post('/api/demo/traffic/start', headers=HEADERS, json={'requests':301})).status_code == 422
+            assert (await c.get('/api/demo/status')).status_code == 200
+            assert (await c.get('/api/demo/status', headers={'Origin':'https://evil.example'})).status_code == 403
+            assert (await c.get('/api/demo/status', headers={'Host':'evil.example'})).status_code == 400
+            assert (await c.post('/api/demo/actions', json={'action':'shell','command':'rm'})).status_code == 422
+            assert (await c.post('/api/demo/actions', json={'action':'scale','replicas':4})).status_code == 422
+            assert (await c.post('/api/demo/actions', json={'action':'scale','namespace':'other'})).status_code == 422
+            assert (await c.post('/api/demo/traffic/start', json={'rps':20})).status_code == 422
+            assert (await c.post('/api/demo/traffic/start', json={'requests':301})).status_code == 422
         disabled = create_app(settings(False))
         async with httpx.AsyncClient(transport=httpx.ASGITransport(app=disabled, client=('127.0.0.1',123)), base_url='http://127.0.0.1') as c:
-            assert (await c.get('/api/demo/status', headers=HEADERS)).status_code == 404
+            assert (await c.get('/api/demo/status')).status_code == 404
         async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app, client=('10.0.0.1',123)), base_url='http://127.0.0.1') as c:
-            assert (await c.get('/api/demo/status', headers=HEADERS)).status_code == 403
+            assert (await c.get('/api/demo/status')).status_code == 403
     asyncio.run(run())
 
 

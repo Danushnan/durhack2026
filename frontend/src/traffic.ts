@@ -25,6 +25,7 @@ export interface CarAgent {
 export interface Trip {
   okLength: number              // out along the right lane and into the callee
   backLength: number            // out, U-turn at the door, back along the other lane
+  vehicleLength?: number
   door: number                  // where a Car learns its fate
   limitOk: (s: number) => number   // the fastest a Car may take the bend at s
   limitBack: (s: number) => number
@@ -66,7 +67,7 @@ export function newCar(slot: number, rand: () => number): CarAgent {
 }
 
 /** The caller's exit is clear enough for another Car to pull out. */
-export const exitClear = (cars: CarAgent[]) => !cars.some((c) => c.phase === 'out' && c.s < DRIVE.length + DRIVE.minGap)
+export const exitClear = (cars: CarAgent[], length = DRIVE.length) => !cars.some((c) => c.phase === 'out' && c.s < length + DRIVE.minGap)
 
 // shortcut: one Car stands for ~11 requests. A caller's exit lets out ~1.2 Cars/s, so the demo's 8 req/s at the
 // City Gate fills ~60% of it and rush hour (24 req/s) saturates it; rescale if request rates grow much larger.
@@ -76,9 +77,9 @@ export const CARS_PER_REQUEST = 0.09
  * Requests waiting to leave as Cars accrue at the request rate; up to 3 wait while the caller's exit is
  * blocked (that backlog is a full Road). Returns the new backlog and whether a Car leaves now (jittered spacing).
  */
-export function admit(credit: number, rps: number, dt: number, cars: CarAgent[], rand: () => number, density = CARS_PER_REQUEST) {
+export function admit(credit: number, rps: number, dt: number, cars: CarAgent[], rand: () => number, density = CARS_PER_REQUEST, length = DRIVE.length) {
   credit = Math.min(3, credit + rps * density * dt)
-  const leave = credit >= 1 && exitClear(cars)
+  const leave = credit >= 1 && exitClear(cars, length)
   return { credit: leave ? credit - (0.6 + 0.8 * rand()) : credit, leave }
 }
 
@@ -91,7 +92,7 @@ const fateOf = (c: CarAgent, r: Rates) => (c.roll < r.refused ? 'refused' : c.ro
  * delivered to the callee) and the Cars still driving.
  */
 export function stepCars(cars: CarAgent[], dt: number, now: number, trip: Trip, rates: Rates) {
-  const len = DRIVE.length
+  const len = trip.vehicleLength ?? DRIVE.length
   // Outbound lane, front to back: everything not yet turned back, including Cars waiting at the door.
   let ahead: { s: number; v: number } | null = null
   for (const c of cars.filter((c) => c.phase !== 'back').sort((a, b) => b.s - a.s)) {

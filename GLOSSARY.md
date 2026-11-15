@@ -36,7 +36,7 @@ A marked space in front of a Building, representing one desired replica; it is o
 _Avoid_: Slot, placeholder
 
 **Road**:
-The two-lane route between two Buildings, representing one service calling another; a Road exists only where such a call exists. Requests drive out in the right-hand lane; failed ones come back in the other.
+A two-way street shared by request routes between Buildings. Cars keep right and circulate around junctions before taking the exit for their destination.
 _Avoid_: Street, lane, path, connection, link
 
 **Car**:

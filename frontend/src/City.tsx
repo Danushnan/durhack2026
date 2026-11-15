@@ -7,16 +7,17 @@ import {
   keyOf, NODE_COLORS, nodeReady, podsOf, podStatus, rolloutOf, STATUS_COLOR, versionColor,
 } from './k8s'
 import { FacadeSign, Landmark, type LandmarkInfo, landmarkFor } from './landmarks'
-import { BUILDING, buildRoads, carTrip, type Call, type CityLayout, checkRoads, KERB, layoutCity, offsetPath, Path, ROAD_W } from './layout'
+import { BUILDING, carTrip, type Call, type CityLayout, KERB, layoutCity, offsetPath, Path, ROAD_W } from './layout'
 import { Scenery } from './scenery'
 import { COMPONENTS, componentOf, nameOf, roleOf } from './teach'
 import { textTexture, type TextLine } from './textures'
 import type { Theme } from './theme'
 import { type Affected, describeFlow, type Flow, rates, type serviceFlow, SIGNAL, signalOf } from './health'
-import { admit, bendLimit, type CarAgent, CARS_PER_REQUEST, newCar, stepCars } from './traffic'
+import { admit, bendLimit, type CarAgent, CARS_PER_REQUEST, DRIVE, exitClear, newCar, stepCars } from './traffic'
 import { label, latencyText, type LiveServiceView } from './liveMetrics'
 import { miniShopLayoutCalls } from './miniShopRoads'
 import { roadKey, roadVisible } from './roadDiscovery'
+import { buildStreetNetwork, crossesDistricts, HIGHWAY_WIDTH, ROUNDABOUT_RADIUS, type Roundabout, type StreetRoute } from './streetNetwork'
 
 export interface HoverInfo { title: string; lines: string[]; x: number; y: number }
 type OnHover = (h: HoverInfo | null) => void
@@ -157,7 +158,7 @@ function Ground({ layout, theme }: { layout: CityLayout; theme: Theme }) {
   )
 }
 
-// ---------- Roads: one per call between two services ----------
+// ---------- Shared streets and roundabouts ----------
 
 /** Painted marks along a Road (centre dashes, lane arrows) as one instanced mesh. */
 function Marks({ pts, every, offset, start, geometry, color, opacity = 1 }: {
@@ -187,50 +188,69 @@ const arrow = (() => {
   return new THREE.ShapeGeometry(s).rotateX(-Math.PI / 2).translate(0, 0.023, 0)
 })()
 
-/**
- * A two-lane Road: pavement, asphalt, a dashed centre line, arrows in the outbound lane, and edge lines
- * that glow with the health of the call (blue fine, orange answered-with-errors, red refused, grey idle).
- */
-function Road({ pts, call, edge, emphasis, theme, onHover }: {
-  pts: THREE.Vector3[]; call: Call; edge?: RoadFlow; emphasis: 'normal' | 'dim' | 'strong'; theme: Theme; onHover: OnHover
+type StreetUse = { call: Call; edge?: RoadFlow; preview?: boolean }
+
+const callLabel = ({ from, to }: Call) => `${from.startsWith('ingress:') ? 'customers' : nameOf(from)} → ${nameOf(to)}`
+
+function Road({ pts, uses, highway, selected, theme, onHover }: {
+  pts: THREE.Vector3[]; uses: StreetUse[]; highway: boolean; selected: string | null; theme: Theme; onHover: OnHover
 }) {
+  const width = highway ? HIGHWAY_WIDTH : ROAD_W
   const geo = useMemo(() => ({
-    kerb: ribbon(pts, ROAD_W + 2 * KERB, 0.006),
-    asphalt: ribbon(pts, ROAD_W, 0.014),
-    left: ribbon(offsetPath(pts, -(ROAD_W / 2 - 0.14)), 0.16, 0.022),
-    right: ribbon(offsetPath(pts, ROAD_W / 2 - 0.14), 0.16, 0.022),
-  }), [pts])
+    kerb: ribbon(pts, width + 2 * KERB, 0.006),
+    asphalt: ribbon(pts, width, 0.014),
+    left: ribbon(offsetPath(pts, -(width / 2 - 0.14)), 0.16, 0.022),
+    right: ribbon(offsetPath(pts, width / 2 - 0.14), 0.16, 0.022),
+  }), [pts, width])
   useEffect(() => () => Object.values(geo).forEach((g) => g.dispose()), [geo])
-  const signal = SIGNAL[edge ? signalOf(edge) : 'idle']
-  const color = signal.color
-  const dim = emphasis === 'dim' ? 0.3 : 1
+  const signal = uses.reduce((worst, { edge }) => {
+    const current = SIGNAL[edge ? signalOf(edge) : 'idle']
+    return current.rank > worst.rank ? current : worst
+  }, SIGNAL.idle)
+  const dim = !selected || uses.some(({ call }) => call.from === selected || call.to === selected) ? 1 : 0.3
   const hover = (e: ThreeEvent<PointerEvent>) => {
     e.stopPropagation()
-    const src = call.from.startsWith('ingress:') ? 'customers' : nameOf(call.from)
-    const title = `🛣️ ${src} → ${nameOf(call.to)}`
-    if (!edge) {
-      onHover({ title, lines: ['Previously observed dependency. Current traffic measurements are unavailable.'], ...at(e) })
-      return
-    }
-    const r = rates(edge)
-    onHover({ title: `${title} · ${signal.icon} ${signal.label}`, lines: [
-      describeFlow(edge),
-      edge.rps > 0 ? `Observed aggregate calls · ${(r.error * 100).toFixed(1)}% HTTP response errors (4xx/5xx) · ${(r.refused * 100).toFixed(1)}% refused`
-        : 'Known dependency: declared or previously observed. No calls observed in the current traffic window; the Road stays.',
-      `${signal.label}: ${signal.means}.`,
-    ], ...at(e) })
+    const title = highway ? 'District highway' : uses.length === 1 ? callLabel(uses[0].call) : 'Shared road'
+    onHover({ title: `🛣️ ${title}`, lines: uses.map(({ call, edge, preview }) => edge
+      ? `${callLabel(call)} · ${SIGNAL[signalOf(edge)].label} · ${describeFlow(edge)}`
+      : `${callLabel(call)} · ${preview ? 'map preview' : 'awaiting traffic measurements'}`), ...at(e) })
   }
-  const glow = <meshBasicMaterial color={color} toneMapped={false} transparent opacity={dim} side={THREE.DoubleSide} />
+  const glow = <meshBasicMaterial color={signal.color} toneMapped={false} transparent opacity={dim} side={THREE.DoubleSide} />
   return (
     <group>
       <mesh geometry={geo.kerb} receiveShadow><meshStandardMaterial color={theme.kerb} side={THREE.DoubleSide} /></mesh>
       <mesh geometry={geo.asphalt} receiveShadow onPointerOver={hover} onPointerMove={hover} onPointerOut={() => onHover(null)}>
-        <meshStandardMaterial color={theme.street} roughness={0.95} side={THREE.DoubleSide} />
+        <meshStandardMaterial color={highway ? new THREE.Color(theme.street).multiplyScalar(0.78) : theme.street} roughness={0.95} side={THREE.DoubleSide} />
       </mesh>
-      <mesh geometry={geo.left} renderOrder={edge?.healthy === false ? 2 : 1}>{glow}</mesh>
-      <mesh geometry={geo.right} renderOrder={edge?.healthy === false ? 2 : 1}>{glow}</mesh>
-      <Marks pts={pts} every={2.6} offset={0} start={4} geometry={dash} color={theme.laneMark} opacity={0.9 * dim} />
-      <Marks pts={pts} every={13} offset={ROAD_W / 4} start={7} geometry={arrow} color={theme.laneMark} opacity={0.55 * dim} />
+      <mesh geometry={geo.left}>{glow}</mesh>
+      <mesh geometry={geo.right}>{glow}</mesh>
+      <Marks pts={pts} every={highway ? 3.8 : 2.6} offset={0} start={2} geometry={dash} color={theme.laneMark} opacity={0.9 * dim} />
+    </group>
+  )
+}
+
+function RoundaboutMesh({ center, theme }: { center: Roundabout['center']; theme: Theme }) {
+  const outer = ROUNDABOUT_RADIUS + ROAD_W / 2
+  const island = ROUNDABOUT_RADIUS - ROAD_W / 2 + 0.35
+  return (
+    <group position={center}>
+      <mesh rotation-x={-Math.PI / 2} position-y={0.007} receiveShadow>
+        <circleGeometry args={[outer + KERB, 40]} /><meshStandardMaterial color={theme.kerb} />
+      </mesh>
+      <mesh rotation-x={-Math.PI / 2} position-y={0.015} receiveShadow>
+        <circleGeometry args={[outer, 40]} /><meshStandardMaterial color={theme.street} roughness={0.95} />
+      </mesh>
+      <mesh position-y={0.15} receiveShadow>
+        <cylinderGeometry args={[island, island + 0.14, 0.27, 32]} /><meshStandardMaterial color={theme.kerb} />
+      </mesh>
+      <mesh rotation-x={-Math.PI / 2} position-y={0.29} receiveShadow>
+        <circleGeometry args={[island - 0.2, 32]} /><meshStandardMaterial color={theme.ground} />
+      </mesh>
+      {[0, 1, 2, 3].map((i) => {
+        const angle = (i + 0.5) * Math.PI / 2, radius = ROUNDABOUT_RADIUS + ROAD_W / 4
+        return <mesh key={i} geometry={arrow} position={[radius * Math.cos(angle), 0.004, radius * Math.sin(angle)]}
+          rotation-y={Math.PI / 2 - angle}><meshBasicMaterial color={theme.laneMark} /></mesh>
+      })}
     </group>
   )
 }
@@ -530,19 +550,30 @@ function PowerStation({ node, pos, used, color, theme, onHover, selected, onSele
  * the Car ahead, slow for bends, and at the callee's door are served, refused (red) or answered with an
  * error (orange). Fate is decided on arrival, from the live state, so Cars already on the road react to failures.
  */
-function Traffic({ edge, road, theme, accent, onHover, endpoints, paused, liveMode }: {
-  edge: RoadFlow; road: THREE.Vector3[]; theme: Theme; accent: string; onHover: OnHover
-  endpoints: string[]; paused: boolean; liveMode: boolean // Pod flashes illustrate distribution, not observed request routing
+function Traffic({ edge, road, theme, accent, onHover, endpoints, paused, liveMode, previewCount }: {
+  edge: RoadFlow; road: StreetRoute; theme: Theme; accent: string; onHover: OnHover
+  endpoints: string[]; paused: boolean; liveMode: boolean; previewCount?: number // Pod flashes illustrate distribution, not observed request routing
 }) {
+  const lorry = crossesDistricts(edge)
+  const length = lorry ? 2.4 : DRIVE.length
+  const front = lorry ? 1.2 : 0.56, rear = -front
+  const lampOffset = lorry ? 0.34 : 0.22
+  const preview = previewCount !== undefined
+  const dispatched = useRef(0)
   const targets = useRef(endpoints)
   targets.current = endpoints
   const trips = useMemo(() => {
-    const ok = new Path(carTrip(road, false)), back = new Path(carTrip(road, true))
-    return { ok, back, trip: { okLength: ok.length, backLength: back.length, door: ok.length - CAR_GROW,
+    const ok = new Path(carTrip(road.outbound, false)), back = new Path(carTrip(road.outbound, true, road.inbound))
+    return { ok, back, trip: { okLength: ok.length, backLength: back.length, door: Math.max(0, ok.length - CAR_GROW), vehicleLength: length,
       limitOk: bendLimit(ok.pts, GRIP), limitBack: bendLimit(back.pts, GRIP) } }
-  }, [road])
+  }, [road, length])
   const cars = useRef<CarAgent[]>([])
   const credit = useRef(0) // requests waiting to leave as a Car
+  useLayoutEffect(() => {
+    if (preview) dispatched.current -= cars.current.length
+    cars.current = []
+    credit.current = 0
+  }, [preview, trips])
   const live = useRef(edge)
   live.current = edge
   const pause = useRef(paused)
@@ -567,13 +598,22 @@ function Traffic({ edge, road, theme, accent, onHover, endpoints, paused, liveMo
     const slot = [...Array(CAR_POOL).keys()].find((i) => !used.has(i))
     // MiniShop's manual traffic is much quieter than the simulator. Normalise only the illustration;
     // measured rates are unchanged, and the same pool/exit limits still bound the rendering cost.
-    const arrival = admit(credit.current, slot === undefined ? 0 : e.rps, dt, cars.current, Math.random, liveMode ? 1 : CARS_PER_REQUEST)
-    credit.current = arrival.credit
-    if (arrival.leave && slot !== undefined) cars.current.push(newCar(slot, Math.random))
+    if (slot !== undefined) {
+      if (previewCount !== undefined) {
+        if (dispatched.current < previewCount && exitClear(cars.current, length)) {
+          cars.current.push(newCar(slot, Math.random))
+          dispatched.current++
+        }
+      } else {
+        const arrival = admit(credit.current, e.rps, dt, cars.current, Math.random, liveMode ? 1 : CARS_PER_REQUEST, length)
+        credit.current = arrival.credit
+        if (arrival.leave) cars.current.push(newCar(slot, Math.random))
+      }
+    }
     const steps = Math.ceil(dt * 60) // small steps keep the car-following stable
     for (let k = 0; k < steps; k++) {
       const r = stepCars(cars.current, dt / steps, now, trips.trip, rates(e))
-      for (let n = 0; n < r.served.length; n++) deliver(e.to, targets.current, now)
+      if (!preview) for (let n = 0; n < r.served.length; n++) deliver(e.to, targets.current, now)
       cars.current = r.cars
     }
     const blink = Math.sin(now * 12) > 0
@@ -593,7 +633,7 @@ function Traffic({ edge, road, theme, accent, onHover, endpoints, paused, liveMo
   })
   const [src, dst] = [edge.from.startsWith('ingress:') ? 'customers' : nameOf(edge.from), nameOf(edge.to)]
   const night = theme.mode === 'night'
-  const story = (c?: CarAgent) => !c ? '' : c.fate === 'refused' ? 'Illustrates the aggregate share of calls with no HTTP answer.'
+  const story = (c?: CarAgent) => preview ? 'Illustrated packet from the Demo Control Centre.' : !c ? '' : c.fate === 'refused' ? 'Illustrates the aggregate share of calls with no HTTP answer.'
     : c.fate === 'error' ? 'Illustrates HTTP response errors, including business rejections. This does not establish a root cause.'
       : 'Illustrates normalised aggregate activity; car count, travel time, queuing and Pod flashes are not request-level measurements.'
   return (
@@ -604,26 +644,33 @@ function Traffic({ edge, road, theme, accent, onHover, endpoints, paused, liveMo
             e.stopPropagation()
             const car = cars.current.find((c) => c.slot === i)
             onHover({
-              title: `🚗 Aggregate activity: ${src} → ${dst}`,
-              lines: [story(car), `This Road: ${describeFlow(live.current)}.`],
+              title: `${lorry ? '🚚' : '🚗'} ${preview ? 'Demo packet' : 'Aggregate activity'}: ${src} → ${dst}`,
+              lines: preview ? [story(car)] : [story(car), `This route: ${describeFlow(live.current)}.`],
               ...at(e),
             })
           }}
           onPointerOut={() => onHover(null)}>
-          <mesh position={[0, 0.3, 0]} castShadow><boxGeometry args={[1.1, 0.35, 0.6]} /><meshStandardMaterial ref={(m) => { paints.current[i] = m }} color={accent} /></mesh>
-          <mesh position={[-0.1, 0.6, 0]}><boxGeometry args={[0.6, 0.3, 0.52]} /><meshStandardMaterial color={night ? '#0f172a' : '#e2e8f0'} /></mesh>
-          {[-0.32, 0.32].map((x) => <mesh key={x} position={[x, 0.13, 0]}><boxGeometry args={[0.26, 0.26, 0.66]} /><meshStandardMaterial color="#111827" /></mesh>)}
-          {night && [-0.18, 0.18].map((z) => (
-            <mesh key={z} position={[0.56, 0.32, z]}><boxGeometry args={[0.04, 0.1, 0.12]} /><meshBasicMaterial color="#fef9c3" toneMapped={false} /></mesh>
+          {lorry ? <>
+            <mesh position={[-0.36, 0.63, 0]} castShadow><boxGeometry args={[1.62, 0.81, 0.92]} /><meshStandardMaterial ref={(m) => { paints.current[i] = m }} color={accent} /></mesh>
+            <mesh position={[0.78, 0.47, 0]} castShadow><boxGeometry args={[0.78, 0.64, 0.84]} /><meshStandardMaterial color={night ? '#64748b' : '#f8fafc'} /></mesh>
+            <mesh position={[1.176, 0.62, 0]}><boxGeometry args={[0.02, 0.2, 0.68]} /><meshStandardMaterial color="#18273e" /></mesh>
+          </> : <>
+            <mesh position={[0, 0.3, 0]} castShadow><boxGeometry args={[1.1, 0.35, 0.6]} /><meshStandardMaterial ref={(m) => { paints.current[i] = m }} color={accent} /></mesh>
+            <mesh position={[-0.1, 0.6, 0]}><boxGeometry args={[0.6, 0.3, 0.52]} /><meshStandardMaterial color={night ? '#0f172a' : '#e2e8f0'} /></mesh>
+          </>}
+          {(lorry ? [-0.9, -0.52, 0.78] : [-0.32, 0.32]).map((x) => <mesh key={x} position={[x, 0.14, 0]}>
+            <boxGeometry args={lorry ? [0.3, 0.3, 0.98] : [0.26, 0.26, 0.66]} /><meshStandardMaterial color="#111827" /></mesh>)}
+          {night && [-lampOffset, lampOffset].map((z) => (
+            <mesh key={z} position={[front, 0.32, z]}><boxGeometry args={[0.04, 0.1, 0.12]} /><meshBasicMaterial color="#fef9c3" toneMapped={false} /></mesh>
           ))}
           <group ref={(g) => { brakes.current[i] = g }} visible={false}>
-            {[-0.22, 0.22].map((z) => (
-              <mesh key={z} position={[-0.56, 0.22, z]}><boxGeometry args={[0.05, 0.08, 0.12]} /><meshBasicMaterial color="#dc2626" toneMapped={false} /></mesh>
+            {[-lampOffset, lampOffset].map((z) => (
+              <mesh key={z} position={[rear, 0.22, z]}><boxGeometry args={[0.05, 0.08, 0.12]} /><meshBasicMaterial color="#dc2626" toneMapped={false} /></mesh>
             ))}
           </group>
           <group ref={(g) => { hazards.current[i] = g }} visible={false}>
-            {[-0.22, 0.22].map((z) => (
-              <mesh key={z} position={[-0.56, 0.35, z]}><boxGeometry args={[0.06, 0.12, 0.14]} /><meshBasicMaterial color="#fb923c" toneMapped={false} /></mesh>
+            {[-lampOffset, lampOffset].map((z) => (
+              <mesh key={z} position={[rear, 0.35, z]}><boxGeometry args={[0.06, 0.12, 0.14]} /><meshBasicMaterial color="#fb923c" toneMapped={false} /></mesh>
             ))}
           </group>
         </group>
@@ -852,6 +899,32 @@ function CameraRig({ focus, layout, homeTick, mode }: { focus: THREE.Vector3 | n
 
 // ---------- the City ----------
 
+const DEMO_DEPOT = 'demo-transit/depot'
+
+function demoRoutes(workloads: string[], calls: Call[], packets: ClusterState['demoPackets']) {
+  const source = workloads.find((key) => key === 'minishop/minishop-web') ?? workloads[0]
+  const valid = calls.filter(({ from, to }) => workloads.includes(from) && workloads.includes(to))
+  const localTarget = source && workloads.find((to) => to !== source && !crossesDistricts({ from: source, to }))
+  const local = valid.find(({ from, to }) => from === source && to === 'minishop/product-api') ??
+    valid.find((call) => !crossesDistricts(call)) ?? (source && localTarget ? { from: source, to: localTarget } : undefined)
+  const cross = valid.find(crossesDistricts) ?? (source && {
+    from: source, to: workloads.find((to) => crossesDistricts({ from: source, to })) ?? DEMO_DEPOT,
+  })
+  return [
+    ...(packets?.cars && local ? [{ call: local, count: packets.cars }] : []),
+    ...(packets?.lorries && cross ? [{ call: cross, count: packets.lorries }] : []),
+  ]
+}
+
+function addDemoDepot(layout: CityLayout): CityLayout {
+  const x = layout.core.x1 + 28, z = (layout.core.z0 + layout.core.z1) / 2
+  return { ...layout,
+    lots: { ...layout.lots, [DEMO_DEPOT]: { key: DEMO_DEPOT, center: new THREE.Vector3(x, 0, z) } },
+    districts: [...layout.districts, { name: 'demo-transit', x0: x - 11, x1: x + 11, z0: z - 11, z1: z + 11 }],
+    core: { ...layout.core, x1: x + 14 },
+  }
+}
+
 export function City({ cluster, selected, onSelect, powerGrid, theme, onHover, states, homeTick, flows, replay, mode, trafficPaused, discoveredRoads }: {
   flows: RoadFlow[]; replay: boolean; mode: ViewMode; trafficPaused: boolean
   discoveredRoads?: ReadonlySet<string>
@@ -874,50 +947,57 @@ export function City({ cluster, selected, onSelect, powerGrid, theme, onHover, s
   const { known, supplemental } = cluster.metrics ? miniShopLayoutCalls([...cluster.edges, ...remembered], workloadKeys)
     : { known: cluster.edges, supplemental: [] }
   const layoutKey = [workloadKeys, nodes.map((n) => n.metadata.name), known.map(roadKey).sort()].join('|')
-  const { layout, roads, obstacles, lamps, keep } = useMemo(() => {
-    const calls = known.map(({ from, to }) => ({ from, to }))
-    const layout = layoutCity(deployments.map((d) => ({ namespace: d.metadata.namespace!, name: d.metadata.name })),
-      nodes.map((n) => n.metadata.name), calls, calls.filter((c) => c.from.startsWith('ingress:')))
-    const roads = buildRoads(layout, calls)
-    if (import.meta.env.DEV) checkRoads(layout, roads)
+  const previews = demoRoutes(workloadKeys, [...known, ...supplemental], cluster.demoPackets)
+  const usesDepot = previews.some(({ call }) => call.to === DEMO_DEPOT)
+  const networkCalls = [...supplemental, ...previews.map(({ call }) => call)]
+  const supplementalKey = [...new Set(networkCalls.map(roadKey))].sort().join(',')
+  const baseLayout = useMemo(() => layoutCity(deployments.map((d) => ({ namespace: d.metadata.namespace!, name: d.metadata.name })),
+    nodes.map((n) => n.metadata.name), known, known.filter((c) => c.from.startsWith('ingress:'))),
+  [layoutKey]) // eslint-disable-line react-hooks/exhaustive-deps
+  const layout = useMemo(() => usesDepot ? addDemoDepot(baseLayout) : baseLayout, [baseLayout, usesDepot])
+  const { network, obstacles, lamps, keep } = useMemo(() => {
+    const network = buildStreetNetwork(layout, known, networkCalls)
     const lots = [...Object.values(layout.lots), ...Object.values(layout.stations), ...Object.values(layout.gates), ...(layout.hall ? [layout.hall] : [])]
     const clear = (p: THREE.Vector3) => lots.every((l) => Math.abs(p.x - l.center.x) > BUILDING.halfW + 1 ||
       p.z < l.center.z + BUILDING.back - 1 || p.z > l.center.z + BUILDING.front + 1)
-    // Lamps every ~9 units on the left kerb of each Road, wherever that is clear of Buildings.
-    const lamps = Object.entries(roads).map(([key, r]) => {
-      const kerb = new Path(offsetPath(r, -(ROAD_W / 2 + KERB + 0.3)))
-      const points = Array.from({ length: Math.floor(kerb.length / 9) }, (_, i) => {
-        const v = new THREE.Vector3()
-        kerb.at(4.5 + i * 9, v)
-        return v
-      }).filter(clear)
-      return { key, points }
-    })
-    // What Scenery must keep clear of: Buildings at full size, Power Stations, Roads.
+    const sample = (points: THREE.Vector3[], gap: number, start: number, end: number) => {
+      const path = new Path(points), samples: THREE.Vector3[] = []
+      for (let s = start; s < path.length - end; s += gap) {
+        const p = new THREE.Vector3()
+        path.at(s, p)
+        samples.push(p)
+      }
+      return samples
+    }
+    const lamps = network.segments.map(({ calls, points, highway }) => ({ calls,
+      points: sample(offsetPath(points, -((highway ? HIGHWAY_WIDTH : ROAD_W) / 2 + KERB + 0.3)), 9, 5, 5).filter(clear),
+    }))
     const obstacles = [
       ...Object.values(layout.lots).map((l) => ({ x: l.center.x, z: l.center.z - 0.4, rad: 9.5 })),
       ...Object.values(layout.stations).map((l) => ({ x: l.center.x, z: l.center.z, rad: 8 })),
       ...Object.values(layout.gates).map((l) => ({ x: l.center.x, z: l.center.z, rad: 7 })),
       ...(layout.hall ? [{ x: layout.hall.center.x, z: layout.hall.center.z, rad: 11 }] : []),
-      ...Object.values(roads).flatMap((r) => r.filter((_, i) => i % 2 === 0).map((p) => ({ x: p.x, z: p.z, rad: ROAD_W / 2 + KERB + 1.2 }))),
+      ...network.segments.flatMap(({ points, highway }) => sample(points, 3, 0, 0).map(({ x, z }) => ({ x, z, rad: (highway ? HIGHWAY_WIDTH : ROAD_W) / 2 + KERB + 1.2 }))),
+      ...network.roundabouts.map(({ center: { x, z } }) => ({ x, z, rad: ROUNDABOUT_RADIUS + ROAD_W / 2 + KERB + 1.2 })),
     ]
-    // What Scenery must never hide from the isometric camera: the Buildings' rooms inside each District
-    // (its edge padding may be hidden), City Hall, Power Stations and City Gates.
     const box = (c: THREE.Vector3, r: number) => ({ x0: c.x - r, x1: c.x + r, z0: c.z - r, z1: c.z + r })
     const keep = [
       ...layout.districts.map((d) => ({ x0: d.x0 + 3, x1: d.x1 - 3, z0: d.z0 + 3, z1: d.z1 - 3 })),
       ...lots.filter((l) => !layout.lots[l.key]).map((l) => box(l.center, 8)),
     ]
-    return { layout, roads, obstacles, lamps, keep }
-  }, [layoutKey]) // eslint-disable-line react-hooks/exhaustive-deps
-  // Each observed-only route uses the fixed layout and its own driveway slots.
-  const supplementalKey = supplemental.map(roadKey).sort().join(',')
-  const extraRoads = useMemo(() => Object.assign({}, ...supplemental.map((call) => buildRoads(layout, [call]))) as typeof roads,
-    [layout, supplementalKey]) // eslint-disable-line react-hooks/exhaustive-deps
-  const pathFor = (call: Call) => roads[roadKey(call)] ?? extraRoads[roadKey(call)]
-  const edges = flows.filter((edge) => pathFor(edge) && roadVisible(edge, discoveredRoads))
-  const visibleLamps = useMemo(() => lamps.filter(({ key }) => !discoveredRoads || discoveredRoads.has(key)).flatMap(({ points }) => points),
-    [lamps, discoveredRoads])
+    return { network, obstacles, lamps, keep }
+  }, [layout, supplementalKey]) // eslint-disable-line react-hooks/exhaustive-deps
+  const edges = flows.filter((edge) => network.routes[roadKey(edge)] && roadVisible(edge, discoveredRoads))
+  const flowsByKey = new Map(edges.map((edge) => [roadKey(edge), edge]))
+  const visibleUses = new Map<string, StreetUse>([...known, ...supplemental].filter((call) => roadVisible(call, discoveredRoads))
+    .map((call) => [roadKey(call), { call, edge: flowsByKey.get(roadKey(call)) }]))
+  for (const { call } of previews) if (!visibleUses.has(roadKey(call))) visibleUses.set(roadKey(call), { call, preview: true })
+  const visibleKeys = [...visibleUses.keys()].sort().join(',')
+  const highwayZ = network.segments.reduce((z, segment) => segment.highway && segment.calls.some((key) => visibleUses.has(key))
+    ? Math.max(z, segment.points[0].z + HIGHWAY_WIDTH) : z, layout.core.z1)
+  const cameraLayout = { ...layout, core: { ...layout.core, z1: highwayZ } }
+  const visibleLamps = useMemo(() => lamps.filter(({ calls }) => calls.some((key) => visibleUses.has(key)))
+    .flatMap(({ points }) => points), [lamps, visibleKeys]) // eslint-disable-line react-hooks/exhaustive-deps
   const related = new Set(flows.filter((e) => e.from === selected || e.to === selected).flatMap((e) => [e.from, e.to]))
   const focus = !selected ? null : selected === 'city-hall' ? layout.hall?.center ?? null
     : selected.startsWith('node:') ? layout.stations[selected.slice(5)]?.center ?? null : layout.lots[selected]?.center ?? null
@@ -969,9 +1049,12 @@ export function City({ cluster, selected, onSelect, powerGrid, theme, onHover, s
       <Ground layout={layout} theme={theme} />
       {ready && <Scenery core={layout.core} districts={layout.districts} obstacles={obstacles} keep={keep} theme={theme} />}
       {ready && <Lamps points={visibleLamps} theme={theme} />}
-      {[...edges.map((edge) => ({ call: edge, edge })), ...remembered.filter(pathFor).map((call) => ({ call, edge: undefined }))].map(({ call, edge }) => (
-        <Road key={roadKey(call)} pts={pathFor(call)} call={call} edge={edge} theme={theme} onHover={onHover}
-          emphasis={!selected ? 'normal' : call.from === selected || call.to === selected ? 'strong' : 'dim'} />
+      {network.segments.map(({ key, points, calls, highway }) => {
+        const uses = calls.flatMap((id) => visibleUses.get(id) ?? [])
+        return uses.length > 0 && <Road key={key} pts={points} uses={uses} highway={highway} selected={selected} theme={theme} onHover={onHover} />
+      })}
+      {network.roundabouts.filter(({ calls }) => calls.some((key) => visibleUses.has(key))).map((junction) => (
+        <RoundaboutMesh key={junction.key} center={junction.center} theme={theme} />
       ))}
       {nodes.map((n) => layout.stations[n.metadata.name] && (
         <PowerStation key={n.metadata.uid} node={n} pos={layout.stations[n.metadata.name].center} used={podsOn(n.metadata.name)}
@@ -1000,10 +1083,21 @@ export function City({ cluster, selected, onSelect, powerGrid, theme, onHover, s
             claims={claims.filter((c) => c.metadata.namespace === dep.metadata.namespace && c.metadata.labels?.app === dep.metadata.name)} />
         )
       })}
+      {usesDepot && <group position={layout.lots[DEMO_DEPOT].center}>
+        <Pad w={14} d={12} r={2} position={[0, 0.008, 0]} color={theme.district} />
+        <mesh position-y={1.9} castShadow><boxGeometry args={[9, 3.8, 7]} /><meshStandardMaterial color="#92735e" /></mesh>
+        <mesh position-y={3.9} castShadow><boxGeometry args={[10, 0.35, 8]} /><meshStandardMaterial color="#4b5563" /></mesh>
+        <Tag theme={theme} position={[0, 6, 0]} border={theme.roadGlow} lines={[{ text: 'Demo depot', px: 48, color: theme.labelFg }]} />
+      </group>}
+      {previews.map(({ call, count }) => {
+        const key = roadKey(call), road = network.routes[key]
+        return road && <Traffic key={`preview:${key}:${cluster.demoPackets?.reset}`} edge={{ ...call, rps: 0, healthy: true }}
+          road={road} theme={theme} accent="#d6a53b" onHover={onHover} endpoints={[]} paused={false} liveMode={false} previewCount={count} />
+      })}
       {edges.map((e) => {
         if (replay && !e.measured) return null // replaying history: only routes with recorded traffic get Cars
         // A Car wears its caller's colour (customers: yellow taxis); how its request went shows at the door.
-        return <Traffic key={roadKey(e)} edge={e} road={pathFor(e)} theme={theme} onHover={onHover}
+        return <Traffic key={roadKey(e)} edge={e} road={network.routes[roadKey(e)]} theme={theme} onHover={onHover}
           accent={e.from.startsWith('ingress:') ? CUSTOMER : landmarkFor(nameOf(e.from)).accent} endpoints={endpoints(e.to)} paused={trafficPaused} liveMode={typeof cluster.context === 'string'} />
       })}
       {mode === 'iso'
@@ -1013,7 +1107,7 @@ export function City({ cluster, selected, onSelect, powerGrid, theme, onHover, s
           touches={{ ONE: THREE.TOUCH.PAN, TWO: THREE.TOUCH.DOLLY_PAN }} />
         // 3D: drag orbits, right-drag pans, wheel zooms; the camera never goes below the ground.
         : <OrbitControls key="controls-3d" makeDefault maxPolarAngle={Math.PI / 2.15} minDistance={10} maxDistance={170} />}
-      <CameraRig focus={focus} layout={layout} homeTick={homeTick} mode={mode} />
+      <CameraRig focus={focus} layout={cameraLayout} homeTick={homeTick} mode={mode} />
     </Canvas>
   )
 }

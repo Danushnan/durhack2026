@@ -35,6 +35,7 @@ export function reduceWatchMessage(previous: ClusterState, data: unknown, receiv
         if (state.awaitingSnapshot || changed) {
           objects = {}; state.edges = []; state.stale = undefined
           state.awaitingSnapshot = false
+          state.demoPackets = undefined
         }
         if (changed || context === null) {
           state.metrics = undefined; state.metricsReceivedAt = undefined; state.metricsStale = false; state.metricsError = undefined
@@ -51,6 +52,17 @@ export function reduceWatchMessage(previous: ClusterState, data: unknown, receiv
         if (!previous.awaitingSnapshot && state.metrics?.source_id === event.source_id && Date.parse(event.observed_at) < Date.parse(state.metrics.observed_at)) break
         state.metrics = event; state.metricsReceivedAt = receivedAt; state.metricsStale = false; state.metricsError = undefined
         receivedMetrics = true
+        break
+      case 'DEMO_PACKETS': {
+        if (typeof event.count !== 'number' || !Number.isInteger(event.count) || event.count < 1 || event.count > 100 ||
+          typeof event.cross_district !== 'boolean') break
+        const demo = state.demoPackets ?? { cars: 0, lorries: 0, reset: 0 }
+        const vehicle = event.cross_district ? 'lorries' : 'cars'
+        state.demoPackets = { ...demo, [vehicle]: demo[vehicle] + event.count }
+        break
+      }
+      case 'DEMO_PACKETS_RESET':
+        state.demoPackets = { cars: 0, lorries: 0, reset: (state.demoPackets?.reset ?? 0) + 1 }
         break
       case 'TRAFFIC':
         if (Array.isArray(event.edges) && event.edges.every(edgeGuard)) {
