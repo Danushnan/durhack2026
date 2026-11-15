@@ -11,6 +11,7 @@ import hashlib
 import json
 import logging
 import math
+import re
 import threading
 
 
@@ -20,6 +21,7 @@ COMPONENTS = {
     "payment-api": "http_server", "postgres": "unsupported", "redis": "unsupported",
 }
 logger = logging.getLogger(__name__)
+TIMESTAMP_FRACTION = re.compile(r"\.([0-9]+)(?=Z$|[+-][0-9]{2}:[0-9]{2}$)")
 
 
 def iso(timestamp):
@@ -29,7 +31,10 @@ def iso(timestamp):
 def epoch(value):
     if not isinstance(value, str):
         raise ValueError("timestamp must be a string")
-    parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    # Kubernetes logs carry up to nine fractional digits. Python 3.10 accepts
+    # only three or six, so normalize the precision for datetime parsing.
+    normalized = TIMESTAMP_FRACTION.sub(lambda match: "." + match[1][:6].ljust(6, "0"), value)
+    parsed = datetime.fromisoformat(normalized.replace("Z", "+00:00"))
     if parsed.utcoffset() is None:
         raise ValueError("timestamp must include timezone")
     return parsed.timestamp()

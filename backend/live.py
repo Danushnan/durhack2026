@@ -29,6 +29,7 @@ def kubectl(*args):
 class LiveCluster:
     def __init__(self, context):
         self.context = context
+        self.resource_namespace = os.getenv("KUBEVERSE_RESOURCE_NAMESPACE")
         self.objects = {}
         self.edges = []
         self.traffic_namespaces = set()
@@ -54,10 +55,13 @@ class LiveCluster:
         return self.refresh_resources() + self.collect_logs() + self.update_traffic()
 
     def refresh_resources(self):
+        if self.resource_namespace:
+            # Restrict public observers to resources readable by a namespaced Role.
+            scope = ("deployments,replicasets,pods,services,events", "--namespace", self.resource_namespace)
+        else:
+            scope = ("namespaces,nodes,deployments,replicasets,pods,services,events", "--all-namespaces")
         raw = kubectl(
-            "--context", self.context, "--request-timeout=5s", "get",
-            "namespaces,nodes,deployments,replicasets,pods,services,events",
-            "--all-namespaces", "-o", "json",
+            "--context", self.context, "--request-timeout=5s", "get", *scope, "-o", "json",
         )
         resources = json.loads(raw)["items"]
         self.traffic_namespaces = {
