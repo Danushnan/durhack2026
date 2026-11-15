@@ -1,6 +1,7 @@
 """Local-only MiniShop operator. Run one uvicorn worker; disabled unless explicitly enabled."""
 import asyncio
 import ipaddress
+import json
 import os
 import subprocess
 import time
@@ -39,7 +40,7 @@ class Settings:
 
 class Start(BaseModel):
     model_config = ConfigDict(extra='forbid')
-    rps: float = Field(default=1, ge=.2, le=2, allow_inf_nan=False)
+    rps: float = Field(default=1, ge=.2, le=20, allow_inf_nan=False)
     requests: int = Field(default=100, ge=5, le=300, strict=True)
 
 
@@ -58,7 +59,7 @@ class Action(BaseModel):
 class Controller:
     def __init__(self, settings):
         self.settings = settings
-        self.traffic = Traffic(settings.base)
+        self.traffic = Traffic(settings.base, self.refusal_target, self.show_refusal)
         self.task = None
         self.operation = None
         self.verified = None
@@ -83,7 +84,6 @@ class Controller:
         await asyncio.to_thread(run)
 
     async def inspect(self):
-        import json
         deployments = {}
         config = json.loads(await self.command('get', 'configmap', 'minishop-config', '-o', 'json')).get('data', {})
         for name in ('payment-api', 'checkout-api'):
@@ -112,6 +112,26 @@ class Controller:
                 'rejection': (payment['env'].get('PAYMENT_FAIL') or 'false').lower() == 'true',
                 'payment_ready': payment['ready'], 'checkout_ready': deployments['checkout-api']['ready'],
                 'checkout_replicas': deployments['checkout-api']['replicas'], 'checked_at': time.time()}
+
+    async def refusal_target(self, path):
+        upstream = {'products': 'product-api', 'carts': 'cart-api', 'checkout': 'checkout-api'}[path.split('/')[2]]
+        pods = json.loads(await self.command('get', 'pods', '-l', f'app in (minishop-web,{upstream})', '-o', 'json'))
+        ready = {
+            pod['metadata'].get('labels', {}).get('app') for pod in pods['items']
+            if not pod['metadata'].get('deletionTimestamp') and
+            any(c['type'] == 'Ready' and c['status'] == 'True' for c in pod.get('status', {}).get('conditions', []))
+        }
+        if 'minishop-web' not in ready:
+            return 'demo-transit/depot', 'minishop/minishop-web'
+        if upstream not in ready:
+            return 'minishop/minishop-web', f'minishop/{upstream}'
+        return None
+
+    async def show_refusal(self, source, target):
+        async with httpx.AsyncClient(timeout=5, follow_redirects=False) as client:
+            response = await client.post(self.settings.city + '/api/demo/packets/refusal',
+                                         json={'source': source, 'target': target, 'context': self.settings.context})
+            response.raise_for_status()
 
     def start_action(self, body):
         if self.task and not self.task.done():

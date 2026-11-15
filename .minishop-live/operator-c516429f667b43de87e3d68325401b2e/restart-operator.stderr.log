@@ -1,0 +1,6 @@
+INFO:     Started server process [38884]
+INFO:     Waiting for application startup.
+INFO:     Application startup complete.
+INFO:     Uvicorn running on http://127.0.0.1:8090 (Press CTRL+C to quit)
+C:\Users\shaar\OneDrive\Desktop\durhack2026\.minishop-live\operator-c516429f667b43de87e3d68325401b2e\.venv\Lib\site-packages\fastapi\openapi\utils.py:295: UserWarning: Duplicate Operation ID storefront_api__path__post for function storefront at C:\Users\shaar\OneDrive\Desktop\durhack2026\.minishop-live\operator-c516429f667b43de87e3d68325401b2e\demo_control\app.py
+  warnings.warn(message, stacklevel=1)

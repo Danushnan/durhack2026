@@ -1,3 +1,4 @@
+import { JourneyPanel, useJourney } from './Journey'
 import { useEffect, useRef, useState } from 'react'
 import { City, type HoverInfo, type RoadFlow, type ServiceState, type ViewMode } from './City'
 import { affected, describeFlow, ERROR_RATE, overview, serviceFlow, SIGNAL, type Signal, signalOf, SLOW_MS } from './health'
@@ -35,6 +36,7 @@ export default function App() {
   const routes = telemetry.status === 'ready' ? Object.fromEntries(telemetry.routes.map((row) => [routeKey(row.caller, row.service), row])) : {}
   const [toast, setToast] = useState<string | null>(null)
   const source = cluster.metrics?.source_id ?? cluster.context
+  const journey = useJourney(cluster.metrics?.source_id)
   const previousSource = useRef(source)
   useEffect(() => {
     if (previousSource.current !== undefined && previousSource.current !== source) {
@@ -93,7 +95,12 @@ export default function App() {
   const outages = nodes.filter((n) => !nodeReady(n))
   const live = typeof cluster.context === 'string'
   const [discovery, setDiscovery] = useState<RoadDiscovery | null>(null)
-  useEffect(() => { setDiscovery((current) => updateDiscovery(current, cluster)) }, [cluster])
+  useEffect(() => { setDiscovery((current) => {
+    const updated = updateDiscovery(current, cluster)
+    if (updated) return updated
+    return cluster.metrics?.services.some(({ deployment_uid }) => deployment_uid && cluster.objects[deployment_uid])
+      ? startDiscovery(cluster.metrics.source_id, Date.now()) : null
+  }) }, [cluster])
   const activeDiscovery = discovery?.source === cluster.metrics?.source_id ? discovery : null
   const miniShopSource = activeDiscovery?.source ??
     (cluster.metrics?.services.some(({ deployment_uid }) => deployment_uid && cluster.objects[deployment_uid])
@@ -108,6 +115,10 @@ export default function App() {
     <div className={`app ${mode}`}>
       <City cluster={cluster} selected={selected} onSelect={setSelected} powerGrid={powerGrid} theme={theme}
         onHover={setHover} states={states} homeTick={homeTick} flows={flows} districtColors={districtColors} replay={simulatorSource && replayAt !== null} mode={view}
+        journeyActive={journey.enabled && !!miniShopSource}
+        journeyPlaybackKey={`${journey.journey?.action_id}:${journey.step}:${journey.replayTick}`}
+        journeyServices={journey.enabled && journey.journey?.state !== 'ambiguous' ? journey.journey?.steps.flatMap(step => [step.from_service, step.to_service].filter((key): key is string => !!key)) : undefined}
+        journeyStep={journey.enabled && journey.journey && journey.journey.source === miniShopSource && journey.journey.state !== 'ambiguous' ? journey.journey.steps[journey.step] : undefined}
         discoveredRoads={activeDiscovery?.roads}
         trafficPaused={live && (!cluster.connected || !!cluster.awaitingSnapshot || !!cluster.stale || !!cluster.metricsStale ||
           !!cluster.metricsError || (!!activeDiscovery && !discoveryReady(cluster)))} />
@@ -147,7 +158,6 @@ export default function App() {
       </nav>
 
       {miniShopSource && <section className="hud discovery-controls" aria-label="MiniShop roads">
-        <button type="button" aria-pressed={!activeDiscovery} onClick={() => { setDiscovery(null); setHover(null) }}>Architecture</button>
         <button type="button" aria-pressed={!!activeDiscovery} onClick={() => { if (!activeDiscovery) beginDiscovery() }}>Discovery</button>
         {activeDiscovery && <>
           <button type="button" onClick={beginDiscovery}>Reset Discovery</button>
@@ -158,6 +168,13 @@ export default function App() {
           </span>
         </>}
       </section>}
+
+      {miniShopSource && <section className="hud journey-controls" aria-label="Activity view">
+        <button aria-pressed={!journey.enabled} onClick={() => journey.setEnabled(false)}>Traffic</button>
+        <button aria-pressed={journey.enabled} onClick={() => journey.setEnabled(true)}>Journey</button>
+        {!journey.enabled && <span>Cars illustrate aggregate service activity.</span>}
+      </section>}
+      {miniShopSource && journey.enabled && <JourneyPanel controller={journey} />}
 
       {live ? <>
         <LiveIncidentBanner deployments={deployments} views={liveViews} onPick={setSelected} />
@@ -303,7 +320,7 @@ function Help({ live, onClose }: { live: boolean; onClose: () => void }) {
         <li>🌐 The <b>City Gate</b> is an Ingress: customers from the internet enter there and go to the frontend.</li>
         <li>🏛️ <b>City Hall</b> is the control plane. Glowing <b>messengers</b> fly out for each decision; their colour says which part decided.</li>
         <li>🛢️ {live ? 'MiniShop uses PostgreSQL and Redis Deployments with persistent volumes; HTTP metrics do not apply to those stores.' : <><b>Storage tanks</b> beside the Archive are its volumes: this simulated database is a <b>StatefulSet</b>, so its data outlives its Pods.</>}</li>
-        <li>🚗 <span className="amber">Orange</span> illustrates HTTP response errors, including business rejections; <span className="red">red</span> illustrates calls with no HTTP answer. Neither proves a root cause.</li>
+        <li>🚗 A burst marks a failed request at the door. A <span className="red">glowing red</span> vehicle carries the failure back to the caller.</li>
         <li>🎨 A Unit's cap colour is its <b>version</b> when supplied by the source. Pod flashes illustrate distribution across Ready units.</li>
       </ul>
       <h3>How Kubernetes thinks</h3>
@@ -680,8 +697,7 @@ function Legend({ live, districtColors, onClose }: { live: boolean; districtColo
       <h3>Cars · requests</h3>
       <div>Aggregate activity illustration, not request-level traces. Car count, travel time and Pod flashes are illustrative.</div>
       <div>🚕 Yellow taxis are customers; other Cars wear their caller's colour.</div>
-      <div><i style={{ background: SIGNAL.errors.color }} />Comes back orange: answered with an error.</div>
-      <div><i style={{ background: SIGNAL.refused.color }} />Comes back red: refused, nobody answered.</div>
+      <div><i style={{ background: SIGNAL.refused.color }} />Failed requests burst at the door and return in a glowing red vehicle.</div>
       <div>🔴 Brake lights: slowing, or queuing behind the Car ahead.</div>
     </aside>
   )

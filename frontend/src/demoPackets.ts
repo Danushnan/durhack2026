@@ -4,7 +4,7 @@ import { crossesDistricts } from './streetNetwork.ts'
 export const DEMO_DEPOT = 'demo-transit/depot'
 
 export interface DemoPackets {
-  routes: Record<string, { call: Call; count: number }>
+  routes: Record<string, { call: Call; count: number; refused?: boolean }>
   last: { local?: Call; cross?: Call }
   reset: number
 }

@@ -49,7 +49,6 @@ const ISO_RIGHT = new THREE.Vector3(1, 0, -1).normalize(), ISO_UP = new THREE.Ve
 const TAG_SCALE = 1 / (2 * Math.tan(Math.PI / 8)) // keeps tags the size they had under the old 45° perspective camera
 /** A pan that ends over a Building must not also select it. */
 const dragged = (e: ThreeEvent<MouseEvent>) => e.delta > 4
-const ORANGE = SIGNAL.errors.color // an error response: the service answered, but could not do the job
 /** A Building's size follows its desired replica count: small when asked for 0, half again as big at 10. */
 export const sizeFor = (replicas: number) => 0.75 + 0.075 * Math.max(0, Math.min(10, replicas))
 const AMBER = '#f59e0b'
@@ -552,8 +551,8 @@ function PowerStation({ node, pos, used, color, theme, onHover, selected, onSele
 
 // ---------- Cars ----------
 
-// Shared alpha texture keeps the lorry glow independent of lighting and post-processing.
-const lorryGlow = (() => {
+// Shared alpha texture for lorry markers and refusal flashes.
+const softGlow = (() => {
   const size = 32, pixels = new Uint8Array(size * size * 4)
   for (let y = 0; y < size; y++) {
     for (let x = 0; x < size; x++) {
@@ -568,22 +567,52 @@ const lorryGlow = (() => {
   return texture
 })()
 
+/** A flash and sparks at the door while the failed vehicle is hidden. */
+function RefusalBurst({ position, started }: { position: THREE.Vector3; started: { current: number } }) {
+  const group = useRef<THREE.Group>(null)
+  const flash = useRef<THREE.Sprite>(null)
+  const sparks = useRef<(THREE.Mesh | null)[]>([])
+  useFrame(({ clock }) => {
+    if (!group.current || !flash.current) return
+    const t = (clock.elapsedTime - started.current) / DRIVE.burst
+    group.current.visible = t >= 0 && t < 1
+    if (!group.current.visible) return
+    const spread = 1 - (1 - t) ** 2
+    flash.current.scale.setScalar(3.4 + spread * 5)
+    flash.current.material.opacity = 1 - t
+    sparks.current.forEach((spark, i) => {
+      if (!spark) return
+      const angle = i * 2 * Math.PI / sparks.current.length
+      const radius = (2 + 0.55 * (i % 3)) * spread
+      spark.position.set(Math.cos(angle) * radius, Math.sin(Math.PI * t) * (0.9 + i % 3 * 0.35), Math.sin(angle) * radius)
+      spark.scale.setScalar(1 - t)
+    })
+  })
+  return <group ref={group} position={position} visible={false}>
+    <sprite ref={flash} renderOrder={12} raycast={() => {}}>
+      <spriteMaterial map={softGlow} color="#ff6622" transparent depthTest={false} depthWrite={false} toneMapped={false} fog={false} />
+    </sprite>
+    {Array.from({ length: 12 }, (_, i) => <mesh key={i} ref={(m) => { sparks.current[i] = m }} renderOrder={13} raycast={() => {}}>
+      <octahedronGeometry args={[0.34]} />
+      <meshBasicMaterial color={i % 2 ? '#ff3b1f' : '#fff3a0'} transparent depthTest={false} depthWrite={false} toneMapped={false} fog={false} />
+    </mesh>)}
+  </group>
+}
+
 /**
  * Cars are independent drivers (see traffic.ts): they pull out of the caller as requests arrive, follow
- * the Car ahead, slow for bends, and at the callee's door are served, refused (red) or answered with an
- * error (orange). Fate is decided on arrival, from the live state, so Cars already on the road react to failures.
+ * the Car ahead and slow for bends. Fate is decided on arrival, from the live state.
  */
-function Traffic({ edge, road, theme, accent, onHover, endpoints, paused, liveMode, previewCount, districtColors }: {
+function Traffic({ edge, road, theme, accent, onHover, endpoints, unavailable, paused, liveMode, previewCount, districtColors }: {
   edge: RoadFlow; road: StreetRoute; theme: Theme; accent: string; onHover: OnHover
   districtColors: ReadonlyMap<string, string>
+  unavailable: boolean
   endpoints: string[]; paused: boolean; liveMode: boolean; previewCount?: number // Pod flashes illustrate distribution, not observed request routing
 }) {
   const lorry = crossesDistricts(edge)
   const sourceDistrict = districtOf(edge.from), destinationDistrict = districtOf(edge.to)
-  const originHue = districtColors.get(sourceDistrict), destinationHue = districtColors.get(destinationDistrict)
-  const lorryColors = useMemo(() => ({
-    outbound: new THREE.Color(destinationHue ?? '#ffffff'), inbound: new THREE.Color(originHue ?? destinationHue ?? '#ffffff'),
-  }), [originHue, destinationHue])
+  const destinationHue = districtColors.get(destinationDistrict)
+  const destinationColor = useMemo(() => new THREE.Color(destinationHue ?? '#ffffff'), [destinationHue])
   const signals = useRef<(THREE.MeshBasicMaterial | null)[]>([])
   const halos = useRef<(THREE.SpriteMaterial | null)[]>([])
   const length = lorry ? 2.4 : DRIVE.length
@@ -596,15 +625,20 @@ function Traffic({ edge, road, theme, accent, onHover, endpoints, paused, liveMo
   targets.current = endpoints
   const trips = useMemo(() => {
     const ok = new Path(carTrip(road.outbound, false)), back = new Path(carTrip(road.outbound, true, road.inbound))
-    return { ok, back, trip: { okLength: ok.length, backLength: back.length, door: Math.max(0, ok.length - CAR_GROW), vehicleLength: length,
+    const door = Math.max(0, ok.length - CAR_GROW), burstAt = new THREE.Vector3()
+    ok.at(door, burstAt)
+    burstAt.y = 0.85
+    return { ok, back, burstAt, trip: { okLength: ok.length, backLength: back.length, door, vehicleLength: length,
       limitOk: bendLimit(ok.pts, GRIP), limitBack: bendLimit(back.pts, GRIP) } }
   }, [road, length])
   const cars = useRef<CarAgent[]>([])
+  const burstStarted = useRef(-Infinity)
   const credit = useRef(0) // requests waiting to leave as a Car
   useLayoutEffect(() => {
     if (preview) dispatched.current -= cars.current.length
     cars.current = []
     credit.current = 0
+    burstStarted.current = -Infinity
   }, [preview, trips])
   const live = useRef(edge)
   live.current = edge
@@ -615,10 +649,10 @@ function Traffic({ edge, road, theme, accent, onHover, endpoints, paused, liveMo
   const hazards = useRef<(THREE.Group | null)[]>([])
   const brakes = useRef<(THREE.Group | null)[]>([])
   const tmp = useMemo(() => new THREE.Vector3(), [])
-  const colors = useMemo(() => ({ ok: new THREE.Color(accent), refused: new THREE.Color(RED), error: new THREE.Color(ORANGE) }), [accent])
+  const colors = useMemo(() => ({ outbound: new THREE.Color(accent), failed: new THREE.Color('#ff2424') }), [accent])
   useFrame(({ clock }, rawDt) => {
     if (pause.current) {
-      cars.current = []; credit.current = 0
+      cars.current = []; credit.current = 0; burstStarted.current = -Infinity
       groups.current.forEach((g) => { if (g) g.visible = false })
       return
     }
@@ -643,26 +677,40 @@ function Traffic({ edge, road, theme, accent, onHover, endpoints, paused, liveMo
       }
     }
     const steps = Math.ceil(dt * 60) // small steps keep the car-following stable
+    const outcomeRates = { refused: unavailable ? 1 : 0, error: preview ? 0 : rates(e).error }
     for (let k = 0; k < steps; k++) {
-      const r = stepCars(cars.current, dt / steps, now, trips.trip, rates(e))
-      if (!preview) for (let n = 0; n < r.served.length; n++) deliver(e.to, targets.current, now)
+      const r = stepCars(cars.current, dt / steps, now, trips.trip, outcomeRates)
+      if (r.bursts) burstStarted.current = now
+      if (!preview) {
+        for (let n = 0; n < r.served.length; n++) deliver(e.to, targets.current, now)
+      }
       cars.current = r.cars
     }
     const blink = Math.sin(now * 12) > 0
     groups.current.forEach((g, i) => {
       if (!g) return
       const car = cars.current.find((c) => c.slot === i)
-      g.visible = !!car
-      if (!car) return
+      g.visible = !!car && car.phase !== 'burst'
+      if (!car || car.phase === 'burst') return
       const trip = car.phase === 'back' ? trips.back : trips.ok
       g.rotation.y = trip.at(car.s, tmp)
       g.position.copy(tmp)
       g.scale.setScalar(1.15 * Math.max(0.01, Math.min(1, car.s / CAR_GROW, (trip.length - car.s) / CAR_GROW)))
-      paints.current[i]?.color.copy(car.fate ? colors[car.fate] : colors.ok)
-      if (lorry) {
-        const hue = car.phase === 'back' ? lorryColors.inbound : lorryColors.outbound
-        signals.current[i]?.color.copy(hue)
-        halos.current[i]?.color.copy(hue)
+      const returning = car.phase === 'back'
+      const paint = paints.current[i]
+      if (paint) {
+        paint.color.copy(returning ? colors.failed : colors.outbound)
+        paint.emissive.copy(colors.failed)
+        paint.emissiveIntensity = returning ? 1.6 : 0
+      }
+      const hue = returning ? colors.failed : destinationColor
+      signals.current[i]?.color.copy(hue)
+      const halo = halos.current[i]
+      if (halo) {
+        halo.color.copy(hue)
+        halo.opacity = returning ? 1 : lorry ? 0.92 : 0
+        halo.blending = returning ? THREE.NormalBlending : THREE.AdditiveBlending
+        halo.depthTest = !returning
       }
       if (hazards.current[i]) hazards.current[i]!.visible = !!car.fate && blink
       if (brakes.current[i]) brakes.current[i]!.visible = car.a < -1.5 || (car.v < 0.3 && car.phase !== 'in')
@@ -670,11 +718,12 @@ function Traffic({ edge, road, theme, accent, onHover, endpoints, paused, liveMo
   })
   const [src, dst] = [edge.from.startsWith('ingress:') ? 'customers' : nameOf(edge.from), nameOf(edge.to)]
   const night = theme.mode === 'night'
-  const story = (c?: CarAgent) => preview ? 'Illustrated packet from the Demo Control Centre.' : !c ? '' : c.fate === 'refused' ? 'Illustrates the aggregate share of calls with no HTTP answer.'
+  const story = (c?: CarAgent) => c?.fate === 'refused' ? 'Refused because the destination had zero Ready Pods.' : preview ? 'Illustrated packet from the Demo Control Centre.' : !c ? ''
     : c.fate === 'error' ? 'Illustrates HTTP response errors, including business rejections. This does not establish a root cause.'
       : 'Illustrates normalised aggregate activity; car count, travel time, queuing and Pod flashes are not request-level measurements.'
   return (
     <group>
+      <RefusalBurst position={trips.burstAt} started={burstStarted} />
       {Array.from({ length: poolSize }, (_, i) => (
         <group key={i} visible={false} ref={(g) => { groups.current[i] = g }}
           onPointerOver={(e) => {
@@ -696,8 +745,8 @@ function Traffic({ edge, road, theme, accent, onHover, endpoints, paused, liveMo
               <boxGeometry args={[1.64, 0.09, 0.94]} />
               <meshBasicMaterial ref={(m) => { signals.current[i] = m }} color={destinationHue} toneMapped={false} />
             </mesh>
-            <sprite position={[-0.36, 1.22, 0]} scale={[4.2, 3, 1]} raycast={() => {}}>
-              <spriteMaterial ref={(m) => { halos.current[i] = m }} map={lorryGlow} color={destinationHue}
+            <sprite position={[-0.36, 1.22, 0]} scale={[6, 4.6, 1]} renderOrder={10} raycast={() => {}}>
+              <spriteMaterial ref={(m) => { halos.current[i] = m }} map={softGlow} color={destinationHue}
                 blending={THREE.AdditiveBlending} transparent opacity={0.92} depthWrite={false} toneMapped={false} />
             </sprite>
             <mesh position={[0.78, 0.47, 0]} castShadow><boxGeometry args={[0.78, 0.64, 0.84]} /><meshStandardMaterial color={night ? '#64748b' : '#f8fafc'} /></mesh>
@@ -705,6 +754,10 @@ function Traffic({ edge, road, theme, accent, onHover, endpoints, paused, liveMo
           </> : <>
             <mesh position={[0, 0.3, 0]} castShadow><boxGeometry args={[1.1, 0.35, 0.6]} /><meshStandardMaterial ref={(m) => { paints.current[i] = m }} color={accent} /></mesh>
             <mesh position={[-0.1, 0.6, 0]}><boxGeometry args={[0.6, 0.3, 0.52]} /><meshStandardMaterial color={night ? '#0f172a' : '#e2e8f0'} /></mesh>
+            <sprite position={[0, 0.8, 0]} scale={[5.2, 4.2, 1]} renderOrder={10} raycast={() => {}}>
+              <spriteMaterial ref={(m) => { halos.current[i] = m }} map={softGlow} color={RED}
+                blending={THREE.AdditiveBlending} transparent opacity={0} depthWrite={false} toneMapped={false} />
+            </sprite>
           </>}
           {(lorry ? [-0.9, -0.52, 0.78] : [-0.32, 0.32]).map((x) => <mesh key={x} position={[x, 0.14, 0]}>
             <boxGeometry args={lorry ? [0.3, 0.3, 0.98] : [0.26, 0.26, 0.66]} /><meshStandardMaterial color="#111827" /></mesh>)}
@@ -1098,6 +1151,7 @@ export function City({ cluster, selected, onSelect, powerGrid, theme, onHover, s
     const dep = deployments.find((d) => keyOf(d) === service)
     return dep ? podsOf(dep, pods).filter((p) => !p.metadata.deletionTimestamp && p.status?.containerStatuses?.[0]?.ready).map((p) => p.metadata.uid) : []
   }
+  const unavailable = (service: string) => deployments.some((d) => keyOf(d) === service && (d.status?.readyReplicas ?? 0) === 0)
 
   return (
     <Canvas shadows onPointerMissed={() => onSelect(null)}>
@@ -1156,16 +1210,17 @@ export function City({ cluster, selected, onSelect, powerGrid, theme, onHover, s
         <Tag theme={theme} position={[0, 6, 0]} border={theme.roadGlow} lines={[{ text: 'Demo depot', px: 48, color: theme.labelFg }]} />
       </group>}
       <group visible={!journeyActive}>
-      {previews.map(({ call, count }) => {
+      {previews.map(({ call, count, refused }) => {
         const key = roadKey(call), road = network.routes[key]
-        return road && <Traffic key={`preview:${key}:${cluster.demoPackets?.reset}`} edge={{ ...call, rps: 0, healthy: true }}
-          road={road} theme={theme} districtColors={districtColors} accent="#d6a53b" onHover={onHover} endpoints={[]} paused={false} liveMode={false} previewCount={count} />
+        return road && <Traffic key={`preview:${key}:${!!refused}:${cluster.demoPackets?.reset}`} edge={{ ...call, rps: 0, healthy: true }}
+          road={road} theme={theme} districtColors={districtColors} accent="#d6a53b" onHover={onHover} endpoints={[]} unavailable={refused || unavailable(call.to)} paused={false} liveMode={false} previewCount={count} />
       })}
       {edges.map((e) => {
         if (replay && !e.measured) return null // replaying history: only routes with recorded traffic get Cars
         // A Car wears its caller's colour (customers: yellow taxis); how its request went shows at the door.
         return <Traffic key={roadKey(e)} edge={e} road={network.routes[roadKey(e)]} theme={theme} districtColors={districtColors} onHover={onHover}
-          accent={e.from.startsWith('ingress:') ? CUSTOMER : landmarkFor(nameOf(e.from)).accent} endpoints={endpoints(e.to)} paused={trafficPaused} liveMode={typeof cluster.context === 'string'} />
+          accent={e.from.startsWith('ingress:') ? CUSTOMER : landmarkFor(nameOf(e.from)).accent} endpoints={endpoints(e.to)}
+          unavailable={replay ? rates(e).refused === 1 : unavailable(e.to)} paused={trafficPaused} liveMode={typeof cluster.context === 'string'} />
       })}
       </group>
       {journeyActive && [...new Set(journeyServices)].flatMap(key => {

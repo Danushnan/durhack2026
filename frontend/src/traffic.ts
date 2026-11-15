@@ -6,8 +6,9 @@
  * or blocked service builds a real queue that ripples back up the Road. Each Car draws a number when
  * it leaves; against the callee's live refused and error rates that decides what happens at the door:
  *  - served  → it drives in and a ready Unit answers it;
- *  - error   → the service is Impacted: it stops at the door, waits, then comes back (orange);
- *  - refused → nobody is ready to answer: it U-turns at once and comes back (red).
+ *  - error   → the service answers with an error after a wait;
+ *  - refused → nobody is ready to answer, so the request fails immediately.
+ * Both failures burst at the door before returning.
  */
 
 export interface CarAgent {
@@ -16,7 +17,7 @@ export interface CarAgent {
   v0: number         // this driver's cruising speed
   a: number          // last acceleration (negative = braking: brake lights on)
   slot: number       // which pooled mesh draws it
-  phase: 'out' | 'in' | 'wait' | 'back'
+  phase: 'out' | 'in' | 'wait' | 'burst' | 'back'
   roll: number       // drawn when it leaves: below the refused rate it is refused, then errors, else served
   fate?: 'refused' | 'error'
   until: number      // when a waiting Car gets its error answer
@@ -39,6 +40,7 @@ export const DRIVE = {
   minGap: 0.9,     // bumper-to-bumper gap when stopped
   headway: 0.35,   // seconds of gap kept at speed
   wait: 1.1,       // seconds an Impacted service takes to answer with an error
+  burst: 0.65,     // seconds the explosion plays before the return starts
 }
 
 /** Intelligent Driver Model acceleration, for a gap to (and the speed of) whatever is ahead. */
@@ -88,17 +90,27 @@ export interface Rates { refused: number; error: number }
 const fateOf = (c: CarAgent, r: Rates) => (c.roll < r.refused ? 'refused' : c.roll < r.refused + r.error ? 'error' : undefined)
 
 /**
- * Advance every Car by dt. Returns the Cars that finished their trip this step (served ones were
- * delivered to the callee) and the Cars still driving.
+ * Advance every Car by dt and report new explosions and completed deliveries.
  */
 export function stepCars(cars: CarAgent[], dt: number, now: number, trip: Trip, rates: Rates) {
   const len = trip.vehicleLength ?? DRIVE.length
+  let bursts = 0
+  const burst = (car: CarAgent) => {
+    car.phase = 'burst'
+    car.until = now + DRIVE.burst
+    car.s = trip.door
+    car.v = 0
+    car.a = 0
+    bursts++
+  }
   // Outbound lane, front to back: everything not yet turned back, including Cars waiting at the door.
   let ahead: { s: number; v: number } | null = null
   for (const c of cars.filter((c) => c.phase !== 'back').sort((a, b) => b.s - a.s)) {
-    if (c.phase === 'wait') {
-      c.v = 0; c.a = 0
+    if (c.phase === 'burst') {
       if (now >= c.until) c.phase = 'back'
+    } else if (c.phase === 'wait') {
+      c.v = 0; c.a = 0
+      if (now >= c.until) burst(c)
     } else {
       // An Impacted service makes Cars stop at its door (IDM keeps minGap, so the line sits just past it);
       // a refused Car slows for the U-turn it is about to make.
@@ -108,7 +120,7 @@ export function stepCars(cars: CarAgent[], dt: number, now: number, trip: Trip, 
       const vAhead = ahead && ahead.s - c.s - len <= stopLine ? ahead.v : 0
       drive(c, dt, target(c, fate === 'refused' ? trip.limitBack : trip.limitOk), gap, vAhead)
       if (c.phase === 'out' && c.s >= trip.door) {
-        if (fate === 'refused') { c.phase = 'back'; c.fate = 'refused' }
+        if (fate === 'refused') { c.fate = 'refused'; burst(c) }
         else if (fate === 'error') { c.phase = 'wait'; c.fate = 'error'; c.until = now + DRIVE.wait; c.s = Math.min(c.s, trip.door); c.v = 0 }
         else c.phase = 'in'
       }
@@ -122,7 +134,7 @@ export function stepCars(cars: CarAgent[], dt: number, now: number, trip: Trip, 
     ahead = c
   }
   const done = cars.filter((c) => (c.phase === 'in' && c.s >= trip.okLength) || (c.phase === 'back' && c.s >= trip.backLength))
-  return { served: done.filter((c) => c.phase === 'in'), cars: cars.filter((c) => !done.includes(c)) }
+  return { bursts, served: done.filter((c) => c.phase === 'in'), cars: cars.filter((c) => !done.includes(c)) }
 }
 
 /**

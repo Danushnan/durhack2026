@@ -1,4 +1,4 @@
-import architecture from './architecture.json' with { type: 'json' }
+import architecture from '../../minishop/architecture.json' with { type: 'json' }
 import type { Call } from './layout.ts'
 import { roadKey } from './roadDiscovery.ts'
 

@@ -6,8 +6,10 @@ import httpx
 
 
 class Traffic:
-    def __init__(self, base):
+    def __init__(self, base, refusal_target=None, show_refusal=None):
         self.base = base
+        self.refusal_target = refusal_target
+        self.show_refusal = show_refusal
         self.task = None
         self.state = {"running": False, "attempted": 0, "failed": 0, "checkouts": 0, "last_status": None, "error": None}
 
@@ -64,8 +66,17 @@ class Traffic:
                             basket = True
                         self.state['error'] = None
                     except (httpx.HTTPError, ValueError, KeyError, TypeError) as exc:
-                        self.state['failed'] += 1
-                        self.state['error'] = f'{type(exc).__name__}: request unsuccessful'
+                        self.state['error'] = f'{type(exc).__name__}: storefront request failed'
+                        if self.refusal_target and (isinstance(exc, httpx.RequestError) or
+                                isinstance(exc, httpx.HTTPStatusError) and exc.response.status_code in (502, 503, 504)):
+                            try:
+                                route = await self.refusal_target(path)
+                                if route:
+                                    self.state['failed'] += 1
+                                    if self.show_refusal:
+                                        await self.show_refusal(*route)
+                            except (RuntimeError, httpx.HTTPError, ValueError):
+                                self.state['error'] += '; could not verify Ready pods or notify the map'
                     finally:
                         if '/checkout/' in path:
                             # Never replay an ambiguous checkout with a fresh key.

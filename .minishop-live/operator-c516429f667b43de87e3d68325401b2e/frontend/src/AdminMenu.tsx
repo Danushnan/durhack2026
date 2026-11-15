@@ -74,17 +74,19 @@ export function AdminMenu() {
           </div>
         </section>
         <section className="operator-card"><span className="operator-step">01 / Activity</span><h2>Traffic generation</h2><p>Real product browsing, baskets and checkout. One worker; at most 300 requests, 20 checkout attempts and five minutes per run.</p>
-          <label htmlFor="traffic-rate">Maximum storefront requests per second</label><select id="traffic-rate" value={rate} onChange={e=>setRate(e.target.value)}><option value="0.2">Gentle · 0.2/s</option><option value="1">Presentation · 1/s</option><option value="2">Busy · 2/s</option></select>
+          <label htmlFor="traffic-rate">Maximum storefront requests per second</label><select id="traffic-rate" value={rate} onChange={e=>setRate(e.target.value)}><option value="0.2">Gentle · 0.2/s</option><option value="1">Presentation · 1/s</option><option value="2">Busy · 2/s</option><option value="20">20/s</option></select>
           <div className="operator-buttons"><button disabled={!status||running||status.traffic.running} onClick={()=>void run('traffic/start',{rps:Number(rate),requests:100})}>Start traffic</button><button className="secondary" disabled={!status||busy} onClick={()=>void run('traffic/stop')}>Stop traffic</button></div>
           <dl className="operator-counters"><div><dt>Status</dt><dd>{status?status.traffic.running?'Running':'Stopped':'Unknown'}</dd></div><div><dt>Attempted</dt><dd>{status?.traffic.attempted??'—'}</dd></div><div><dt>Unsuccessful</dt><dd>{status?.traffic.failed??'—'}</dd></div></dl>
-          <p className="operator-note">Counters count storefront HTTP attempts, not individual traced requests. Unsuccessful includes HTTP 402 and network errors. Checkout attempts: {status?.traffic.checkouts??'—'}. Last HTTP status: {status?.traffic.last_status??'—'}.</p>
+          <p className="operator-note">Unsuccessful counts storefront attempts refused with zero Ready pods on the serving route. Checkout attempts: {status?.traffic.checkouts??'—'}. Last HTTP status: {status?.traffic.last_status??'—'}.</p>
           {status?.traffic.error&&<p role="alert" className="operator-error">{status.traffic.error}</p>}
         </section>
         <section className="operator-card"><span className="operator-step">02 / Experiments</span><h2>Payments</h2><p>Change the real payment Deployment configuration. Success is shown only after rollout and configuration verification.</p>
           <h3>Latency</h3><p>Verified delay: <strong>{fault?`${fault.delay_ms} ms`:'Not checked'}</strong></p>
           <div className="operator-buttons"><button disabled={!status||running} onClick={()=>action('slowdown')}>Introduce 2,000 ms delay</button><button className="secondary" disabled={!status||running} onClick={()=>action('restore-delay')}>Restore normal delay</button></div>
-          <h3>Test-payment rejection</h3><p>Verified setting: <strong>{fault?fault.rejection?'Rejections enabled':'Accepting payments':'Not checked'}</strong>. A rejection produces HTTP 402 and an unsuccessful checkout, not a crashed pod or HTTP 5xx.</p>
+          <p className="operator-note">The delay adds two seconds to payment processing. A successful payment still completes, and KubeVerse shows it as slow traffic.</p>
+          <h3>Test-payment rejection</h3><p>Verified setting: <strong>{fault?fault.rejection?'Rejections enabled':'Accepting payments':'Not checked'}</strong>. A declined checkout returns HTTP 402.</p>
           <div className="operator-buttons"><button className="secondary" disabled={!status||running} onClick={()=>action('reject')}>Enable rejection</button><button className="secondary" disabled={!status||running} onClick={()=>action('accept')}>Disable rejection</button></div>
+          <p className="operator-note">To see the explosion and red return in KubeVerse, enable rejection, wait for rollout verification, then run a checkout or start storefront traffic.</p>
         </section>
         <section className="operator-card"><span className="operator-step">03 / Kubernetes</span><h2>Checkout replicas</h2><p>Only <code>minishop/checkout-api</code> can be scaled, from one to three replicas. No arbitrary commands or namespaces.</p>
           <label htmlFor="checkout-replicas">Desired replicas</label><select id="checkout-replicas" value={replicas} onChange={e=>setReplicas(e.target.value)}>{[1,2,3].map(n=><option key={n} value={n}>{n}</option>)}</select>

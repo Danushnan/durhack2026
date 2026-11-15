@@ -40,6 +40,32 @@ test('refused Cars turn back at the door', () => {
   assert.ok(r.cars.every((c) => c.phase === 'out' || c.fate === 'refused'))
 })
 
+for (const fate of ['refused', 'error'] as const) {
+  test(`a request with outcome ${fate} bursts once at the door before returning`, () => {
+    const trip = straight(40)
+    const car = newCar(0, () => 0.5)
+    const rates = { refused: Number(fate === 'refused'), error: Number(fate === 'error') }
+    const step = (now: number) => stepCars([car], 1 / 60, now, trip, rates)
+    assert.equal(step(0).bursts, 0)
+    car.s = trip.door - 0.01
+    let burstAt = 1
+    const arrival = step(burstAt)
+    if (fate === 'error') {
+      assert.equal(arrival.bursts, 0)
+      assert.equal(car.phase, 'wait')
+      burstAt += DRIVE.wait
+    }
+    assert.equal((fate === 'error' ? step(burstAt) : arrival).bursts, 1)
+    assert.equal(car.phase, 'burst')
+    assert.equal(car.s, trip.door)
+    assert.equal(step(burstAt + DRIVE.burst / 2).bursts, 0)
+    assert.equal(car.phase, 'burst')
+    assert.equal(step(burstAt + DRIVE.burst).bursts, 0)
+    assert.equal(car.phase, 'back')
+    assert.equal(car.fate, fate)
+  })
+}
+
 test('Cars slow down for bends', () => {
   // A quarter circle of radius 2, then a straight: grip 10 allows sqrt(10 * 2) ≈ 4.5 in the bend.
   const arc = Array.from({ length: 9 }, (_, i) => ({ x: 2 * Math.sin((i / 8) * Math.PI / 2), z: 2 - 2 * Math.cos((i / 8) * Math.PI / 2) }))
@@ -124,7 +150,7 @@ test('MiniShop: no Road runs through another Building', async () => {
   assert.deepEqual(failures, [])
 })
 
-test('partial error rates: about that share of Cars come back orange', () => {
+test('partial error rates: about that share of Cars come back with an error', () => {
   let cars: CarAgent[] = [], seed = 1, n = 0, errors = 0, served = 0
   const rand = () => ((seed = (seed * 16807) % 2147483647) / 2147483647)
   for (let t = 0; t < 120; t += 1 / 60) {

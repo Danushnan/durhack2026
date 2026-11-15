@@ -1,7 +1,8 @@
 """Operator tests never invoke kubectl or mutate a cluster."""
 import asyncio
+import json
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 from uuid import uuid4
 import time
 
@@ -29,7 +30,11 @@ def test_api_permissions_and_limits():
             assert (await c.post('/api/demo/actions', json={'action':'shell','command':'rm'})).status_code == 422
             assert (await c.post('/api/demo/actions', json={'action':'scale','replicas':4})).status_code == 422
             assert (await c.post('/api/demo/actions', json={'action':'scale','namespace':'other'})).status_code == 422
-            assert (await c.post('/api/demo/traffic/start', json={'rps':20})).status_code == 422
+            assert (await c.post('/api/demo/traffic/start', json={'rps':21})).status_code == 422
+            start = Mock(return_value=True)
+            app.state.control.traffic.start = start
+            assert (await c.post('/api/demo/traffic/start', json={'rps':20})).status_code == 200
+            start.assert_called_once_with(20, 100)
             assert (await c.post('/api/demo/traffic/start', json={'requests':301})).status_code == 422
         disabled = create_app(settings(False))
         async with httpx.AsyncClient(transport=httpx.ASGITransport(app=disabled, client=('127.0.0.1',123)), base_url='http://127.0.0.1') as c:
@@ -82,7 +87,7 @@ def test_traffic_real_paths_idempotency_counts_and_stop(monkeypatch):
         assert worker.task is original
         await worker.task
         assert len(paths) == worker.state['attempted'] == 5
-        assert worker.state['failed'] == 1
+        assert worker.state['failed'] == 0
         assert worker.state['checkouts'] == 1
         assert worker.state['running'] is False
         assert any('/carts/' in str(p.url) and p.method == 'POST' for p in paths)
@@ -94,6 +99,43 @@ def test_traffic_real_paths_idempotency_counts_and_stop(monkeypatch):
         assert len(paths) == count
         assert not worker.state['running']
         await worker.stop()
+    asyncio.run(run())
+
+
+def test_traffic_counts_and_displays_only_confirmed_pod_refusals(monkeypatch):
+    async def run():
+        real_client = httpx.AsyncClient
+        replies = iter([402, 502, 503])
+        transport = httpx.MockTransport(lambda _: httpx.Response(next(replies)))
+        monkeypatch.setattr('demo_control.traffic.httpx.AsyncClient', lambda **kw: real_client(**kw, transport=transport))
+        route = ('minishop/minishop-web', 'minishop/product-api')
+        verify = AsyncMock(side_effect=[None, route])
+        display = AsyncMock()
+        worker = Traffic('http://127.0.0.1:8080', verify, display)
+        worker.start(1000, 3)
+        await worker.task
+        assert worker.state['failed'] == 1
+        assert verify.await_count == 2
+        display.assert_awaited_once_with(*route)
+    asyncio.run(run())
+
+
+def test_refusal_target_requires_zero_ready_nonterminating_pods():
+    def pod(app, ready, deleting=False):
+        return {
+            'metadata': {'labels': {'app': app}, 'deletionTimestamp': 'now' if deleting else None},
+            'status': {'conditions': [{'type': 'Ready', 'status': 'True' if ready else 'False'}]},
+        }
+
+    async def run():
+        controller = Controller(settings())
+        web = pod('minishop-web', True)
+        controller.command = AsyncMock(return_value=json.dumps({'items': [
+            web, pod('product-api', False), pod('product-api', True, deleting=True),
+        ]}))
+        assert await controller.refusal_target('/api/products') == ('minishop/minishop-web', 'minishop/product-api')
+        controller.command.return_value = json.dumps({'items': [web, pod('product-api', True)]})
+        assert await controller.refusal_target('/api/products') is None
     asyncio.run(run())
 
 

@@ -155,6 +155,12 @@ class DemoPackets(BaseModel):
     cross_district: bool = Field(default=False, strict=True)
 
 
+class DemoRefusal(BaseModel):
+    source: str
+    target: str
+    context: str
+
+
 async def broadcast_demo(request: Request, event):
     # These commands change the illustration only and never enter the telemetry pipeline.
     local_hosts = {'localhost', '127.0.0.1', '::1'}
@@ -177,6 +183,12 @@ async def send_demo_packets(body: DemoPackets, request: Request):
 async def reset_demo_packets(request: Request):
     await broadcast_demo(request, {'type': 'DEMO_PACKETS_RESET'})
     return {'reset': True}
+
+
+@app.post('/api/demo/packets/refusal')
+async def show_demo_refusal(body: DemoRefusal, request: Request):
+    await broadcast_demo(request, {'type': 'DEMO_REFUSAL', **body.model_dump()})
+    return {'sent': 1}
 
 
 def require_simulator():

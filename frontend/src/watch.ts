@@ -71,6 +71,18 @@ export function reduceWatchMessage(previous: ClusterState, data: unknown, receiv
       case 'DEMO_PACKETS_RESET':
         state.demoPackets = { routes: {}, last: {}, reset: (state.demoPackets?.reset ?? 0) + 1 }
         break
+      case 'DEMO_REFUSAL': {
+        if (typeof state.context !== 'string' || event.context !== state.context ||
+          typeof event.source !== 'string' || typeof event.target !== 'string' || event.source === event.target) break
+        const demo = state.demoPackets ?? { routes: {}, last: {}, reset: 0 }
+        const key = `refused:${event.source}>${event.target}`
+        state.demoPackets = { ...demo, routes: { ...demo.routes, [key]: {
+          call: { from: event.source, to: event.target },
+          count: (demo.routes[key]?.count ?? 0) + 1,
+          refused: true,
+        } } }
+        break
+      }
       case 'TRAFFIC':
         if (Array.isArray(event.edges) && event.edges.every(edgeGuard)) {
           state.edges = event.edges

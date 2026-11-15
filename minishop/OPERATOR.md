@@ -45,7 +45,7 @@ All `/api/demo/*` routes require `MINISHOP_DEMO_ENABLED=1`, a loopback client, a
 | Endpoint | Method | Effect |
 |---|---|---|
 | `/api/demo/status` | GET | In-memory traffic counters, latest operation and timestamped verified configuration; no continuous Kubernetes health polling |
-| `/api/demo/traffic/start` | POST | `{rps:0.2..2, requests:5..300}`; defaults 1/s and 100. Repeated Start returns existing job rather than spawning another |
+| `/api/demo/traffic/start` | POST | `{rps:0.2..20, requests:5..300}`; defaults 1/s and 100. Repeated Start returns existing job rather than spawning another |
 | `/api/demo/traffic/stop` | POST | Cancel and await the sole generator; repeatable |
 | `/api/demo/packets` | POST | `{count:1..100, cross_district:boolean}` queues illustrated vehicles on the open Kuebec map |
 | `/api/demo/packets/reset` | POST | Clear illustrated vehicles and their extra routes |

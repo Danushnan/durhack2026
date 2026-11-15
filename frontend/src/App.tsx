@@ -320,7 +320,7 @@ function Help({ live, onClose }: { live: boolean; onClose: () => void }) {
         <li>🌐 The <b>City Gate</b> is an Ingress: customers from the internet enter there and go to the frontend.</li>
         <li>🏛️ <b>City Hall</b> is the control plane. Glowing <b>messengers</b> fly out for each decision; their colour says which part decided.</li>
         <li>🛢️ {live ? 'MiniShop uses PostgreSQL and Redis Deployments with persistent volumes; HTTP metrics do not apply to those stores.' : <><b>Storage tanks</b> beside the Archive are its volumes: this simulated database is a <b>StatefulSet</b>, so its data outlives its Pods.</>}</li>
-        <li>🚗 <span className="amber">Orange</span> illustrates HTTP response errors, including business rejections; <span className="red">red</span> illustrates calls with no HTTP answer. Neither proves a root cause.</li>
+        <li>🚗 A burst marks a failed request at the door. A <span className="red">glowing red</span> vehicle carries the failure back to the caller.</li>
         <li>🎨 A Unit's cap colour is its <b>version</b> when supplied by the source. Pod flashes illustrate distribution across Ready units.</li>
       </ul>
       <h3>How Kubernetes thinks</h3>
@@ -697,8 +697,7 @@ function Legend({ live, districtColors, onClose }: { live: boolean; districtColo
       <h3>Cars · requests</h3>
       <div>Aggregate activity illustration, not request-level traces. Car count, travel time and Pod flashes are illustrative.</div>
       <div>🚕 Yellow taxis are customers; other Cars wear their caller's colour.</div>
-      <div><i style={{ background: SIGNAL.errors.color }} />Comes back orange: answered with an error.</div>
-      <div><i style={{ background: SIGNAL.refused.color }} />Comes back red: refused, nobody answered.</div>
+      <div><i style={{ background: SIGNAL.refused.color }} />Failed requests burst at the door and return in a glowing red vehicle.</div>
       <div>🔴 Brake lights: slowing, or queuing behind the Car ahead.</div>
     </aside>
   )
