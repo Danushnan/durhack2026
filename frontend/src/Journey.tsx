@@ -1,3 +1,4 @@
+import { JOURNEY_SPEEDS, type JourneySpeed } from './journeyPlayback'
 import { actionBody, actionPending, validAction } from './journeyProtocol'
 import { useEffect, useRef, useState } from 'react'
 
@@ -7,6 +8,8 @@ export type Journey = {requests?: Record<string,string>; kind: 'add_to_basket' |
 
 export function useJourney(source: string | undefined | null) {
   const [enabled, setEnabled] = useState(false)
+  const [following, setFollowing] = useState(true)
+  const [speed, setSpeed] = useState<JourneySpeed>(0.5)
   const [journey, setJourney] = useState<Journey | null>(null)
   const [step, setStep] = useState(0)
   const [replayTick, setReplayTick] = useState(0)
@@ -29,6 +32,7 @@ export function useJourney(source: string | undefined | null) {
     paired.current = null; selected.current = null
     setJourney(null); setActionId(null); setActions([]); setStep(0); setError(''); setEnabled(false)
     viewer.current = crypto.randomUUID()
+    setFollowing(true)
   }, [source])
   useEffect(() => {
     const receive = (event: MessageEvent) => {
@@ -47,7 +51,7 @@ export function useJourney(source: string | undefined | null) {
           pair.window.postMessage({type: 'kubeverse:registered', action_id: action.action_id}, pair.origin)
           setActions(ids => [{id: action.action_id, kind: action.kind ?? 'add_to_basket'}, ...ids.filter(a => a.id !== action.action_id)].slice(0, 20))
           if (actionPending(action) || selected.current === action.action_id || !selected.current) {
-            if (selected.current !== action.action_id) setStep(0)
+            if (selected.current !== action.action_id) { setStep(0); setFollowing(true) }
             selected.current = action.action_id; setActionId(action.action_id); setJourney(result)
           }
           setError('')
@@ -83,8 +87,8 @@ export function useJourney(source: string | undefined | null) {
       paired.current = {window: shop, origin: url.origin}; setError('')
     } catch (e) { setError(String(e instanceof Error ? e.message : e)) }
   }
-  return {enabled, setEnabled, journey, step, setStep, replayTick, replay: () => { setStep(0); setReplayTick(tick => tick + 1) }, error, actions, actionId, openShop,
-    select: (id: string) => { selected.current = id; setActionId(id); setStep(0); setJourney(null) }}
+  return {enabled, setEnabled: (value: boolean) => { setEnabled(value); if (value) setFollowing(true) }, following, setFollowing, speed, setSpeed, journey, step, setStep, replayTick, replay: () => { setFollowing(true); setStep(0); setReplayTick(tick => tick + 1) }, error, actions, actionId, openShop,
+    select: (id: string) => { selected.current = id; setActionId(id); setStep(0); setFollowing(true); setJourney(null) }}
 }
 
 export function JourneyPanel({controller}: {controller: ReturnType<typeof useJourney>}) {
@@ -101,6 +105,9 @@ export function JourneyPanel({controller}: {controller: ReturnType<typeof useJou
     </details>
     {error && <p role="alert">{error}</p>}
     {actions.length > 0 && <label>Shopping action<select value={actionId ?? ''} onChange={e => controller.select(e.target.value)}>{actions.map((a, i) => <option key={a.id} value={a.id}>{a.kind === 'checkout' ? 'Place Order' : 'Add to Basket'} · {a.id.slice(0, 8)}{i === 0 ? ' · latest' : ''}</option>)}</select></label>}
+    <label>Guide speed<select value={controller.speed} onChange={e => controller.setSpeed(Number(e.target.value) as JourneySpeed)}>
+      {JOURNEY_SPEEDS.map(speed => <option key={speed} value={speed}>{speed}×{speed === 0.5 ? ' (default)' : ''}</option>)}
+    </select></label>
     {!journey && <p role="status">Waiting for a paired shopping action.</p>}
     {journey && <>
       <p role="status"><b>{journey.state}</b>{journey.collecting ? ' · collecting observations' : ' · collection finished'}</p>

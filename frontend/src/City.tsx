@@ -1,3 +1,8 @@
+import { startsDiscoveryActivity, type DiscoveryActivityPeriod } from './discoveryTraffic'
+import { DiscoveryFocus } from './DiscoveryFocus'
+import { DISCOVERY_CAR_DENSITY } from './discoveryActivity'
+import { JourneyGuide, JourneyFollowCamera } from './JourneyScene'
+import type { JourneyAnchor, JourneySpeed } from './journeyPlayback'
 import type { JourneyStep } from './Journey'
 import { Canvas, type ThreeEvent, useFrame, useThree } from '@react-three/fiber'
 import { Edges, OrbitControls, OrthographicCamera, PerspectiveCamera } from '@react-three/drei'
@@ -199,8 +204,8 @@ type StreetUse = { call: Call; edge?: RoadFlow; preview?: boolean }
 
 const callLabel = ({ from, to }: Call) => `${from.startsWith('ingress:') ? 'customers' : nameOf(from)} → ${nameOf(to)}`
 
-function Road({ pts, uses, highway, selected, theme, onHover }: {
-  pts: THREE.Vector3[]; uses: StreetUse[]; highway: boolean; selected: string | null; theme: Theme; onHover: OnHover
+function Road({ pts, uses, highway, selected, theme, onHover, calm, connection }: {
+  pts: THREE.Vector3[]; uses: StreetUse[]; highway: boolean; selected: string | null; theme: Theme; onHover: OnHover; calm?: boolean; connection?: string | null
 }) {
   const width = highway ? HIGHWAY_WIDTH : ROAD_W
   const geo = useMemo(() => ({
@@ -214,7 +219,12 @@ function Road({ pts, uses, highway, selected, theme, onHover }: {
     const current = SIGNAL[edge ? signalOf(edge) : 'idle']
     return current.rank > worst.rank ? current : worst
   }, SIGNAL.idle)
-  const dim = !selected || uses.some(({ call }) => call.from === selected || call.to === selected) ? 1 : 0.3
+  const focused = !!connection && uses.some(({call}) => roadKey(call) === connection)
+  const dim = connection ? focused ? 1 : 0.18 : !selected || uses.some(({ call }) => call.from === selected || call.to === selected) ? 1 : 0.3
+  const active = uses.some(({edge}) => edge && (edge.requests ?? 0) > 0 && edge.rps > 0)
+  const opacity = dim * (calm && !active && !focused ? 0.2 : 1)
+  const outlines = useRef<(THREE.MeshBasicMaterial | null)[]>([])
+  useFrame((_,dt) => { for (const material of outlines.current) if (material) material.opacity += (opacity-material.opacity)*(1-Math.exp(-Math.min(dt,.1)*4)) })
   const hover = (e: ThreeEvent<PointerEvent>) => {
     e.stopPropagation()
     const title = highway ? 'District highway' : uses.length === 1 ? callLabel(uses[0].call) : 'Shared road'
@@ -222,16 +232,16 @@ function Road({ pts, uses, highway, selected, theme, onHover }: {
       ? `${callLabel(call)} · ${SIGNAL[signalOf(edge)].label} · ${describeFlow(edge)}`
       : `${callLabel(call)} · ${preview ? 'map preview' : 'awaiting traffic measurements'}`), ...at(e) })
   }
-  const glow = <meshBasicMaterial color={signal.color} toneMapped={false} transparent opacity={dim} side={THREE.DoubleSide} />
+  const glow = (index: number) => <meshBasicMaterial ref={material => {outlines.current[index]=material}} color={focused ? theme.roadGlow : signal.color} toneMapped={false} transparent opacity={1} side={THREE.DoubleSide} />
   return (
     <group>
       <mesh geometry={geo.kerb} receiveShadow><meshStandardMaterial color={theme.kerb} side={THREE.DoubleSide} /></mesh>
       <mesh geometry={geo.asphalt} receiveShadow onPointerOver={hover} onPointerMove={hover} onPointerOut={() => onHover(null)}>
         <meshStandardMaterial color={highway ? new THREE.Color(theme.street).multiplyScalar(0.78) : theme.street} roughness={0.95} side={THREE.DoubleSide} />
       </mesh>
-      <mesh geometry={geo.left}>{glow}</mesh>
-      <mesh geometry={geo.right}>{glow}</mesh>
-      <Marks pts={pts} every={highway ? 3.8 : 2.6} offset={0} start={2} geometry={dash} color={theme.laneMark} opacity={0.9 * dim} />
+      <mesh geometry={geo.left}>{glow(0)}</mesh>
+      <mesh geometry={geo.right}>{glow(1)}</mesh>
+      <Marks pts={pts} every={highway ? 3.8 : 2.6} offset={0} start={2} geometry={dash} color={theme.laneMark} opacity={0.9 * opacity} />
     </group>
   )
 }
@@ -573,8 +583,8 @@ const lorryGlow = (() => {
  * the Car ahead, slow for bends, and at the callee's door are served, refused (red) or answered with an
  * error (orange). Fate is decided on arrival, from the live state, so Cars already on the road react to failures.
  */
-function Traffic({ edge, road, theme, accent, onHover, endpoints, paused, liveMode, previewCount, districtColors }: {
-  edge: RoadFlow; road: StreetRoute; theme: Theme; accent: string; onHover: OnHover
+function Traffic({ edge, road, theme, accent, onHover, endpoints, paused, liveMode, previewCount, districtColors, calm, emphasized = true, sourceId }: {
+  edge: RoadFlow; road: StreetRoute; theme: Theme; accent: string; onHover: OnHover; calm?: boolean; emphasized?: boolean; sourceId?: string
   districtColors: ReadonlyMap<string, string>
   endpoints: string[]; paused: boolean; liveMode: boolean; previewCount?: number // Pod flashes illustrate distribution, not observed request routing
 }) {
@@ -600,12 +610,15 @@ function Traffic({ edge, road, theme, accent, onHover, endpoints, paused, liveMo
       limitOk: bendLimit(ok.pts, GRIP), limitBack: bendLimit(back.pts, GRIP) } }
   }, [road, length])
   const cars = useRef<CarAgent[]>([])
-  const credit = useRef(0) // requests waiting to leave as a Car
+  const credit = useRef(0) // visual admission credit, separate from measured counts
+  const activityPeriod = useRef<DiscoveryActivityPeriod>({source:sourceId, active:false})
   useLayoutEffect(() => {
     if (preview) dispatched.current -= cars.current.length
     cars.current = []
     credit.current = 0
-  }, [preview, trips])
+    activityPeriod.current = {source:sourceId, active:false}
+  }, [preview, trips, sourceId])
+  useLayoutEffect(() => { activityPeriod.current = {source:sourceId, active:false} }, [calm, sourceId])
   const live = useRef(edge)
   live.current = edge
   const pause = useRef(paused)
@@ -625,6 +638,8 @@ function Traffic({ edge, road, theme, accent, onHover, endpoints, paused, liveMo
     const dt = Math.min(rawDt, 0.1) // a hidden tab must not dump a burst of Cars
     const now = clock.elapsedTime
     const e = live.current
+    const activityStarted = calm && startsDiscoveryActivity(activityPeriod.current, e, sourceId)
+    if (calm && e.rps <= 0) credit.current = 0
     // Arrivals at the request rate, jittered; a backlog waits (up to 3) while the caller's exit is blocked.
     const used = new Set(cars.current.map((c) => c.slot))
     const slot = [...Array(poolSize).keys()].find((i) => !used.has(i))
@@ -636,8 +651,13 @@ function Traffic({ edge, road, theme, accent, onHover, endpoints, paused, liveMo
           cars.current.push(newCar(slot, Math.random))
           dispatched.current++
         }
+      } else if (activityStarted && exitClear(cars.current, length)) {
+        // A positive measured window deserves immediate visual feedback, even
+        // below one car's rate-admission threshold. Debit it from future admission.
+        cars.current.push(newCar(slot, Math.random))
+        credit.current = -1
       } else {
-        const arrival = admit(credit.current, e.rps, dt, cars.current, Math.random, liveMode ? 1 : CARS_PER_REQUEST, length)
+        const arrival = admit(credit.current, e.rps, dt, cars.current, Math.random, liveMode ? calm ? DISCOVERY_CAR_DENSITY : 1 : CARS_PER_REQUEST, length)
         credit.current = arrival.credit
         if (arrival.leave) cars.current.push(newCar(slot, Math.random))
       }
@@ -674,7 +694,7 @@ function Traffic({ edge, road, theme, accent, onHover, endpoints, paused, liveMo
     : c.fate === 'error' ? 'Illustrates HTTP response errors, including business rejections. This does not establish a root cause.'
       : 'Illustrates normalised aggregate activity; car count, travel time, queuing and Pod flashes are not request-level measurements.'
   return (
-    <group>
+    <group visible={emphasized}>
       {Array.from({ length: poolSize }, (_, i) => (
         <group key={i} visible={false} ref={(g) => { groups.current[i] = g }}
           onPointerOver={(e) => {
@@ -894,7 +914,7 @@ interface Controls extends THREE.EventDispatcher<{ start: object }> { target: TH
  * Flies the camera to the overview or to a selected Building. Isometric: the view direction never
  * changes; flying moves the look-at point and the zoom. 3D: it moves the camera itself.
  */
-function CameraRig({ focus, layout, homeTick, mode }: { focus: THREE.Vector3 | null; layout: CityLayout; homeTick: number; mode: ViewMode }) {
+function CameraRig({ focus, layout, homeTick, mode, disabled, journeyMode }: { disabled?: boolean; journeyMode?: boolean; focus: THREE.Vector3 | null; layout: CityLayout; homeTick: number; mode: ViewMode }) {
   const view = useThree((s) => s.size)
   const fov = useThree((s) => (s.camera as THREE.PerspectiveCamera).fov ?? 45)
   const controls = useThree((s) => s.controls) as unknown as Controls | null
@@ -909,16 +929,17 @@ function CameraRig({ focus, layout, homeTick, mode }: { focus: THREE.Vector3 | n
   const { x0, x1, z0, z1 } = layout.core
   // Overview: the whole core (and the tallest Buildings on it) fits the viewport.
   useEffect(() => {
+    if (disabled) return
     const corners = [x0, x1].flatMap((x) => [z0, z1].flatMap((z) => [0, 14].map((y) => new THREE.Vector3(x, y, z))))
     const span = (axis: THREE.Vector3) => { const d = corners.map((c) => c.dot(axis)); return Math.max(...d) - Math.min(...d) }
     const zoom = 0.94 * Math.min(view.width / span(ISO_RIGHT), view.height / span(ISO_UP))
     const wide = Math.max(x1 - x0, (z1 - z0) * 1.5, 40)
     const dist = (wide * 0.62) / (Math.tan((fov * Math.PI) / 360) * Math.min(view.width / view.height, 2))
     fly(new THREE.Vector3((x0 + x1) / 2, 0, (z0 + z1) / 2), zoom, new THREE.Vector3(0, dist * 0.62, dist * 0.78))
-  }, [x0, x1, z0, z1, homeTick, mode]) // eslint-disable-line react-hooks/exhaustive-deps
+  }, [x0, x1, z0, z1, homeTick, mode, journeyMode]) // eslint-disable-line react-hooks/exhaustive-deps
   // Fly-to: look slightly right of the Building so it is not hidden behind the inspect panel.
   useEffect(() => {
-    if (!focus) return
+    if (!focus || disabled) return
     if (mode === 'iso') fly(focus.clone().addScaledVector(ISO_RIGHT, 8).setY(2), view.height / 46, new THREE.Vector3())
     else fly(focus.clone().add(new THREE.Vector3(5, 2, 0)), 1, new THREE.Vector3(6, 19, 24))
   }, [focus, mode]) // eslint-disable-line react-hooks/exhaustive-deps
@@ -928,8 +949,9 @@ function CameraRig({ focus, layout, homeTick, mode }: { focus: THREE.Vector3 | n
     controls.addEventListener('start', stop)
     return () => controls.removeEventListener('start', stop)
   }, [controls])
+  useEffect(() => { if (disabled) flying.current = false }, [disabled])
   useFrame(({ camera }, dt) => {
-    if (!flying.current || !controls) return
+    if (disabled || !flying.current || !controls) return
     const k = Math.min(1, dt * 2.5)
     controls.target.lerp(goal.current.target, k)
     if ((camera as THREE.OrthographicCamera).isOrthographicCamera) {
@@ -956,43 +978,17 @@ function addDemoDepot(layout: CityLayout): CityLayout {
   }
 }
 
-/** Separate educational guide: samples the existing lane/roundabout polyline. */
-function JourneyGuide({step, road, positions}: {step: JourneyStep; road?: StreetRoute; positions: THREE.Vector3[]}) {
-  const marker = useRef<THREE.Mesh>(null)
-  const elapsed = useRef(0)
-  const path = useMemo(() => road ? new Path(road.outbound) : null, [road])
-  const line = useMemo(() => {
-    if (!road) return null
-    const geometry = new THREE.BufferGeometry().setFromPoints(road.outbound.map(p => p.clone().setY(0.35)))
-    return new THREE.Line(geometry, new THREE.LineBasicMaterial({color: '#ffd166', depthTest: false}))
-  }, [road])
-  useEffect(() => () => { line?.geometry.dispose(); line?.material.dispose() }, [line])
-  useEffect(() => { elapsed.current = 0 }, [step.key, path])
-  useFrame((_, delta) => {
-    if (!marker.current) return
-    elapsed.current = Math.min(3, elapsed.current + Math.min(delta, 0.1))
-    if (path) { path.at(path.length * elapsed.current / 3, marker.current.position); marker.current.position.y = 1.8 }
-    else if (positions[0]) marker.current.position.copy(positions[0]).setY(8)
-    marker.current.rotation.y += delta
-  })
-  if (!positions.length || !['observed', 'failed', 'succeeded', 'skipped'].includes(step.state)) return null
-  return <group>
-    {line && <primitive object={line} />}
-    {positions.map((position, i) => <mesh key={i} position={[position.x, 0.3, position.z]} rotation-x={-Math.PI / 2}>
-      <ringGeometry args={[8, 8.6, 48]} /><meshBasicMaterial color="#ffd166" transparent opacity={0.85} depthWrite={false} />
-    </mesh>)}
-    <mesh ref={marker} renderOrder={10}><octahedronGeometry args={[1.3]} /><meshStandardMaterial color="#ffd166" emissive="#ffd166" emissiveIntensity={1.5} depthTest={false} /></mesh>
-  </group>
-}
-
-export function City({ cluster, selected, onSelect, powerGrid, theme, onHover, states, homeTick, flows, replay, mode, trafficPaused, discoveredRoads, districtColors, journeyActive, journeyStep, journeyPlaybackKey, journeyServices }: {
+export function City({ cluster, selected, onSelect, powerGrid, theme, onHover, states, homeTick, flows, replay, mode, trafficPaused, discoveredRoads, districtColors, journeyActive, journeyStep, journeyPlaybackKey, journeyServices, journeyFollowing, onJourneyManualCamera, journeySpeed = 0.5, discoveryMode, discoveryConnection }: {
   flows: RoadFlow[]; replay: boolean; mode: ViewMode; trafficPaused: boolean
+  discoveryMode?: boolean; discoveryConnection?: string | null
   discoveredRoads?: ReadonlySet<string>
   districtColors: ReadonlyMap<string, string>
+  journeyFollowing?: boolean; onJourneyManualCamera: () => void; journeySpeed?: JourneySpeed
   journeyActive?: boolean; journeyStep?: JourneyStep; journeyPlaybackKey?: string; journeyServices?: string[]
   cluster: ClusterState; selected: string | null; onSelect: (key: string | null) => void
   powerGrid: boolean; theme: Theme; onHover: OnHover; states: ServiceState; homeTick: number
 }) {
+  const journeyAnchor = useRef<JourneyAnchor>({ position: new THREE.Vector3(), active: false })
   const all = Object.values(cluster.objects)
   const deployments = all.filter(isWorkload)
   const pods = all.filter((o) => o.kind === 'Pod')
@@ -1056,7 +1052,7 @@ export function City({ cluster, selected, onSelect, powerGrid, theme, onHover, s
   const edges = flows.filter((edge) => network.routes[roadKey(edge)] && roadVisible(edge, visibleRoads))
   const flowsByKey = new Map(edges.map((edge) => [roadKey(edge), edge]))
   const visibleUses = new Map<string, StreetUse>([...known, ...supplemental].filter((call) => roadVisible(call, visibleRoads))
-    .map((call) => [roadKey(call), { call, edge: flowsByKey.get(roadKey(call)) }]))
+    .map((call) => [roadKey(call), { call, edge: discoveryMode && trafficPaused ? undefined : flowsByKey.get(roadKey(call)) }]))
   for (const { call } of previews) if (!visibleUses.has(roadKey(call))) visibleUses.set(roadKey(call), { call, preview: true })
   const visibleKeys = [...visibleUses.keys()].sort().join(',')
   const highwayZ = network.segments.reduce((z, segment) => segment.highway && segment.calls.some((key) => visibleUses.has(key))
@@ -1064,7 +1060,8 @@ export function City({ cluster, selected, onSelect, powerGrid, theme, onHover, s
   const cameraLayout = { ...layout, core: { ...layout.core, z1: highwayZ } }
   const visibleLamps = useMemo(() => lamps.filter(({ calls }) => calls.some((key) => visibleUses.has(key)))
     .flatMap(({ points }) => points), [lamps, visibleKeys]) // eslint-disable-line react-hooks/exhaustive-deps
-  const related = new Set(flows.filter((e) => e.from === selected || e.to === selected).flatMap((e) => [e.from, e.to]))
+  const connectionBuildings = discoveryConnection?.split('>') ?? []
+  const related = new Set([...connectionBuildings, ...flows.filter((e) => e.from === selected || e.to === selected).flatMap((e) => [e.from, e.to])])
   const focus = !selected ? null : selected === 'city-hall' ? layout.hall?.center ?? null
     : selected.startsWith('node:') ? layout.stations[selected.slice(5)]?.center ?? null : layout.lots[selected]?.center ?? null
   const podsOn = (node: string) => pods.filter((p) => p.spec.nodeName === node && !p.metadata.deletionTimestamp).length
@@ -1117,8 +1114,10 @@ export function City({ cluster, selected, onSelect, powerGrid, theme, onHover, s
       {ready && <Lamps points={visibleLamps} theme={theme} />}
       {network.segments.map(({ key, points, calls, highway }) => {
         const uses = calls.flatMap((id) => visibleUses.get(id) ?? [])
-        return uses.length > 0 && <Road key={key} pts={points} uses={uses} highway={highway} selected={selected} theme={theme} onHover={onHover} />
+        return uses.length > 0 && <Road key={key} pts={points} uses={uses} highway={highway} selected={selected} theme={theme} onHover={onHover} calm={discoveryMode} connection={discoveryConnection} />
       })}
+      {discoveryMode && discoveryConnection && network.routes[discoveryConnection] && <DiscoveryFocus road={network.routes[discoveryConnection]}
+        positions={connectionBuildings.flatMap(key => layout.lots[key] ? [layout.lots[key].center] : [])} color={theme.roadGlow} />}
       {network.roundabouts.filter(({ calls }) => calls.some((key) => visibleUses.has(key))).map((junction) => (
         <RoundaboutMesh key={junction.key} center={junction.center} theme={theme} />
       ))}
@@ -1165,7 +1164,8 @@ export function City({ cluster, selected, onSelect, powerGrid, theme, onHover, s
         if (replay && !e.measured) return null // replaying history: only routes with recorded traffic get Cars
         // A Car wears its caller's colour (customers: yellow taxis); how its request went shows at the door.
         return <Traffic key={roadKey(e)} edge={e} road={network.routes[roadKey(e)]} theme={theme} districtColors={districtColors} onHover={onHover}
-          accent={e.from.startsWith('ingress:') ? CUSTOMER : landmarkFor(nameOf(e.from)).accent} endpoints={endpoints(e.to)} paused={trafficPaused} liveMode={typeof cluster.context === 'string'} />
+          accent={e.from.startsWith('ingress:') ? CUSTOMER : landmarkFor(nameOf(e.from)).accent} endpoints={endpoints(e.to)} paused={trafficPaused} liveMode={typeof cluster.context === 'string'}
+          sourceId={cluster.metrics?.source_id ?? cluster.context ?? undefined} calm={discoveryMode} emphasized={!discoveryMode || !discoveryConnection || discoveryConnection === roadKey(e)} />
       })}
       </group>
       {journeyActive && [...new Set(journeyServices)].flatMap(key => {
@@ -1174,7 +1174,7 @@ export function City({ cluster, selected, onSelect, powerGrid, theme, onHover, s
           <ringGeometry args={[8.7, 9, 48]} /><meshBasicMaterial color="#ffd166" transparent opacity={0.35} depthWrite={false} />
         </mesh>] : []
       })}
-      {journeyActive && journeyStep && <JourneyGuide key={journeyPlaybackKey} step={journeyStep} road={journeyKey ? network.routes[journeyKey] : undefined}
+      {journeyActive && journeyStep && <JourneyGuide key={journeyPlaybackKey} anchor={journeyAnchor} speed={journeySpeed} step={journeyStep} road={journeyKey ? network.routes[journeyKey] : undefined}
         positions={(journeyKey ? [journeyStep.from_service, journeyStep.to_service] : journeyStep.focus_service ? [journeyStep.focus_service] : [journeyStep.key === 'browser' ? 'minishop-web' : 'cart-api'].map(name => workloadKeys.find(key => key.endsWith(`/${name}`))))
           .flatMap(key => key && layout.lots[key] ? [layout.lots[key].center] : [])} />}
       {mode === 'iso'
@@ -1184,7 +1184,9 @@ export function City({ cluster, selected, onSelect, powerGrid, theme, onHover, s
           touches={{ ONE: THREE.TOUCH.PAN, TWO: THREE.TOUCH.DOLLY_PAN }} />
         // 3D: drag orbits, right-drag pans, wheel zooms; the camera never goes below the ground.
         : <OrbitControls key="controls-3d" makeDefault maxPolarAngle={Math.PI / 2.15} minDistance={10} maxDistance={170} />}
-      <CameraRig focus={focus} layout={cameraLayout} homeTick={homeTick} mode={mode} />
+      <CameraRig focus={focus} layout={cameraLayout} homeTick={homeTick} mode={mode}
+        disabled={journeyActive && journeyFollowing && !!journeyStep} journeyMode={journeyActive} />
+      <JourneyFollowCamera anchor={journeyAnchor} active={!!journeyActive && !!journeyFollowing && !!journeyStep} onManualCamera={onJourneyManualCamera} />
     </Canvas>
   )
 }

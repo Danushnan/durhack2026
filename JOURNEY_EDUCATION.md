@@ -394,3 +394,17 @@ these tests at a shared or production database. The disposable stack used in thi
 session was removed after verification, including its volumes.
 
 The final panel puts the teaching questions ahead of expandable outcome summaries and the legend. Browser checks were run serially after concurrent software-rendered city instances caused automation timeouts. The serial basket, concurrent-action scenario, and final Checkout checks passed.
+
+## Guide camera and playback speed
+
+Explanations remain in the original left Journey panel, with Previous / Next /
+Replay and optional outcome/event details. The camera follows the gold guide car;
+dragging the map or selecting a building pauses following, and Follow guide resumes
+it. Traffic restores the ordinary city overview.
+
+Guide speed has four choices: **0.25×, 0.5×, 0.75×, 1×**, default **0.5×**.
+A stage that took three seconds at 1× takes six seconds at the default 0.5×,
+twelve seconds at 0.25×, or four seconds at 0.75×. Changing speed affects the
+current animation without resetting the stage; Replay starts it again. This is
+educational playback timing, separate from actual measured request latency.
+Aggregate traffic and shopping operations are unchanged.

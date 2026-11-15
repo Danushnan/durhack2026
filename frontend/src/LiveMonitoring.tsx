@@ -67,8 +67,10 @@ export function LiveOverview({ cluster, views, onPick }: {
   const count = (status: string) => appRows.filter(([, v]) => v.application === status).length
   const notes = rows.filter(([, v]) => v.affected || ['partial', 'stale', 'unavailable', 'disconnected'].includes(v.availability))
   return <section className="hud overview live-overview" aria-label="MiniShop monitoring overview">
-    <b>MiniShop · {m ? `${m.window.seconds}s observation window` : 'live monitoring'}</b>
-    <LiveSourceStatus cluster={cluster} />
+    <details className="monitor-disclosure">
+      <summary><b>MiniShop · {m ? `${m.window.seconds}s observation window` : 'live monitoring'}</b>
+        <LiveSourceStatus cluster={cluster} />
+      </summary>
     <div className={`tiles ${current ? '' : 'last-known'}`}>
       {[
         ['HTTP service completions', numberText(totals?.requests)], ['Service requests/s', numberText(totals?.rps, 2)],
@@ -90,6 +92,7 @@ export function LiveOverview({ cluster, views, onPick }: {
         <td><button className="link" onClick={() => onPick(key)}>{key.split('/')[1]}</button><small>{label(v.availability)}</small></td>
         <td>{numberText(v.metrics?.requests_per_second, 2)}</td><td>{latencyText(v.metrics?.p95_latency_ms)}</td>
       </tr>)}</tbody></table></details>
+    </details>
   </section>
 }
 

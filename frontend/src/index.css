@@ -246,3 +246,33 @@ i { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin
 .journey-learning { font-size: 13px; line-height: 1.5; }
 .journey-learning dt { font-weight: 600; margin-top: 12px; }
 .journey-learning dd { margin: 4px 0 0; }
+
+@media (max-width: 720px) { .journey-panel { max-height: calc(100dvh - 360px); } }
+
+.discovery-activity { top: 192px; left: 72px; width: 340px; max-width: calc(100vw - 84px); max-height: calc(100dvh - 510px); overflow-y: auto; padding: 12px; }
+.discovery-activity h2 { font-size: 16px; margin: 0 0 8px; }
+.discovery-activity p { line-height: 1.45; }
+.discovery-guidance { font-size: 12px; margin: 8px 0; }
+.discovery-journey-link { width: 100%; text-align: left; margin: 8px 0; }
+.discovery-activity-list { max-height: 220px; overflow-y: auto; overscroll-behavior: contain; }
+.discovery-activity-list ul { list-style: none; padding: 0; margin: 0; }
+.discovery-connection { display: grid; gap: 6px; text-align: left; width: 100%; margin-bottom: 8px; padding: 10px; font-size: 12px; }
+.discovery-connection > b { font-size: 13px; }
+.discovery-connection[aria-pressed="true"] { border-color: var(--accent); background: var(--btn-hover); }
+.discovery-kind { font-size: 10px; color: var(--muted); }
+.discovery-measurements { display: grid; gap: 3px; font-size: 10px; font-variant-numeric: tabular-nums; color: var(--muted); }
+.discovery-selection { border-top: 1px solid var(--border); padding-top: 8px; margin-top: 8px; }
+.discovery-selection-title, .discovery-inspect { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; justify-content: space-between; }
+.discovery-selection-title { font-size: 12px; margin-bottom: 8px; }
+.discovery-inspect button { font-size: 11px; }
+@media (max-width: 720px) {
+  .discovery-activity { top: 264px; max-height: calc(100dvh - 340px); }
+  .discovery-activity-list { max-height: 150px; }
+  .app:has(.discovery-activity) .overview { display: none; }
+}
+
+.discovery-guidance { position: sticky; top: 0; z-index: 1; background: var(--panel); padding: 6px 0; }
+
+.live-overview > .monitor-disclosure > summary { margin-top: 0; font-size: 12px; }
+.live-overview > .monitor-disclosure > summary .source-status { display: block; margin: 4px 0 0 16px; font-size: 11px; }
+.live-overview > .monitor-disclosure[open] > summary { margin-bottom: 8px; }
