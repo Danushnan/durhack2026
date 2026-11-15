@@ -1,11 +1,11 @@
-import { DiscoveryActivity } from './DiscoveryActivity'
+import { DiscoveryActivity } from './DiscoveryActivity.tsx'
 import { JourneyPanel, useJourney } from './Journey'
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { City, type HoverInfo, type RoadFlow, type ServiceState, type ViewMode } from './City'
-import { affected, describeFlow, ERROR_RATE, overview, serviceFlow, SIGNAL, type Signal, signalOf, SLOW_MS } from './health'
+import { affected, describeFlow, ERROR_RATE, overview, serviceFlow, SIGNAL, type Signal, signalOf, SLOW_MS, tally } from './health'
 import {
   ACTION_FAILED, api, type ClusterState, deploymentHealth, describeDeployment, describePod, FRIENDLY, HEALTH_COLOR, isWorkload, type K8sObject, keyOf, NODE_COLORS,
-  nodeReady, podsOf, type PodStatus, podStatus, rolloutOf, versionColor, STATUS_COLOR, useCluster,
+  nodeReady, notDeployed, podsOf, type PodStatus, podStatus, rolloutOf, versionColor, STATUS_COLOR, useCluster,
 } from './k8s'
 import { landmarkFor } from './landmarks'
 import { COMPONENTS, componentOf, downServices, explain, impactChain, kubectl, nameOf, roleOf } from './teach'
@@ -97,7 +97,7 @@ export default function App() {
     const flow = serviceFlow(k, flows)
     if (flow.signal === 'ok' && services[k]?.anomaly) flow.signal = 'slow' // TigerData: far slower than its own baseline
     const ready = d.status?.readyReplicas ?? 0, want = d.spec?.replicas ?? 0
-    return [k, { down: down.has(k), chain, flow, affected: affected({ ready, want, signal: flow.signal, basis: flow.basis, impactedBy: chain ? nameOf(chain[chain.length - 1]) : null }) }]
+    return [k, { down: down.has(k), chain, flow, affected: affected({ ready, want, missing: notDeployed(d), signal: flow.signal, basis: flow.basis, impactedBy: chain ? nameOf(chain[chain.length - 1]) : null }) }]
   }))
   const unhealthyPods = all.some((o) => o.kind === 'Pod' && podStatus(o) !== 'Running')
   const outages = nodes.filter((n) => !nodeReady(n))
@@ -307,7 +307,7 @@ function Banner({ deployments, states, outages, edges, onPick }: {
     <div className="hud banner" role="status">
       {d ? (
         <>
-          <b>💥 {d.metadata.name} is down.</b> {roleOf(d.metadata.name).ifDown}
+          <b>💥 {d.metadata.name} is {notDeployed(d) ? 'not deployed' : 'down'}.</b> {roleOf(d.metadata.name).ifDown}
           {affected.length > 0 && <> Knock-on effect: {affected.map((a, i) => (
             <span key={a.metadata.uid}>{i > 0 && ', '}<button className="link" onClick={() => onPick(keyOf(a))}>{a.metadata.name}</button></span>
           ))} {affected.length === 1 ? 'is' : 'are'} impacted.</>}
@@ -425,8 +425,9 @@ function Inspect({ dep, cluster, all, events, states, edges, sim, onPick, onClos
   const replicaSets = all.filter((o) => o.kind === 'ReplicaSet' && o.metadata.namespace === ns &&
     o.metadata.ownerReferences?.[0]?.uid === dep.metadata.uid)
     .sort((a, b) => a.metadata.name.localeCompare(b.metadata.name))
-  const mine = events.filter((e) => e.involvedObject?.namespace === ns &&
-    (e.involvedObject.name === name || e.involvedObject.name.startsWith(`${name}-`))).slice(0, 6)
+  const allMine = events.filter((e) => e.involvedObject?.namespace === ns &&
+    (e.involvedObject.name === name || e.involvedObject.name.startsWith(`${name}-`)))
+  const mine = allMine.slice(0, 6)
   const sabotaged = dep.metadata.annotations?.['kubeverse.io/sabotaged'] === 'true'
   const replicas: number = dep.spec.replicas
   const dependsOn = edges.filter((e) => e.from === key).map((e) => e.to)
@@ -441,8 +442,9 @@ function Inspect({ dep, cluster, all, events, states, edges, sim, onPick, onClos
   const r = rolloutOf(dep, pods)
   const next = `v${Number((dep.metadata.annotations?.['kubeverse.io/latest-version'] ?? r.version).slice(1)) + 1}`
   const endpoints = pods.filter((p) => !p.metadata.deletionTimestamp && p.status?.containerStatuses?.[0]?.ready).length
-  const podsNow = state?.down
-    ? { cls: 'bad', text: `Pods: 💥 none ready. ${role.ifDown}` }
+  const missing = notDeployed(dep)
+  const podsNow = missing ? { cls: 'bad', text: `Pods: ${describeDeployment(dep)}. ${role.ifDown}` }
+    : state?.down ? { cls: 'bad', text: `Pods: 💥 none ready. ${role.ifDown}` }
     : { cls: deploymentHealth(dep) === 'healthy' ? 'ok' : 'warn', text: `Pods: ${describeDeployment(dep)}` }
   const flow = state?.flow, signal = flow ? SIGNAL[flow.signal] : null
   const requestsNow = state?.chain && !state.down
@@ -480,9 +482,10 @@ function Inspect({ dep, cluster, all, events, states, edges, sim, onPick, onClos
         <FlowTable title="Calls it makes" rows={edges.filter((e) => e.from === key)} end="to" onPick={onPick} />
         <FlowTable title="Called by" rows={edges.filter((e) => e.to === key)} end="from" onPick={onPick} />
       </>}
-      <h3>Desired vs actual</h3>
+      <RecentErrors edges={edges} k={key} events={allMine} />
+      {!missing && <><h3>Desired vs actual</h3>
       {state?.live ? <p className="endpoints">Kubernetes resource snapshot: {dep.spec?.replicas ?? '—'} desired replicas · {dep.status?.readyReplicas ?? 0} Ready. Pod details below describe the last resource observation.</p>
-        : <DesiredActual dep={dep} pods={pods} />}
+        : <DesiredActual dep={dep} pods={pods} />}</>}
       {hpa && (
         <div className="note">
           <b>📈 Autoscaled</b> (HorizontalPodAutoscaler): {hpa.status.currentMetrics[0].pods.current.averageValue} requests/s per ready Unit,
@@ -658,20 +661,72 @@ function FlowTable({ title, rows, end, onPick }: { title: string; rows: RoadFlow
   </>
 }
 
+/** Failed requests (live: from the Pods' logs) and Kubernetes warnings, newest first. Both separate, as they mean different things. */
+function RecentErrors({ edges, k, events }: { edges: RoadFlow[]; k: string; events: K8sObject[] }) {
+  const requests = edges.filter((e) => e.to === k || e.from === k)
+    .flatMap((e) => (e.recent_errors ?? []).map((r) => ({ ...r, other: e.to === k ? e.from : e.to, inbound: e.to === k })))
+    .sort((a, b) => b.at - a.at).slice(0, 6)
+  const warnings = events.filter((e) => e.type === 'Warning').slice(0, 4)
+  // No logged samples (the simulator, or logs not read yet): the Roads failing right now are the evidence.
+  const failing = requests.length ? [] : edges.filter((e) => (e.to === k || e.from === k) && ['errors', 'refused'].includes(signalOf(e)))
+  return <>
+    <h3>Recent errors</h3>
+    {!requests.length && !failing.length && !warnings.length && <p className="endpoints muted">None recently.</p>}
+    {failing.length > 0 && <table className="flows"><tbody>
+      {failing.map((e) => {
+        const sig = SIGNAL[signalOf(e)], other = e.to === k ? e.from : e.to
+        return (
+          <tr key={`${e.from}>${e.to}`}>
+            <td><i style={{ background: sig.color }} aria-hidden />{sig.icon} {sig.label}</td>
+            <td>{e.to === k ? 'from' : 'calling'} {other.startsWith('ingress:') ? 'customers' : nameOf(other)}</td>
+            <td>{describeFlow(e)}</td>
+          </tr>
+        )
+      })}
+    </tbody></table>}
+    {requests.length > 0 && <table className="flows"><tbody>
+      {requests.map((r) => (
+        <tr key={`${r.at}${r.other}${r.detail}`}>
+          <td><i style={{ background: SIGNAL[r.outcome === 'refused' ? 'refused' : 'errors'].color }} aria-hidden />
+            {r.outcome === 'refused' ? '✕ refused' : `⚠ ${r.status}`}</td>
+          <td>{r.inbound ? 'from' : 'calling'} {nameOf(r.other)}<small>{r.detail}</small></td>
+          <td>{new Date(r.at).toLocaleTimeString()}</td>
+        </tr>
+      ))}
+    </tbody></table>}
+    {warnings.map((e) => <EventRow key={e.metadata.uid} e={e} />)}
+  </>
+}
+
 /** Bottom-left: the whole city's traffic at a glance, and every service that needs attention. */
 function Overview({ flows, deployments, states, onPick }: {
   flows: RoadFlow[]; deployments: K8sObject[]; states: ServiceState; onPick: (k: string) => void
 }) {
   const o = overview(flows)
+  const count = tally(deployments.map((d) => states[keyOf(d)]?.affected))
+  // The service rail stops above the overview (whose height varies with the affected list) instead of hiding it.
+  const ref = useRef<HTMLElement>(null)
+  useEffect(() => {
+    const el = ref.current
+    if (!el) return
+    const ro = new ResizeObserver(() => document.documentElement.style.setProperty('--overview-h', `${el.offsetHeight}px`))
+    ro.observe(el)
+    return () => ro.disconnect()
+  }, [])
   const list = deployments.filter((d) => states[keyOf(d)]?.affected).sort((a, b) => states[keyOf(b)].affected!.rank - states[keyOf(a)].affected!.rank)
   return (
-    <section className="hud overview" aria-label="Traffic overview">
+    <section ref={ref} className="hud overview" aria-label="Traffic overview">
       <Tiles items={[
-        { label: 'req/s coming in', value: o.rps < 10 ? o.rps.toFixed(1) : String(Math.round(o.rps)) },
+        { label: 'req/s total in', value: o.rps < 10 ? o.rps.toFixed(1) : String(Math.round(o.rps)) },
         { label: 'avg latency', value: o.latency_ms == null ? '—' : `${Math.round(o.latency_ms)} ms`, status: o.rps > 0 && (o.latency_ms ?? 0) >= SLOW_MS ? 'slow' : undefined },
         { label: 'failing', value: pct(o.failing), status: o.failing >= ERROR_RATE ? 'errors' : undefined },
       ]} />
       <p className="muted small">Coming in: where requests enter the app. All {flows.length} routes: {o.allRps.toFixed(1)} req/s, {pct(o.allFailing)} failing.</p>
+      <p className="counts" aria-label="Services by health">
+        {([['ok', count.healthy, 'healthy'], ['slow', count.degraded, 'degraded'], ['refused', count.failed, 'failed']] as const).map(([s, n, label]) => (
+          <span key={label} className={n ? '' : 'muted'}><i style={{ background: n ? SIGNAL[s].color : 'transparent' }} aria-hidden />{SIGNAL[s].icon} <b>{n}</b> {label}</span>
+        ))}
+      </p>
       {list.length ? (
         <ul className="affected" aria-label="Services that need attention">
           {list.map((d) => {
@@ -707,6 +762,7 @@ function Legend({ live, districtColors, onClose }: { live: boolean; districtColo
       ))}
       <h3>Needs attention</h3>
       <div>🚨 A pulsing ring around the Building, plus a beam of light when it is down, refusing or failing requests. Listed bottom left.</div>
+      <div>The overview counts ringed services as <b>degraded</b> (slow, or missing Pods) and ringed-with-a-beam ones as <b>failed</b> (down, refusing, answering with errors, or impacted).</div>
       <h3>Units · Pods</h3>
       {(Object.keys(STATUS_COLOR) as PodStatus[]).map((s) => <div key={s}><i style={{ background: STATUS_COLOR[s] }} />{FRIENDLY[s]} <small>({s})</small></div>)}
       {districtColors.size > 1 && <>

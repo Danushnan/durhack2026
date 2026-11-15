@@ -57,8 +57,8 @@ PostgreSQL history subscriber.
 - Container build contexts: `minishop/`, using `services/Dockerfile` and
   `frontend/Dockerfile`, as referenced by `minishop/scripts/build-images.sh`.
 
-All tracked `.minishop-live` files are preserved exactly as on main. They contain
-source copies and old restart builds, and must not be used as canonical inputs.
+The old `.minishop-live` source copies and restart builds have been removed; it is
+now git-ignored as a local scratch directory.
 No existing running application or deployment was redirected or restarted.
 
 ## Verification

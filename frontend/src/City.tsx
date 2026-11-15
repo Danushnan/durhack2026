@@ -1,7 +1,7 @@
 import { trafficOutcomeRates } from './trafficOutcome'
 import { startsDiscoveryActivity, type DiscoveryActivityPeriod } from './discoveryTraffic'
 import { DiscoveryFocus } from './DiscoveryFocus'
-import { DISCOVERY_CAR_DENSITY } from './discoveryActivity'
+import { DISCOVERY_CAR_DENSITY } from './discoveryActivity.ts'
 import { JourneyGuide, JourneyFollowCamera } from './JourneyScene'
 import type { JourneyAnchor, JourneySpeed } from './journeyPlayback'
 import type { JourneyStep } from './Journey'
@@ -10,7 +10,7 @@ import { Edges, OrbitControls, OrthographicCamera, PerspectiveCamera } from '@re
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef } from 'react'
 import * as THREE from 'three'
 import {
-  type ClusterState, type Edge, type K8sObject, deploymentHealth, describePod, HEALTH_COLOR, isWorkload,
+  type ClusterState, type Edge, type K8sObject, deploymentHealth, describePod, HEALTH_COLOR, isWorkload, notDeployed,
   keyOf, NODE_COLORS, nodeReady, podsOf, podStatus, rolloutOf, STATUS_COLOR, versionColor,
 } from './k8s'
 import { FacadeSign, Landmark, type LandmarkInfo, landmarkFor } from './landmarks'
@@ -19,7 +19,7 @@ import { Scenery } from './scenery'
 import { COMPONENTS, componentOf, nameOf, roleOf } from './teach'
 import { textTexture, type TextLine } from './textures'
 import type { Theme } from './theme'
-import { type Affected, describeFlow, type Flow, type serviceFlow, SIGNAL, signalOf } from './health'
+import { type Affected, describeFlow, type Flow, SERIOUS, type serviceFlow, SIGNAL, signalOf } from './health'
 import { admit, bendLimit, type CarAgent, CARS_PER_REQUEST, DRIVE, exitClear, newCar, stepCars } from './traffic'
 import { label, latencyText, type LiveServiceView } from './liveMetrics'
 import { miniShopLayoutCalls } from './miniShopRoads'
@@ -356,7 +356,8 @@ function tagFor(dep: K8sObject, info: LandmarkInfo, state: ServiceState[string] 
   const night = theme.mode === 'night'
   const amber = night ? AMBER : '#b45309', red = night ? '#f87171' : '#dc2626', green = night ? '#4ade80' : '#15803d' // text needs more contrast on the light tag
   // Line 2: the Pods (are copies running and ready?).
-  const pods: TextLine = state?.down ? { text: `PODS DOWN · ${ready}/${want} ready`, px: 40, color: red }
+  const pods: TextLine = notDeployed(dep) ? { text: 'NOT DEPLOYED · in architecture.json', px: 40, color: red }
+    : state?.down ? { text: `PODS DOWN · ${ready}/${want} ready`, px: 40, color: red }
     : rollout.stalled ? { text: `⚠ ${rollout.version} STUCK · old version serving`, px: 40, color: amber }
       : rollout.rolling && Object.keys(rollout.byVersion).length > 1
         ? { text: `ROLLING OUT ${rollout.version} · ${rollout.byVersion[rollout.version]?.ready ?? 0}/${want} ready`, px: 40, color: amber }
@@ -448,7 +449,7 @@ function Building({ dep, info, pods, pos, selected, related, onSelect, powerGrid
     <group position={pos}>
       {selected && <Pad w={17} d={17} r={3.5} position={[0, 0.008, -0.6]} color={info.accent} opacity={0.4} />}
       {!selected && related && <Pad w={17} d={17} r={3.5} position={[0, 0.008, -0.6]} color={info.accent} opacity={0.16} />}
-      {state?.affected && <Alarm color={state.affected.color} strong={state.affected.rank >= 3 && state.live?.infrastructure !== 'scaled_down'} />}
+      {state?.affected && <Alarm color={state.affected.color} strong={state.affected.rank >= SERIOUS && state.live?.infrastructure !== 'scaled_down'} />}
       <group ref={body} position={[0, 0, -2]} scale={size}>
         <Landmark info={info} glow={glow} theme={theme} />
         {/* One invisible hit-box for hover/click instead of handlers on every part */}

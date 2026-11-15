@@ -92,7 +92,5 @@ Operator refusal events are synthetic illustrations. They never enter measured
 TRAFFIC, Journey evidence, service health or PostgreSQL history. A payment decline
 is an HTTP reply and never establishes a Kubernetes infrastructure outage.
 
-Use `minishop/demo_control/` and `minishop/frontend/` as canonical sources. The
-tracked `.minishop-live` source copies and restart builds are retained for review,
-but must not supply the application build. See `INTEGRATION_VERIFICATION.md` at
+Use `minishop/demo_control/` and `minishop/frontend/` as canonical sources. See `INTEGRATION_VERIFICATION.md` at
 the repository root for all canonical paths and verification boundaries.

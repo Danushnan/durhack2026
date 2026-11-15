@@ -90,7 +90,7 @@ button.small { padding: 2px 8px; font-size: 11px; }
 .help p { margin: 4px 0; }
 
 /* services rail */
-.services { top: 64px; left: 12px; display: flex; flex-direction: column; gap: 4px; padding: 6px; max-height: calc(100vh - 140px); overflow: auto; }
+.services { top: 64px; left: 12px; display: flex; flex-direction: column; gap: 4px; padding: 6px; max-height: calc(100vh - 64px - 12px - 8px - var(--overview-h, 128px)); overflow: auto; }
 .services .toggle { align-self: flex-end; padding: 0 8px; font-weight: 700; }
 .svc { display: flex; align-items: center; gap: 8px; text-align: left; padding: 4px 6px; }
 .svc.sel { border-color: var(--accent); }
@@ -177,6 +177,8 @@ i { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin
 /* traffic overview (bottom left), headline tiles, affected list, full legend */
 .overview { bottom: 12px; left: 12px; width: 300px; max-width: calc(100vw - 24px); padding: 10px; }
 .overview .small, .small { font-size: 11px; margin: 6px 0 4px; }
+.counts { display: flex; gap: 12px; margin: 4px 0 6px; font-size: 12px; }
+.counts i { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 4px; border: 1px solid var(--muted); }
 .tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(80px, 1fr)); gap: 6px; }
 .tile { border: 1px solid var(--border); border-radius: 8px; padding: 6px 8px; display: flex; flex-direction: column; gap: 2px; }
 .tile b { font-size: 18px; font-variant-numeric: tabular-nums; }
