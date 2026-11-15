@@ -13,6 +13,10 @@ import { liveServiceView } from './liveMetrics'
 import { LiveIncidentBanner, LiveOverview, LiveServiceDetails, LiveSourceStatus } from './LiveMonitoring'
 import type { LiveServiceView } from './liveMetrics'
 import { discoveryReady, type RoadDiscovery, startDiscovery, updateDiscovery } from './roadDiscovery'
+import { DEMO_DEPOT } from './demoPackets'
+import { districtOf } from './streetNetwork'
+
+const DISTRICT_COLORS = ['#22d3ee', '#e879f9', '#bef264', '#fbc08c', '#93a9ff', '#fba6c8']
 
 export default function App() {
   const cluster = useCluster()
@@ -54,6 +58,12 @@ export default function App() {
   const nodes = all.filter((o) => o.kind === 'Node').sort((a, b) => a.metadata.name.localeCompare(b.metadata.name))
   const miniShopKeys = new Set(cluster.metrics?.services.map((row) => row.service))
   const deployments = all.filter(isWorkload).sort((a, b) => Number(!miniShopKeys.has(keyOf(a))) - Number(!miniShopKeys.has(keyOf(b))) || keyOf(a).localeCompare(keyOf(b)))
+  const districts = [...new Set(deployments.flatMap(({ metadata }) => metadata.namespace ? [metadata.namespace] : []))].sort()
+  if (Object.values(cluster.demoPackets?.routes ?? {}).some(({ call }) => call.from === DEMO_DEPOT || call.to === DEMO_DEPOT)) {
+    const depot = districtOf(DEMO_DEPOT)
+    if (!districts.includes(depot)) districts.push(depot)
+  }
+  const districtColors = new Map(districts.map((name, i) => [name, DISTRICT_COLORS[i % DISTRICT_COLORS.length]]))
   const events = all.filter((o) => o.kind === 'Event').sort((a, b) =>
     Number(b.metadata.uid.slice(3)) - Number(a.metadata.uid.slice(3)))
   const dep = deployments.find((o) => keyOf(o) === selected)
@@ -97,7 +107,7 @@ export default function App() {
   return (
     <div className={`app ${mode}`}>
       <City cluster={cluster} selected={selected} onSelect={setSelected} powerGrid={powerGrid} theme={theme}
-        onHover={setHover} states={states} homeTick={homeTick} flows={flows} replay={simulatorSource && replayAt !== null} mode={view}
+        onHover={setHover} states={states} homeTick={homeTick} flows={flows} districtColors={districtColors} replay={simulatorSource && replayAt !== null} mode={view}
         discoveredRoads={activeDiscovery?.roads}
         trafficPaused={live && (!cluster.connected || !!cluster.awaitingSnapshot || !!cluster.stale || !!cluster.metricsStale ||
           !!cluster.metricsError || (!!activeDiscovery && !discoveryReady(cluster)))} />
@@ -201,7 +211,7 @@ export default function App() {
       {selected === 'city-hall' && <HallPanel events={events} onClose={() => setSelected(null)} />}
       {dep && <Inspect dep={dep} cluster={cluster} all={all} events={events} states={states} edges={flows} sim={sim} onPick={setSelected} onClose={() => setSelected(null)} />}
 
-      {legendOpen ? <Legend live={live} onClose={() => setLegendOpen(false)} /> : (powerGrid || unhealthyPods) && (
+      {legendOpen ? <Legend live={live} districtColors={districtColors} onClose={() => setLegendOpen(false)} /> : (powerGrid || unhealthyPods) && (
         <div className="hud legend" aria-label="Legend">
           {powerGrid
             ? nodes.map((n, i) => <span key={n.metadata.uid}><i style={{ background: NODE_COLORS[i % NODE_COLORS.length] }} />{n.metadata.name}</span>)
@@ -642,7 +652,7 @@ function Overview({ flows, deployments, states, onPick }: {
 }
 
 /** What every colour and mark in the city means, with the thresholds behind them. */
-function Legend({ live, onClose }: { live: boolean; onClose: () => void }) {
+function Legend({ live, districtColors, onClose }: { live: boolean; districtColors: ReadonlyMap<string, string>; onClose: () => void }) {
   return (
     <aside className="hud legend full" aria-label="Legend">
       <button className="close" onClick={onClose} aria-label="Close legend">×</button>
@@ -662,6 +672,11 @@ function Legend({ live, onClose }: { live: boolean; onClose: () => void }) {
       <div>🚨 A pulsing ring around the Building, plus a beam of light when it is down, refusing or failing requests. Listed bottom left.</div>
       <h3>Units · Pods</h3>
       {(Object.keys(STATUS_COLOR) as PodStatus[]).map((s) => <div key={s}><i style={{ background: STATUS_COLOR[s] }} />{FRIENDLY[s]} <small>({s})</small></div>)}
+      {districtColors.size > 1 && <>
+        <h3>Lorry destinations</h3>
+        <div>The glow matches the colour beside the district name on the map.</div>
+        {[...districtColors].map(([name, color]) => <div key={name}><i style={{ background: color }} />{name}</div>)}
+      </>}
       <h3>Cars · requests</h3>
       <div>Aggregate activity illustration, not request-level traces. Car count, travel time and Pod flashes are illustrative.</div>
       <div>🚕 Yellow taxis are customers; other Cars wear their caller's colour.</div>

@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react'
+import type { DemoPackets } from './demoPackets'
 import type { LiveMetricsSnapshot } from './liveMetrics'
 import { checkSnapshotFreshness, initialClusterState, reduceWatchMessage } from './watch'
 
@@ -38,7 +39,7 @@ export interface Edge {
 export interface ClusterState {
   objects: Record<string, K8sObject> // by uid
   edges: Edge[]
-  demoPackets?: { cars: number; lorries: number; reset: number }
+  demoPackets?: DemoPackets
   connected: boolean
   context?: string | null // kubectl context when watching a real cluster (read-only); null/absent for the simulator
   stale?: boolean          // live mode: the last refresh from the cluster failed
@@ -172,7 +173,10 @@ export function useCluster(): ClusterState {
       ws = socket
       socket.onopen = () => { if (!closed && ws === socket) setState((s) => ({ ...s, connected: true, awaitingSnapshot: true })) }
       socket.onmessage = (msg) => {
-        if (!closed && ws === socket) setState((s) => reduceWatchMessage(s, msg.data))
+        if (!closed && ws === socket) {
+          const receivedAt = Date.now(), seed = Math.floor(Math.random() * 2 ** 32)
+          setState((s) => reduceWatchMessage(s, msg.data, receivedAt, seed))
+        }
       }
       socket.onerror = () => socket.close()
       socket.onclose = () => {

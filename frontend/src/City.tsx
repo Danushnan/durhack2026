@@ -17,7 +17,8 @@ import { admit, bendLimit, type CarAgent, CARS_PER_REQUEST, DRIVE, exitClear, ne
 import { label, latencyText, type LiveServiceView } from './liveMetrics'
 import { miniShopLayoutCalls } from './miniShopRoads'
 import { roadKey, roadVisible } from './roadDiscovery'
-import { buildStreetNetwork, crossesDistricts, HIGHWAY_WIDTH, ROUNDABOUT_RADIUS, type Roundabout, type StreetRoute } from './streetNetwork'
+import { DEMO_DEPOT } from './demoPackets'
+import { buildStreetNetwork, crossesDistricts, districtOf, HIGHWAY_WIDTH, ROUNDABOUT_RADIUS, type Roundabout, type StreetRoute } from './streetNetwork'
 
 export interface HoverInfo { title: string; lines: string[]; x: number; y: number }
 type OnHover = (h: HoverInfo | null) => void
@@ -141,19 +142,24 @@ function GroundText({ text, height, position, color }: { text: string; height: n
 
 // ---------- ground and Districts ----------
 
-function Ground({ layout, theme }: { layout: CityLayout; theme: Theme }) {
+function Ground({ layout, theme, districtColors }: { layout: CityLayout; theme: Theme; districtColors: ReadonlyMap<string, string> }) {
   return (
     <group>
       <mesh rotation-x={-Math.PI / 2} position={[0, -0.08, 0]} receiveShadow>
         <planeGeometry args={[900, 900]} />
         <meshStandardMaterial color={theme.ground} />
       </mesh>
-      {layout.districts.map((d) => (
-        <group key={d.name}>
+      {layout.districts.map((d) => {
+        const color = districtColors.size > 1 ? districtColors.get(d.name) : undefined
+        return <group key={d.name}>
           <Pad w={d.x1 - d.x0} d={d.z1 - d.z0} r={5} position={[(d.x0 + d.x1) / 2, 0, (d.z0 + d.z1) / 2]} color={theme.district} />
-          <GroundText text={`${d.name.toUpperCase()} DISTRICT`} height={1.5} position={[d.x0 + 2.5, 0.03, d.z1 - 1.4]} color={theme.groundText} />
+          {color && <>
+            <Pad w={1.55} d={1.3} r={0.22} position={[d.x0 + 3.14, 0.025, d.z1 - 1.4]} color="#1e293b" />
+            <Pad w={1.18} d={0.93} r={0.14} position={[d.x0 + 3.14, 0.035, d.z1 - 1.4]} color={color} />
+          </>}
+          <GroundText text={`${d.name.toUpperCase()} DISTRICT`} height={1.5} position={[d.x0 + (color ? 4.1 : 2.5), 0.04, d.z1 - 1.4]} color={theme.groundText} />
         </group>
-      ))}
+      })}
     </group>
   )
 }
@@ -545,20 +551,45 @@ function PowerStation({ node, pos, used, color, theme, onHover, selected, onSele
 
 // ---------- Cars ----------
 
+// Shared alpha texture keeps the lorry glow independent of lighting and post-processing.
+const lorryGlow = (() => {
+  const size = 32, pixels = new Uint8Array(size * size * 4)
+  for (let y = 0; y < size; y++) {
+    for (let x = 0; x < size; x++) {
+      const distance = Math.hypot(x + 0.5 - size / 2, y + 0.5 - size / 2) / (size / 2)
+      const offset = 4 * (x + y * size)
+      pixels.set([255, 255, 255, Math.round(255 * Math.max(0, 1 - distance) ** 2)], offset)
+    }
+  }
+  const texture = new THREE.DataTexture(pixels, size, size)
+  texture.magFilter = THREE.LinearFilter
+  texture.needsUpdate = true
+  return texture
+})()
+
 /**
  * Cars are independent drivers (see traffic.ts): they pull out of the caller as requests arrive, follow
  * the Car ahead, slow for bends, and at the callee's door are served, refused (red) or answered with an
  * error (orange). Fate is decided on arrival, from the live state, so Cars already on the road react to failures.
  */
-function Traffic({ edge, road, theme, accent, onHover, endpoints, paused, liveMode, previewCount }: {
+function Traffic({ edge, road, theme, accent, onHover, endpoints, paused, liveMode, previewCount, districtColors }: {
   edge: RoadFlow; road: StreetRoute; theme: Theme; accent: string; onHover: OnHover
+  districtColors: ReadonlyMap<string, string>
   endpoints: string[]; paused: boolean; liveMode: boolean; previewCount?: number // Pod flashes illustrate distribution, not observed request routing
 }) {
   const lorry = crossesDistricts(edge)
+  const sourceDistrict = districtOf(edge.from), destinationDistrict = districtOf(edge.to)
+  const originHue = districtColors.get(sourceDistrict), destinationHue = districtColors.get(destinationDistrict)
+  const lorryColors = useMemo(() => ({
+    outbound: new THREE.Color(destinationHue ?? '#ffffff'), inbound: new THREE.Color(originHue ?? destinationHue ?? '#ffffff'),
+  }), [originHue, destinationHue])
+  const signals = useRef<(THREE.MeshBasicMaterial | null)[]>([])
+  const halos = useRef<(THREE.SpriteMaterial | null)[]>([])
   const length = lorry ? 2.4 : DRIVE.length
   const front = lorry ? 1.2 : 0.56, rear = -front
   const lampOffset = lorry ? 0.34 : 0.22
   const preview = previewCount !== undefined
+  const poolSize = previewCount === undefined ? CAR_POOL : Math.min(4, previewCount)
   const dispatched = useRef(0)
   const targets = useRef(endpoints)
   targets.current = endpoints
@@ -595,7 +626,7 @@ function Traffic({ edge, road, theme, accent, onHover, endpoints, paused, liveMo
     const e = live.current
     // Arrivals at the request rate, jittered; a backlog waits (up to 3) while the caller's exit is blocked.
     const used = new Set(cars.current.map((c) => c.slot))
-    const slot = [...Array(CAR_POOL).keys()].find((i) => !used.has(i))
+    const slot = [...Array(poolSize).keys()].find((i) => !used.has(i))
     // MiniShop's manual traffic is much quieter than the simulator. Normalise only the illustration;
     // measured rates are unchanged, and the same pool/exit limits still bound the rendering cost.
     if (slot !== undefined) {
@@ -627,6 +658,11 @@ function Traffic({ edge, road, theme, accent, onHover, endpoints, paused, liveMo
       g.position.copy(tmp)
       g.scale.setScalar(1.15 * Math.max(0.01, Math.min(1, car.s / CAR_GROW, (trip.length - car.s) / CAR_GROW)))
       paints.current[i]?.color.copy(car.fate ? colors[car.fate] : colors.ok)
+      if (lorry) {
+        const hue = car.phase === 'back' ? lorryColors.inbound : lorryColors.outbound
+        signals.current[i]?.color.copy(hue)
+        halos.current[i]?.color.copy(hue)
+      }
       if (hazards.current[i]) hazards.current[i]!.visible = !!car.fate && blink
       if (brakes.current[i]) brakes.current[i]!.visible = car.a < -1.5 || (car.v < 0.3 && car.phase !== 'in')
     })
@@ -638,20 +674,31 @@ function Traffic({ edge, road, theme, accent, onHover, endpoints, paused, liveMo
       : 'Illustrates normalised aggregate activity; car count, travel time, queuing and Pod flashes are not request-level measurements.'
   return (
     <group>
-      {Array.from({ length: CAR_POOL }, (_, i) => (
+      {Array.from({ length: poolSize }, (_, i) => (
         <group key={i} visible={false} ref={(g) => { groups.current[i] = g }}
           onPointerOver={(e) => {
             e.stopPropagation()
             const car = cars.current.find((c) => c.slot === i)
             onHover({
               title: `${lorry ? '🚚' : '🚗'} ${preview ? 'Demo packet' : 'Aggregate activity'}: ${src} → ${dst}`,
-              lines: preview ? [story(car)] : [story(car), `This route: ${describeFlow(live.current)}.`],
+              lines: [
+                ...(lorry ? [`Heading to ${car?.phase === 'back' ? sourceDistrict : destinationDistrict} district.`] : []),
+                story(car), ...(!preview ? [`This route: ${describeFlow(live.current)}.`] : []),
+              ],
               ...at(e),
             })
           }}
           onPointerOut={() => onHover(null)}>
           {lorry ? <>
             <mesh position={[-0.36, 0.63, 0]} castShadow><boxGeometry args={[1.62, 0.81, 0.92]} /><meshStandardMaterial ref={(m) => { paints.current[i] = m }} color={accent} /></mesh>
+            <mesh position={[-0.36, 1.045, 0]}>
+              <boxGeometry args={[1.64, 0.09, 0.94]} />
+              <meshBasicMaterial ref={(m) => { signals.current[i] = m }} color={destinationHue} toneMapped={false} />
+            </mesh>
+            <sprite position={[-0.36, 1.22, 0]} scale={[4.2, 3, 1]} raycast={() => {}}>
+              <spriteMaterial ref={(m) => { halos.current[i] = m }} map={lorryGlow} color={destinationHue}
+                blending={THREE.AdditiveBlending} transparent opacity={0.92} depthWrite={false} toneMapped={false} />
+            </sprite>
             <mesh position={[0.78, 0.47, 0]} castShadow><boxGeometry args={[0.78, 0.64, 0.84]} /><meshStandardMaterial color={night ? '#64748b' : '#f8fafc'} /></mesh>
             <mesh position={[1.176, 0.62, 0]}><boxGeometry args={[0.02, 0.2, 0.68]} /><meshStandardMaterial color="#18273e" /></mesh>
           </> : <>
@@ -899,23 +946,6 @@ function CameraRig({ focus, layout, homeTick, mode }: { focus: THREE.Vector3 | n
 
 // ---------- the City ----------
 
-const DEMO_DEPOT = 'demo-transit/depot'
-
-function demoRoutes(workloads: string[], calls: Call[], packets: ClusterState['demoPackets']) {
-  const source = workloads.find((key) => key === 'minishop/minishop-web') ?? workloads[0]
-  const valid = calls.filter(({ from, to }) => workloads.includes(from) && workloads.includes(to))
-  const localTarget = source && workloads.find((to) => to !== source && !crossesDistricts({ from: source, to }))
-  const local = valid.find(({ from, to }) => from === source && to === 'minishop/product-api') ??
-    valid.find((call) => !crossesDistricts(call)) ?? (source && localTarget ? { from: source, to: localTarget } : undefined)
-  const cross = valid.find(crossesDistricts) ?? (source && {
-    from: source, to: workloads.find((to) => crossesDistricts({ from: source, to })) ?? DEMO_DEPOT,
-  })
-  return [
-    ...(packets?.cars && local ? [{ call: local, count: packets.cars }] : []),
-    ...(packets?.lorries && cross ? [{ call: cross, count: packets.lorries }] : []),
-  ]
-}
-
 function addDemoDepot(layout: CityLayout): CityLayout {
   const x = layout.core.x1 + 28, z = (layout.core.z0 + layout.core.z1) / 2
   return { ...layout,
@@ -925,9 +955,10 @@ function addDemoDepot(layout: CityLayout): CityLayout {
   }
 }
 
-export function City({ cluster, selected, onSelect, powerGrid, theme, onHover, states, homeTick, flows, replay, mode, trafficPaused, discoveredRoads }: {
+export function City({ cluster, selected, onSelect, powerGrid, theme, onHover, states, homeTick, flows, replay, mode, trafficPaused, discoveredRoads, districtColors }: {
   flows: RoadFlow[]; replay: boolean; mode: ViewMode; trafficPaused: boolean
   discoveredRoads?: ReadonlySet<string>
+  districtColors: ReadonlyMap<string, string>
   cluster: ClusterState; selected: string | null; onSelect: (key: string | null) => void
   powerGrid: boolean; theme: Theme; onHover: OnHover; states: ServiceState; homeTick: number
 }) {
@@ -947,8 +978,10 @@ export function City({ cluster, selected, onSelect, powerGrid, theme, onHover, s
   const { known, supplemental } = cluster.metrics ? miniShopLayoutCalls([...cluster.edges, ...remembered], workloadKeys)
     : { known: cluster.edges, supplemental: [] }
   const layoutKey = [workloadKeys, nodes.map((n) => n.metadata.name), known.map(roadKey).sort()].join('|')
-  const previews = demoRoutes(workloadKeys, [...known, ...supplemental], cluster.demoPackets)
-  const usesDepot = previews.some(({ call }) => call.to === DEMO_DEPOT)
+  const currentWorkloads = new Set([...workloadKeys, DEMO_DEPOT])
+  const previews = Object.values(cluster.demoPackets?.routes ?? {}).filter(({ call: { from, to } }) =>
+    currentWorkloads.has(from) && currentWorkloads.has(to))
+  const usesDepot = previews.some(({ call }) => call.from === DEMO_DEPOT || call.to === DEMO_DEPOT)
   const networkCalls = [...supplemental, ...previews.map(({ call }) => call)]
   const supplementalKey = [...new Set(networkCalls.map(roadKey))].sort().join(',')
   const baseLayout = useMemo(() => layoutCity(deployments.map((d) => ({ namespace: d.metadata.namespace!, name: d.metadata.name })),
@@ -1046,7 +1079,7 @@ export function City({ cluster, selected, onSelect, powerGrid, theme, onHover, s
       <directionalLight position={[30, 45, 25]} intensity={theme.sun} color={theme.sunColor} castShadow
         shadow-mapSize={[2048, 2048]} shadow-camera-left={-80} shadow-camera-right={80} shadow-camera-top={80} shadow-camera-bottom={-80} shadow-camera-far={220}
         shadow-bias={-0.0004} shadow-normalBias={0.04} />
-      <Ground layout={layout} theme={theme} />
+      <Ground layout={layout} theme={theme} districtColors={districtColors} />
       {ready && <Scenery core={layout.core} districts={layout.districts} obstacles={obstacles} keep={keep} theme={theme} />}
       {ready && <Lamps points={visibleLamps} theme={theme} />}
       {network.segments.map(({ key, points, calls, highway }) => {
@@ -1092,12 +1125,12 @@ export function City({ cluster, selected, onSelect, powerGrid, theme, onHover, s
       {previews.map(({ call, count }) => {
         const key = roadKey(call), road = network.routes[key]
         return road && <Traffic key={`preview:${key}:${cluster.demoPackets?.reset}`} edge={{ ...call, rps: 0, healthy: true }}
-          road={road} theme={theme} accent="#d6a53b" onHover={onHover} endpoints={[]} paused={false} liveMode={false} previewCount={count} />
+          road={road} theme={theme} districtColors={districtColors} accent="#d6a53b" onHover={onHover} endpoints={[]} paused={false} liveMode={false} previewCount={count} />
       })}
       {edges.map((e) => {
         if (replay && !e.measured) return null // replaying history: only routes with recorded traffic get Cars
         // A Car wears its caller's colour (customers: yellow taxis); how its request went shows at the door.
-        return <Traffic key={roadKey(e)} edge={e} road={network.routes[roadKey(e)]} theme={theme} onHover={onHover}
+        return <Traffic key={roadKey(e)} edge={e} road={network.routes[roadKey(e)]} theme={theme} districtColors={districtColors} onHover={onHover}
           accent={e.from.startsWith('ingress:') ? CUSTOMER : landmarkFor(nameOf(e.from)).accent} endpoints={endpoints(e.to)} paused={trafficPaused} liveMode={typeof cluster.context === 'string'} />
       })}
       {mode === 'iso'

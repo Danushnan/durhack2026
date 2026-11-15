@@ -2,7 +2,7 @@ import assert from 'node:assert/strict'
 import { test } from 'node:test'
 import type { ClusterState, Edge } from '../src/k8s.ts'
 import { carTrip, layoutCity, ROAD_W } from '../src/layout.ts'
-import { buildStreetNetwork, ROUNDABOUT_RADIUS } from '../src/streetNetwork.ts'
+import { buildStreetNetwork, crossesDistricts, ROUNDABOUT_RADIUS } from '../src/streetNetwork.ts'
 import { miniShopLayoutCalls } from '../src/miniShopRoads.ts'
 import { roadKey, roadVisible, startDiscovery, updateDiscovery } from '../src/roadDiscovery.ts'
 import { initialClusterState, reduceWatchMessage } from '../src/watch.ts'
@@ -183,18 +183,36 @@ test('cross-district routes fall back to access roads in districts with no stree
   assert.equal(network.roundabouts.length, 2)
 })
 
-test('demo packet presets count vehicles separately from measured traffic and reset clears both queues', () => {
+test('demo presets vary both endpoints and keep local and cross-district vehicles separate', () => {
   const edge = { from: 'shop/web', to: 'data/redis', rps: 1, healthy: true }
-  const initial = reduceWatchMessage(initialClusterState(), [source(null), { type: 'TRAFFIC', edges: [edge] }])
-  const sent = reduceWatchMessage(initial, [
-    { type: 'DEMO_PACKETS', count: 1, cross_district: false },
-    { type: 'DEMO_PACKETS', count: 5, cross_district: true },
-    { type: 'DEMO_PACKETS', count: 101, cross_district: true },
-  ])
-  assert.deepEqual(sent.demoPackets, { cars: 1, lorries: 5, reset: 0 })
-  assert.deepEqual(sent.edges, [edge])
+  const workloads = ['shop/web', 'shop/cart', 'shop/checkout', 'data/redis', 'data/postgres']
+  const deployments = workloads.map((key) => {
+    const [namespace, name] = key.split('/')
+    return { type: 'ADDED', object: { kind: 'Deployment', metadata: { uid: key, namespace, name } } }
+  })
+  const initial = reduceWatchMessage(initialClusterState(), [source(null), ...deployments, { type: 'TRAFFIC', edges: [edge] }])
+  const send = (state: ClusterState, count: number, cross: boolean, seed: number) => reduceWatchMessage(state,
+    [{ type: 'DEMO_PACKETS', count, cross_district: cross }], localStart, seed)
+  const first = send(initial, 1, false, 42)
+  const second = send(first, 1, false, 42)
+  const before = first.demoPackets!.last.local!, after = second.demoPackets!.last.local!
+  assert.notEqual(after.from, before.from)
+  assert.notEqual(after.to, before.to)
+
+  for (const [count, cross] of [[5, false], [100, false], [5, true]] as const) {
+    const sent = send(initial, count, cross, 123)
+    const routes = Object.values(sent.demoPackets!.routes)
+    assert.equal(routes.reduce((sum, route) => sum + route.count, 0), count)
+    assert.ok(routes.every(({ call }) => call.from !== call.to && crossesDistricts(call) === cross))
+    assert.ok(new Set(routes.map(({ call }) => call.from)).size > 1)
+    assert.ok(new Set(routes.map(({ call }) => call.to)).size > 1)
+    if (count === 5) assert.equal(routes.length, 5)
+    assert.deepEqual(sent.edges, [edge])
+  }
+  const sent = send(second, 5, true, 987)
+  assert.deepEqual(send(sent, 101, true, 42).demoPackets, sent.demoPackets)
   const reset = reduceWatchMessage(sent, [{ type: 'DEMO_PACKETS_RESET' }])
-  assert.deepEqual(reset.demoPackets, { cars: 0, lorries: 0, reset: 1 })
+  assert.deepEqual(reset.demoPackets, { routes: {}, last: {}, reset: 1 })
   assert.deepEqual(reset.edges, [edge])
 })
 

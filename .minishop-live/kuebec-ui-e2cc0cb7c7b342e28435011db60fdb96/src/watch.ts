@@ -1,4 +1,5 @@
 import type { ClusterState, Edge, K8sObject } from './k8s.ts'
+import { queueDemoPackets } from './demoPackets.ts'
 import { isLiveMetrics, record, SNAPSHOT_SILENCE_MS } from './liveMetrics.ts'
 
 export const initialClusterState = (): ClusterState => ({ objects: {}, edges: [], connected: false })
@@ -14,7 +15,7 @@ const edgeGuard = (e: unknown): e is Edge => record(e) && typeof e.from === 'str
   (e.latency_ms == null || typeof e.latency_ms === 'number' && Number.isFinite(e.latency_ms) && e.latency_ms >= 0)
 
 /** All resource and metric snapshots are reconciled in one React update. Never accumulate metrics. */
-export function reduceWatchMessage(previous: ClusterState, data: unknown, receivedAt = Date.now()): ClusterState {
+export function reduceWatchMessage(previous: ClusterState, data: unknown, receivedAt = Date.now(), packetSeed = receivedAt): ClusterState {
   let batch: unknown
   try { batch = typeof data === 'string' ? JSON.parse(data) : data } catch { return { ...previous, metricsError: 'Invalid WebSocket JSON; retaining last data' } }
   if (!Array.isArray(batch)) return { ...previous, metricsError: 'Expected an event array; retaining last data' }
@@ -23,6 +24,10 @@ export function reduceWatchMessage(previous: ClusterState, data: unknown, receiv
   let receivedSource = false
   let receivedTraffic = false
   let receivedMetrics = false
+  const packetRandom = () => {
+    packetSeed = (Math.imul(packetSeed, 1664525) + 1013904223) >>> 0
+    return packetSeed / 2 ** 32
+  }
   const writeObjects = () => { if (objects === previous.objects) objects = { ...objects } }
   for (const event of batch) {
     if (!record(event)) continue
@@ -56,13 +61,15 @@ export function reduceWatchMessage(previous: ClusterState, data: unknown, receiv
       case 'DEMO_PACKETS': {
         if (typeof event.count !== 'number' || !Number.isInteger(event.count) || event.count < 1 || event.count > 100 ||
           typeof event.cross_district !== 'boolean') break
-        const demo = state.demoPackets ?? { cars: 0, lorries: 0, reset: 0 }
-        const vehicle = event.cross_district ? 'lorries' : 'cars'
-        state.demoPackets = { ...demo, [vehicle]: demo[vehicle] + event.count }
+        const demo = state.demoPackets ?? { routes: {}, last: {}, reset: 0 }
+        const workloads = new Set(Object.values(objects).flatMap(({ kind, metadata }) =>
+          (kind === 'Deployment' || kind === 'StatefulSet') && metadata.namespace && !metadata.deletionTimestamp
+            ? [`${metadata.namespace}/${metadata.name}`] : []))
+        state.demoPackets = queueDemoPackets(demo, [...workloads].sort(), event.count, event.cross_district, packetRandom)
         break
       }
       case 'DEMO_PACKETS_RESET':
-        state.demoPackets = { cars: 0, lorries: 0, reset: (state.demoPackets?.reset ?? 0) + 1 }
+        state.demoPackets = { routes: {}, last: {}, reset: (state.demoPackets?.reset ?? 0) + 1 }
         break
       case 'TRAFFIC':
         if (Array.isArray(event.edges) && event.edges.every(edgeGuard)) {
