@@ -1,7 +1,7 @@
 import { trafficOutcomeRates } from './trafficOutcome'
 import { startsDiscoveryActivity, type DiscoveryActivityPeriod } from './discoveryTraffic'
 import { DiscoveryFocus } from './DiscoveryFocus'
-import { DISCOVERY_CAR_DENSITY } from './discoveryActivity'
+import { DISCOVERY_CAR_DENSITY } from './discoveryActivity.ts'
 import { JourneyGuide, JourneyFollowCamera } from './JourneyScene'
 import type { JourneyAnchor, JourneySpeed } from './journeyPlayback'
 import type { JourneyStep } from './Journey'
