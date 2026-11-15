@@ -1,3 +1,4 @@
+import { isMiniShopComponent } from './miniShopView.ts'
 import type { ClusterState, Edge, K8sObject } from './k8s.ts'
 import { queueDemoPackets } from './demoPackets.ts'
 import { isLiveMetrics, record, SNAPSHOT_SILENCE_MS } from './liveMetrics.ts'
@@ -62,9 +63,13 @@ export function reduceWatchMessage(previous: ClusterState, data: unknown, receiv
         if (typeof event.count !== 'number' || !Number.isInteger(event.count) || event.count < 1 || event.count > 100 ||
           typeof event.cross_district !== 'boolean') break
         const demo = state.demoPackets ?? { routes: {}, last: {}, reset: 0 }
-        const workloads = new Set(Object.values(objects).flatMap(({ kind, metadata }) =>
-          (kind === 'Deployment' || kind === 'StatefulSet') && metadata.namespace && !metadata.deletionTimestamp
-            ? [`${metadata.namespace}/${metadata.name}`] : []))
+        const candidates = Object.values(objects)
+        const miniShopOnly = typeof state.context === 'string' && candidates.some(isMiniShopComponent)
+        const workloads = new Set(candidates.flatMap(object => {
+          const {kind, metadata} = object
+          return (kind === 'Deployment' || kind === 'StatefulSet') && metadata.namespace && !metadata.deletionTimestamp && (!miniShopOnly || isMiniShopComponent(object))
+            ? [`${metadata.namespace}/${metadata.name}`] : []
+        }))
         state.demoPackets = queueDemoPackets(demo, [...workloads].sort(), event.count, event.cross_district, packetRandom)
         break
       }

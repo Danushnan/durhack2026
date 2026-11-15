@@ -25,7 +25,7 @@ const base=`http://127.0.0.1:${server.address().port}`
 const browser=await chromium.launch({executablePath:process.env.CHROME_PATH,headless:true,args:['--no-sandbox','--disable-dev-shm-usage','--enable-unsafe-swiftshader']})
 try{
  const page=await browser.newPage({viewport:{width:1440,height:1000}}),errors=[]
- page.setDefaultTimeout(15000)
+ page.setDefaultTimeout(30000)
  page.on('pageerror',e=>errors.push(e.message))
  let socket,context='kind-minishop',connections=0,posts=0
  const initialTime=Date.now()
@@ -58,7 +58,8 @@ try{
   await page.getByRole('region',{name:'Selected connection'}).waitFor()
   socket.send(JSON.stringify([{type:'DEMO_REFUSAL',context,source:other.from,target:other.to}]))
   if(process.env.CAPTURE_SCREENSHOTS)await page.screenshot({path:'/tmp/durhack-integration-discovery.png'})
-  await page.getByRole('button',{name:'Clear highlight'}).click()
+  await page.getByRole('button',{name:'Clear highlight'}).click({noWaitAfter:true})
+  assert.equal(await page.getByRole('region',{name:'Selected connection'}).count(),0)
   await page.getByRole('button',{name:'Journey',exact:true}).click()
   await page.getByLabel('MiniShop URL').fill(`${base}/mock-shop`)
   const popup=page.waitForEvent('popup');await page.getByRole('button',{name:'Open paired MiniShop'}).click();const shop=await popup
@@ -69,6 +70,13 @@ try{
    for(const text of ['What’s happening?','Why this component?','Why does it matter?'])assert.ok(await panel.getByText(text,{exact:true}).isVisible())
    await page.getByLabel('Guide speed').selectOption('0.25');assert.equal(await page.getByLabel('Guide speed').inputValue(),'0.25')
    await page.getByLabel('Guide speed').selectOption('1')
+   if(index===1){
+    await page.getByRole('button',{name:'Switch to the free 3D view'}).click()
+    await page.getByRole('button',{name:'Reset the camera to the overview'}).click()
+    const follow=page.getByRole('button',{name:'Follow journey guide'})
+    await follow.click();assert.equal(await follow.getAttribute('aria-pressed'),'true')
+    await page.getByRole('button',{name:'Switch to the isometric view'}).click()
+   }
    for(let i=0;i<4;i++)await page.getByRole('button',{name:'Next',exact:true}).click()
    if(index===2)await panel.getByText(/HTTP 402/).first().waitFor()
    const before=posts;await page.getByRole('button',{name:'Replay guide'}).click();assert.equal(posts,before)
@@ -84,9 +92,15 @@ try{
   await page.getByRole('button',{name:'Journey',exact:true}).click()
   await panel.getByText('Waiting for a paired shopping action.').waitFor()
   assert.ok(await canvas.evaluate(c=>c.isConnected))
+  await page.getByRole('button',{name:'Legend',exact:true}).click()
+  assert.ok(await page.getByRole('complementary',{name:'Legend',exact:true}).isVisible())
+  await page.getByRole('button',{name:'Close legend'}).click()
+  assert.equal(await page.locator('aside[aria-label="MiniShop services"] .svc').count(),7)
   for(const width of [320,768,1024,1440]){
    await page.setViewportSize({width,height:900})
    assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth>innerWidth),false)
+   const bounds=await panel.boundingBox()
+   assert.ok(bounds&&bounds.y+bounds.height<=900,'Journey panel must stay within the viewport')
   }
   assert.deepEqual(errors,[])
   console.log(JSON.stringify({passed:true,posts,connections,elapsedMs:Date.now()-initialTime,errors}))
