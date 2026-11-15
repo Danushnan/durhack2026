@@ -7,6 +7,7 @@ import subprocess
 import time
 from contextlib import asynccontextmanager
 from pathlib import Path
+from uuid import UUID, uuid4
 from typing import Literal
 from urllib.parse import urlsplit
 
@@ -17,6 +18,8 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 from .traffic import Traffic
+from .scenarios import Scenarios
+from .ambient import AmbientTraffic
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -48,12 +51,25 @@ class Packets(BaseModel):
     model_config = ConfigDict(extra='forbid')
     count: int = Field(ge=1, le=100, strict=True)
     cross_district: bool = Field(strict=True)
+    ambient: bool = Field(default=False, strict=True)
+
+
+class AmbientSettings(BaseModel):
+    model_config = ConfigDict(extra='forbid')
+    enabled: bool = Field(strict=True)
+    rate: float = Field(default=1, ge=.5, le=5, allow_inf_nan=False)
 
 
 class Action(BaseModel):
     model_config = ConfigDict(extra='forbid')
     action: Literal['slowdown', 'restore-delay', 'reject', 'accept', 'reset', 'scale', 'inspect']
     replicas: int = Field(default=1, ge=1, le=3, strict=True)
+
+
+class ScenarioAction(BaseModel):
+    model_config = ConfigDict(extra='forbid')
+    action: Literal['order', 'failure', 'rush', 'scale', 'reset']
+    request_id: UUID = Field(default_factory=uuid4)
 
 
 class Controller:
@@ -63,6 +79,8 @@ class Controller:
         self.task = None
         self.operation = None
         self.verified = None
+        self.scenarios = Scenarios(self)
+        self.ambient = AmbientTraffic(settings.city)
 
     async def command(self, *args):
         # No shell, no user-provided executable or arguments. Fixed context and namespace.
@@ -135,6 +153,8 @@ class Controller:
             response.raise_for_status()
 
     def start_action(self, body):
+        if self.scenarios.state['active'] == 'rush':
+            raise HTTPException(409, 'Use the scenario controls to stop Rush Hour / Reset first')
         if self.task and not self.task.done():
             raise HTTPException(409, 'An operation is already running. Follow its status before retrying.')
         self.operation = {'action': body.action, 'status': 'running', 'message': 'Waiting for verified configuration and rollout'}
@@ -185,10 +205,13 @@ def create_app(settings=None):
     @asynccontextmanager
     async def lifespan(app):
         yield
+        await control.ambient.stop()
         await control.traffic.stop()
         # Let an accepted rollout complete, rather than abandoning an in-flight restoration.
         if control.task:
             await control.task
+        if control.scenarios.original:
+            await control.scenarios.restore()
 
     app = FastAPI(title='MiniShop Demo Control', lifespan=lifespan)
     app.state.control = control
@@ -208,12 +231,19 @@ def create_app(settings=None):
     @app.get('/api/demo/status', dependencies=[Depends(require_local_demo)])
     async def status():
         return {'traffic': control.traffic.state, 'operation': control.operation, 'verified': control.verified,
-                'namespace': 'minishop', 'context': settings.context}
+                'namespace': 'minishop', 'context': settings.context,
+                'scenario': control.scenarios.state, 'rush': control.scenarios.metrics(),
+                'ambient': control.ambient.state}
+
+    @app.post('/api/demo/scenario', status_code=202, dependencies=[Depends(require_local_demo)])
+    async def scenario(body: ScenarioAction):
+        control.scenarios.start(body.action, str(body.request_id))
+        return control.operation
 
     @app.post('/api/demo/traffic/start', dependencies=[Depends(require_local_demo)])
     async def start(body: Start):
-        if control.task and not control.task.done():
-            raise HTTPException(409, 'Wait for the current operation before starting traffic')
+        if control.scenarios.state['active'] == 'rush' or control.task and not control.task.done():
+            raise HTTPException(409, 'Wait for the current demo or reset Rush Hour first')
         created = control.traffic.start(body.rps, body.requests)
         return {'started': created, 'traffic': control.traffic.state}
 
@@ -237,6 +267,10 @@ def create_app(settings=None):
         if not response.is_success:
             raise HTTPException(response.status_code, result.get('detail', 'Kuebec could not deliver the demo command.'))
         return result
+
+    @app.post('/api/demo/ambient', dependencies=[Depends(require_local_demo)])
+    async def ambient(body: AmbientSettings):
+        return await control.ambient.configure(body.enabled, body.rate)
 
     @app.post('/api/demo/packets', dependencies=[Depends(require_local_demo)])
     async def send_packets(body: Packets):
@@ -264,7 +298,7 @@ def create_app(settings=None):
         except httpx.HTTPError:
             raise HTTPException(502, 'MiniShop storefront is unavailable')
 
-    dist = ROOT / 'frontend/dist'
+    dist = ROOT / 'frontend/dist/operator'
     if dist.is_dir():
         app.mount('/', StaticFiles(directory=dist, html=True), name='minishop')
     return app

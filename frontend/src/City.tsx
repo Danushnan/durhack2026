@@ -345,12 +345,13 @@ function Plot({ position, empty, theme }: { position: THREE.Vector3; empty: bool
   )
 }
 
-/** A healthy Building's tag is just its name; detail lines appear when it needs attention, is changing, or is selected (hover always has them). */
+/** Labels stay compact; selection and hover reveal the full service details. */
 function tagFor(dep: K8sObject, info: LandmarkInfo, state: ServiceState[string] | undefined, theme: Theme,
   rollout: ReturnType<typeof rolloutOf>, selected: boolean): { lines: TextLine[]; border: string } {
   const ready = dep.status?.readyReplicas ?? 0, want = dep.spec.replicas
   const health = deploymentHealth(dep)
   const title: TextLine = { text: `${state?.affected ? `${state.affected.icon} ` : ''}${info.emoji} ${dep.metadata.name}`, px: 56, color: theme.labelFg }
+  if (!selected) return { lines: [title], border: state?.live?.color ?? state?.affected?.color ?? HEALTH_COLOR[health] }
   if (state?.live) {
     const live = state.live, m = live.metrics
     if (compactLiveTag(live, selected, rollout.rolling || rollout.stalled || ready !== want)) return { lines: [title], border: live.color }
@@ -636,7 +637,7 @@ function Traffic({ edge, road, theme, accent, onHover, endpoints, previewRefused
   const destinationColor = useMemo(() => new THREE.Color(destinationHue ?? '#ffffff'), [destinationHue])
   const signals = useRef<(THREE.MeshBasicMaterial | null)[]>([])
   const halos = useRef<(THREE.SpriteMaterial | null)[]>([])
-  const length = lorry ? 2.4 : DRIVE.length
+  const length = lorry ? 3.6 : DRIVE.length
   const front = lorry ? 1.2 : 0.56, rear = -front
   const lampOffset = lorry ? 0.34 : 0.22
   const preview = previewCount !== undefined
@@ -653,6 +654,9 @@ function Traffic({ edge, road, theme, accent, onHover, endpoints, previewRefused
       limitOk: bendLimit(ok.pts, GRIP), limitBack: bendLimit(back.pts, GRIP) } }
   }, [road, length])
   const cars = useRef<CarAgent[]>([])
+  // Keep a route's geometry until its travelling vehicles arrive. New random routes
+  // rebuild the shared network, but must not restart trips already on the road.
+  const drivingTrips = useRef(trips)
   const burstStarted = useRef(-Infinity)
   const credit = useRef(0) // visual admission credit, separate from measured counts
   const inspectionIds = useRef(new WeakMap<CarAgent, string>())
@@ -666,7 +670,7 @@ function Traffic({ edge, road, theme, accent, onHover, endpoints, previewRefused
     liveBurst.current = false
     burstStarted.current = -Infinity
     activityPeriod.current = {source:sourceId, active:false}
-  }, [preview, trips, sourceId])
+  }, [preview, sourceId])
   useLayoutEffect(() => {
     activityPeriod.current = {source:sourceId, active:false}
     liveBurst.current = false
@@ -705,6 +709,8 @@ function Traffic({ edge, road, theme, accent, onHover, endpoints, previewRefused
       groups.current.forEach((g) => { if (g) g.visible = false })
       return
     }
+    if (!cars.current.length) drivingTrips.current = trips
+    const activeTrips = drivingTrips.current
     const dt = Math.min(rawDt, 0.1) // a hidden tab must not dump a burst of Cars
     const now = clock.elapsedTime
     const e = live.current
@@ -742,7 +748,7 @@ function Traffic({ edge, road, theme, accent, onHover, endpoints, previewRefused
     const steps = Math.ceil(dt * 60) // small steps keep the car-following stable
     const outcomeRates = trafficOutcomeRates(e, preview, previewRefused)
     for (let k = 0; k < steps; k++) {
-      const r = stepCars(cars.current, dt / steps, now, trips.trip, outcomeRates)
+      const r = stepCars(cars.current, dt / steps, now, activeTrips.trip, outcomeRates)
       if (r.bursts) burstStarted.current = now
       if (!preview) {
         for (let n = 0; n < r.served.length; n++) deliver(e.to, targets.current, now)
@@ -755,10 +761,12 @@ function Traffic({ edge, road, theme, accent, onHover, endpoints, previewRefused
       const car = cars.current.find((c) => c.slot === i)
       g.visible = !!car && car.phase !== 'burst'
       if (!car || car.phase === 'burst') return
-      const trip = car.phase === 'back' ? trips.back : trips.ok
+      const trip = car.phase === 'back' ? activeTrips.back : activeTrips.ok
       g.rotation.y = trip.at(car.s, tmp)
       g.position.copy(tmp)
-      g.scale.setScalar(1.15 * Math.max(0.01, Math.min(1, car.s / CAR_GROW, (trip.length - car.s) / CAR_GROW)))
+      // Stay visible through the driveway; only fade over the final half-unit at the door.
+      const scale = 1.15 * Math.max(0.01, Math.min(1, car.s / CAR_GROW, (trip.length - car.s) / 0.5))
+      g.scale.set(scale * (lorry ? 1.5 : 1), scale * (lorry ? 1.3 : 1), scale * (lorry ? 1.15 : 1))
       const returning = car.phase === 'back'
       const paint = paints.current[i]
       if (paint) {
@@ -771,7 +779,7 @@ function Traffic({ edge, road, theme, accent, onHover, endpoints, previewRefused
       const halo = halos.current[i]
       if (halo) {
         halo.color.copy(hue)
-        halo.opacity = returning ? 1 : lorry ? 0.92 : 0
+        halo.opacity = returning ? 1 : lorry ? 0.35 : 0
         halo.blending = returning ? THREE.NormalBlending : THREE.AdditiveBlending
         halo.depthTest = !returning
       }
@@ -800,7 +808,7 @@ function Traffic({ edge, road, theme, accent, onHover, endpoints, previewRefused
   }
   return (
     <group visible={emphasized && !paused}>
-      <RefusalBurst position={trips.burstAt} started={burstStarted} />
+      <RefusalBurst position={drivingTrips.current.burstAt} started={burstStarted} />
       {Array.from({ length: poolSize }, (_, i) => (
         <group key={i} visible={false} ref={(g) => { groups.current[i] = g }}
           onPointerOver={calm ? undefined : (e) => {
@@ -826,7 +834,7 @@ function Traffic({ edge, road, theme, accent, onHover, endpoints, previewRefused
               <boxGeometry args={[1.64, 0.09, 0.94]} />
               <meshBasicMaterial ref={(m) => { signals.current[i] = m }} color={destinationHue} toneMapped={false} />
             </mesh>
-            <sprite position={[-0.36, 1.22, 0]} scale={[6, 4.6, 1]} renderOrder={10} raycast={() => {}}>
+            <sprite position={[-0.36, 1.22, 0]} scale={[3.5, 2.5, 1]} renderOrder={10} raycast={() => {}}>
               <spriteMaterial ref={(m) => { halos.current[i] = m }} map={softGlow} color={destinationHue}
                 blending={THREE.AdditiveBlending} transparent opacity={0.92} depthWrite={false} toneMapped={false} />
             </sprite>
@@ -1032,7 +1040,7 @@ const clamp = (v: number, lo: number, hi: number) => lo > hi ? (lo + hi) / 2 : M
  * Flies the camera to the overview or to a selected Building. Isometric: the view direction never
  * changes; flying moves the look-at point and the zoom. 3D: it moves the camera itself.
  */
-function CameraRig({ focus, layout, homeTick, mode, disabled, journeyMode, fogEnd }: { disabled?: boolean; journeyMode?: boolean; focus: THREE.Vector3 | null; layout: CityLayout; homeTick: number; mode: ViewMode; fogEnd: number }) {
+function CameraRig({ focus, layout, homeTick, mode, disabled, journeyMode, maxDistance }: { disabled?: boolean; journeyMode?: boolean; focus: THREE.Vector3 | null; layout: CityLayout; homeTick: number; mode: ViewMode; maxDistance: number }) {
   const view = useThree((s) => s.size)
   const fov = useThree((s) => (s.camera as THREE.PerspectiveCamera).fov ?? 45)
   const controls = useThree((s) => s.controls) as unknown as Controls | null
@@ -1092,16 +1100,16 @@ function CameraRig({ focus, layout, homeTick, mode, disabled, journeyMode, fogEn
     if (controls.target.distanceTo(goal.current.target) < 0.05 && there) flying.current = false
   })
   // Registered after the fly-to, so the bounds have the last word each frame.
-  // Keep the view on the city: never zoom out or pan past the Scenery into the empty background.
+  // Keep the target near the city while allowing a wider overview of every district.
   useFrame(({ camera, size }) => {
     if (disabled || !controls) return
     const t = controls.target
     if ((camera as THREE.OrthographicCamera).isOrthographicCamera) {
       const { r0, r1, u0, u1 } = bounds
       // The home view always stays reachable, even on a tall phone screen where it shows a little more.
-      const minZoom = Math.min(Math.max(size.width / (r1 - r0), size.height / (u1 - u0)), homeZoom.current)
+      const minZoom = homeZoom.current / 3
       if (camera.zoom < minZoom) { camera.zoom = minZoom; camera.updateProjectionMatrix() }
-      const hw = size.width / (2 * camera.zoom), hh = size.height / (2 * camera.zoom)
+      const hw = Math.min(size.width / (2 * camera.zoom), (r1 - r0) / 3), hh = Math.min(size.height / (2 * camera.zoom), (u1 - u0) / 3)
       const sr = t.dot(ISO_RIGHT), su = t.dot(ISO_UP)
       const dr = clamp(sr, r0 + hw, r1 - hw) - sr, du = clamp(su, u0 + hh, u1 - hh) - su
       if (Math.abs(dr) + Math.abs(du) > 1e-4) {
@@ -1110,14 +1118,11 @@ function CameraRig({ focus, layout, homeTick, mode, disabled, journeyMode, fogEn
       }
       return
     }
-    // 3D: the look-at point stays over the city, and the camera stays close enough that the top of the
-    // view still meets the ground before the fog turns it into sky.
-    const look = new THREE.Vector3(clamp(t.x, x0 - VIEW_MARGIN / 2, x1 + VIEW_MARGIN / 2), clamp(t.y, 0, 15), clamp(t.z, z0 - VIEW_MARGIN / 2, z1 + VIEW_MARGIN / 2))
+    // 3D: allow altitude and distance for a full-city overview, independent of fog.
+    const look = new THREE.Vector3(clamp(t.x, x0 - VIEW_MARGIN / 2, x1 + VIEW_MARGIN / 2), clamp(t.y, 0, maxDistance / 2), clamp(t.z, z0 - VIEW_MARGIN / 2, z1 + VIEW_MARGIN / 2))
     camera.position.add(look.clone().sub(t)); t.copy(look)
     const offset = camera.position.clone().sub(t), d = offset.length()
-    const tilt = Math.acos(offset.y / d), top = tilt + 1.3 * ((camera as THREE.PerspectiveCamera).fov * Math.PI) / 360 // 1.3: the corners reach further than the centre
-    const far = top < Math.PI / 2 - 0.02 ? (fogEnd * Math.cos(top)) / Math.cos(tilt) : 0
-    if (d > Math.max(far, 12)) camera.position.copy(t).addScaledVector(offset, Math.max(far, 12) / d)
+    if (d > maxDistance) camera.position.copy(t).addScaledVector(offset, maxDistance / d)
   })
   return null
 }
@@ -1213,6 +1218,7 @@ export function City({ cluster, selected, onSelect, powerGrid, theme, onHover, s
   const highwayZ = network.segments.reduce((z, segment) => segment.highway && segment.calls.some((key) => visibleUses.has(key))
     ? Math.max(z, segment.points[0].z + HIGHWAY_WIDTH) : z, layout.core.z1)
   const cameraLayout = { ...layout, core: { ...layout.core, z1: highwayZ } }
+  const cameraRange = Math.max(600, 3 * Math.max(layout.core.x1 - layout.core.x0, highwayZ - layout.core.z0))
   const visibleLamps = useMemo(() => lamps.filter(({ calls }) => calls.some((key) => visibleUses.has(key)))
     .flatMap(({ points }) => points), [lamps, visibleKeys]) // eslint-disable-line react-hooks/exhaustive-deps
   const connectionBuildings = discoveryConnection?.split('>') ?? []
@@ -1255,10 +1261,10 @@ export function City({ cluster, selected, onSelect, powerGrid, theme, onHover, s
     <Canvas shadows onPointerMissed={() => onSelect(null)}>
       {mode === 'iso'
         ? <OrthographicCamera key="camera-iso" makeDefault position={ISO.clone().multiplyScalar(CAM_DIST).toArray()} zoom={5} near={1} far={1200} />
-        : <PerspectiveCamera key="camera-3d" makeDefault position={[0, 60, 80]} fov={45} near={1} far={900} />}
+        : <PerspectiveCamera key="camera-3d" makeDefault position={[0, 60, 80]} fov={45} near={1} far={cameraRange * 3} />}
       <color attach="background" args={[theme.sky]} />
       {/* Isometric fog starts beyond the look-at point, so only the far edge of the ground fades. */}
-      <fog attach="fog" args={mode === 'iso' ? [theme.sky, CAM_DIST + theme.fog[0] - 30, CAM_DIST + theme.fog[1]] : [theme.sky, ...theme.fog]} />
+      <fog attach="fog" args={mode === 'iso' ? [theme.sky, CAM_DIST + theme.fog[0] - 30, CAM_DIST + theme.fog[1]] : [theme.sky, Math.max(theme.fog[0], cameraRange), cameraRange * 2]} />
       <ambientLight intensity={theme.ambient} />
       <hemisphereLight args={[theme.sky, theme.ground, theme.ambient * 0.5]} />
       <directionalLight position={[30, 45, 25]} intensity={theme.sun} color={theme.sunColor} castShadow
@@ -1338,9 +1344,9 @@ export function City({ cluster, selected, onSelect, powerGrid, theme, onHover, s
         ? <OrbitControls key="controls-iso" makeDefault enableRotate={false} screenSpacePanning zoomToCursor maxZoom={60}
           mouseButtons={{ LEFT: THREE.MOUSE.PAN, MIDDLE: THREE.MOUSE.DOLLY, RIGHT: THREE.MOUSE.PAN }}
           touches={{ ONE: THREE.TOUCH.PAN, TWO: THREE.TOUCH.DOLLY_PAN }} />
-        // 3D: drag orbits, right-drag pans, wheel zooms; tilting stops well above the horizon (CameraRig keeps the sky out of view).
-        : <OrbitControls key="controls-3d" makeDefault maxPolarAngle={Math.PI / 3.4} minDistance={10} maxDistance={170} />}
-      <CameraRig focus={focus} layout={cameraLayout} homeTick={homeTick} mode={mode} fogEnd={theme.fog[1]}
+        // 3D: drag orbits, right-drag pans, wheel zooms out to a full-city overview.
+        : <OrbitControls key="controls-3d" makeDefault maxPolarAngle={Math.PI / 3.4} minDistance={10} maxDistance={cameraRange} />}
+      <CameraRig focus={focus} layout={cameraLayout} homeTick={homeTick} mode={mode} maxDistance={cameraRange}
         disabled={journeyActive && journeyFollowing && !!journeyStep} journeyMode={journeyActive} />
       <JourneyFollowCamera anchor={journeyAnchor} active={!!journeyActive && !!journeyFollowing && !!journeyStep} onManualCamera={onJourneyManualCamera} />
     </Canvas>

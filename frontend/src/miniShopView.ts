@@ -23,3 +23,21 @@ export function miniShopView(cluster: ClusterState): ClusterState {
       (workloads.has(edge.from) || edge.from.startsWith(`ingress:${architecture.namespace}/`))),
   }
 }
+
+/** Keep MiniShop and two small surrounding districts; filter the presentation only. */
+export function demoCityView(cluster: ClusterState): ClusterState {
+  if (typeof cluster.context !== 'string' || !Object.values(cluster.objects).some(isMiniShopComponent)) return cluster
+  const namespaces = new Set([architecture.namespace, 'kubeverse-platform', 'kubeverse-fulfilment'])
+  const visible = Object.values(cluster.objects).filter(object =>
+    object.kind === 'Node' || (object.kind === 'Namespace'
+      ? namespaces.has(object.metadata.name)
+      : !!object.metadata.namespace && namespaces.has(object.metadata.namespace)))
+  const workloads = new Set(visible.filter(object => ['Deployment', 'StatefulSet'].includes(object.kind))
+    .map(object => `${object.metadata.namespace}/${object.metadata.name}`))
+  return {
+    ...cluster,
+    objects: Object.fromEntries(visible.map(object => [object.metadata.uid, object])),
+    edges: cluster.edges.filter(edge => workloads.has(edge.to) && (workloads.has(edge.from) ||
+      edge.from.startsWith('ingress:') && namespaces.has(edge.from.slice(8).split('/')[0]))),
+  }
+}

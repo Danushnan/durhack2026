@@ -153,6 +153,7 @@ async def watch(ws: WebSocket):
 class DemoPackets(BaseModel):
     count: int = Field(ge=1, le=100, strict=True)
     cross_district: bool = Field(default=False, strict=True)
+    ambient: bool = Field(default=False, strict=True)
 
 
 class DemoRefusal(BaseModel):

@@ -1,4 +1,4 @@
-import { isMiniShopComponent } from './miniShopView.ts'
+import { demoCityView, isMiniShopComponent } from './miniShopView.ts'
 import type { ClusterState, Edge, K8sObject } from './k8s.ts'
 import { queueDemoPackets } from './demoPackets.ts'
 import { isLiveMetrics, record, SNAPSHOT_SILENCE_MS } from './liveMetrics.ts'
@@ -63,8 +63,8 @@ export function reduceWatchMessage(previous: ClusterState, data: unknown, receiv
         if (typeof event.count !== 'number' || !Number.isInteger(event.count) || event.count < 1 || event.count > 100 ||
           typeof event.cross_district !== 'boolean') break
         const demo = state.demoPackets ?? { routes: {}, last: {}, reset: 0 }
-        const candidates = Object.values(objects)
-        const miniShopOnly = typeof state.context === 'string' && candidates.some(isMiniShopComponent)
+        const candidates = Object.values(event.ambient === true ? demoCityView({ ...state, objects }).objects : objects)
+        const miniShopOnly = event.ambient !== true && typeof state.context === 'string' && candidates.some(isMiniShopComponent)
         const workloads = new Set(candidates.flatMap(object => {
           const {kind, metadata} = object
           return (kind === 'Deployment' || kind === 'StatefulSet') && metadata.namespace && !metadata.deletionTimestamp && (!miniShopOnly || isMiniShopComponent(object))

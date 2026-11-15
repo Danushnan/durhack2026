@@ -5,6 +5,10 @@ from fastapi import Header, HTTPException
 from services.common.runtime import call, db_target, event, make_app, measured, require_ok
 
 app = make_app("checkout-api", database=True)
+# Opt-in demonstration capacity, per process/Pod. Health probes bypass this queue.
+DEMO_CAPACITY = max(0, min(16, int(os.getenv("KUBEVERSE_DEMO_CAPACITY", "0"))))
+DEMO_WORK_MS = max(0, min(2000, int(os.getenv("KUBEVERSE_DEMO_WORK_MS", "0"))))
+demo_slots = asyncio.Semaphore(DEMO_CAPACITY or 16)
 CART_URL = os.getenv("CART_URL", "http://cart-api:8000")
 PRODUCT_URL = os.getenv("PRODUCT_URL", "http://product-api:8000")
 PAYMENT_URL = os.getenv("PAYMENT_URL", "http://payment-api:8000")
@@ -35,6 +39,16 @@ async def orders(session_id: UUID):
 async def checkout(session_id: UUID, idempotency_key: UUID = Header()):
     try:
         async with asyncio.timeout(45):
+            if DEMO_CAPACITY:
+                try:
+                    await asyncio.wait_for(demo_slots.acquire(), timeout=2)
+                except TimeoutError:
+                    raise HTTPException(429, "Checkout is busy; retry shortly") from None
+                try:
+                    await asyncio.sleep(DEMO_WORK_MS / 1000)
+                    return await place_order(session_id, idempotency_key)
+                finally:
+                    demo_slots.release()
             return await place_order(session_id, idempotency_key)
     except TimeoutError:
         raise HTTPException(504, "Checkout timed out. Retry with the same checkout key.") from None

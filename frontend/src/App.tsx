@@ -1,6 +1,6 @@
+import { demoCityView } from './miniShopView'
 import { DiscoveryActivity } from './DiscoveryActivityPanel'
 import { updateHover } from './carInspection'
-import { miniShopView, isMiniShopComponent } from './miniShopView'
 import { JourneyPanel, useJourney } from './Journey'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { City, type HoverInfo, type RoadFlow, type ServiceState, type ViewMode } from './City'
@@ -24,8 +24,7 @@ const DISTRICT_COLORS = ['#22d3ee', '#e879f9', '#bef264', '#fbc08c', '#93a9ff', 
 
 export default function App() {
   const watchedCluster = useCluster()
-  const cluster = useMemo(() => miniShopView(watchedCluster), [watchedCluster])
-  const miniShopOnly = cluster !== watchedCluster
+  const cluster = useMemo(() => demoCityView(watchedCluster), [watchedCluster])
   const [selected, setSelected] = useState<string | null>(null)
   const [connection, setConnection] = useState<{source: string; key: string} | null>(null)
   const [powerGrid, setPowerGrid] = useState(false)
@@ -226,10 +225,10 @@ export default function App() {
         setAnalyticsOpen(false)
       }} />}
 
-      <aside className={`hud services ${sidebar ? 'open' : ''}`} aria-label={miniShopOnly ? "MiniShop services" : "Services"}>
+      <aside className={`hud services ${sidebar ? 'open' : ''}`} aria-label="Services">
         <button className="toggle" aria-expanded={sidebar} title={sidebar ? 'Collapse' : 'Show service names'}
           onClick={() => setSidebar(!sidebar)}>{sidebar ? '‹' : '›'}</button>
-        {deployments.filter(d => !miniShopOnly || isMiniShopComponent(d)).map((d) => {
+        {deployments.map((d) => {
           const info = landmarkFor(d.metadata.name), k = keyOf(d), s = states[k]
           const color = s.live?.color ?? s.affected?.color ?? HEALTH_COLOR[deploymentHealth(d)]
           return (
@@ -240,7 +239,6 @@ export default function App() {
             </button>
           )
         })}
-        {!miniShopOnly && <>
         <hr />
         <button className={`svc ${selected === 'city-hall' ? 'sel' : ''}`} onClick={() => pickService('city-hall')}
           title="City Hall: the control plane" aria-label="City Hall, the control plane">
@@ -256,7 +254,6 @@ export default function App() {
             </button>
           )
         })}
-        </>}
       </aside>
 
       {node && <StationPanel node={node} all={all} sim={sim} onClose={() => setSelected(null)} />}

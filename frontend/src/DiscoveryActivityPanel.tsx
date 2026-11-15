@@ -23,7 +23,7 @@ export function DiscoveryActivity({cluster, discovery, selectedKey, onPick, onCl
   const selectedEdge = ready ? cluster.edges.find(edge => roadKey(edge) === selectedKey) : undefined
   const selectedPurpose = selected ? connectionPurpose({from:selected[0],to:selected[1]}) : null
   return <aside className="hud discovery-activity" aria-label="Discovery recent activity">
-    <h2>Recent Activity</h2>
+    <details><summary><strong>Recent Activity</strong> · {rows.length} connections</summary>
     <p className="discovery-guidance">Cars illustrate recent aggregate communication, not individual requests. Their speed and movement are visual animations; cars can finish a trip after its measured window becomes idle.</p>
     <p className="small muted">Buildings = services and data stores. Roads = known or observed dependencies. More activity means a busier connection; cars are sampled to keep the view calm.</p>
     <button className="discovery-journey-link" onClick={onJourney}>Follow one shopping action in Journey →</button>
@@ -50,5 +50,6 @@ export function DiscoveryActivity({cluster, discovery, selectedKey, onPick, onCl
     </section>}
     <p className="small muted">Descriptions explain typical purpose. Aggregate edges do not identify a particular operation, request, shopper or payload. Counts describe instrumented completions, not SQL statement counts. Timed averages use available samples; Checkout’s broad transaction wrapper is excluded.</p>
     {(cluster.demoPackets && Object.keys(cluster.demoPackets.routes).length > 0) && <p className="small muted">Admin map-preview roads and vehicles are explicit illustrations, not measured dependencies. They are excluded from this list.</p>}
+    </details>
   </aside>
 }

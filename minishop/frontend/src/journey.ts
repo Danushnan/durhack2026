@@ -34,6 +34,6 @@ async function register<T extends JourneyAction>(action: T): Promise<T> {
 export async function beginBasketAction(): Promise<BasketAction> {
   return register({action_id: crypto.randomUUID(), mutation_id: crypto.randomUUID(), refresh_id: crypto.randomUUID(), mutation: 'pending', refresh: 'pending'})
 }
-export async function beginCheckoutAction(): Promise<CheckoutAction> {
-  return register({kind: 'checkout', action_id: crypto.randomUUID(), request_id: crypto.randomUUID(), checkout: 'pending'})
+export async function beginCheckoutAction(existing?: CheckoutAction): Promise<CheckoutAction> {
+  return register(existing ?? {kind: 'checkout', action_id: crypto.randomUUID(), request_id: crypto.randomUUID(), checkout: 'pending'})
 }

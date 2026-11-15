@@ -162,3 +162,67 @@ For hot reload, run the APIs with Uvicorn on ports Product=8001, Cart=8002, Chec
 | KubeVerse roads disappear | Live traffic is a rolling five-second window; make a fresh browse/cart/checkout request. No traffic is invented when idle. |
 
 `./scripts/reset.sh` restores healthy payment settings, a 100 ms payment delay and one Checkout replica. It preserves data and never deletes the cluster. [DEMO.md](DEMO.md) has the exact judging flow. [docs/VERIFICATION.md](docs/VERIFICATION.md) records the passing Compose and real kind deployment checks, runtime evidence, and remaining KubeVerse frontend limitations.
+
+## Three-scenario control panel
+
+Rebuild/redeploy MiniShop after these changes (`./scripts/kind-up.sh`), including
+**Checkout's image**: Rush Hour requires its opt-in per-Pod processing queue.
+Build the operator UI with `cd frontend && npm run build:operator`, then from `minishop/` run:
+
+```bash
+MINISHOP_DEMO_ENABLED=1 MINISHOP_CONTEXT=kind-minishop ./scripts/operator.sh
+```
+
+Open `http://127.0.0.1:8090/#/admin` beside the live KubeVerse city. The operator
+needs the existing permission to patch Payment/Checkout Deployments and scale
+Checkout; the optional `demo_control/rbac.yaml` already covers these operations.
+The city must use the same real Kubernetes context/namespace and collect MiniShop
+logs. No synthetic map packets are sent by these scenarios.
+
+- **Place Order** restores normal Payments, browses products, fills a fresh basket,
+  and submits checkout through the real storefront. The panel shows actual HTTP
+  steps and the returned persisted order ID.
+- **Simulate Payment Failure** waits for the rejection rollout, runs the same
+  workflow, requires an actual HTTP 402, then restores payment acceptance. Pods
+  remain Ready for this expected business outcome. A rollout or transport error
+  is reported as a demo failure, never as a successful rejection.
+- **Start Rush Hour** saves Checkout's replica count and demo environment values,
+  sets two processing slots per Pod with 600 ms of work before each checkout,
+  and starts at one replica. Six fresh customer workflows/s run with a maximum
+  of 24 in flight. Waiting over two seconds for a slot returns a real HTTP 429;
+  health checks bypass the queue. After at least ten seconds, press **Scale Up**
+  to create three replicas while the load continues. Average/p95 latency,
+  completed customer workflows/s, incoming customers/s, successes and failures
+  are measured from real requests over ten-second windows. Failed attempts that
+  never reach Checkout use their actual total customer duration. The comparison
+  excludes customers started before the scale rollout finished and only reports
+  improvement with sufficient samples, at least 20% lower average latency,
+  comparable incoming traffic (within 10%), and no increased failure share.
+  Three minutes automatically stops load; **Stop Rush Hour / Reset** restores
+  the original replicas and demo capacity settings. Successful orders remain in
+  PostgreSQL; canceled or timed-out checkouts are never retried automatically.
+
+The city reuses existing request-log traffic, service health highlights, and
+Kubernetes Pod updates. For a correlated, step-by-step checkout guide, enable
+`KUBEVERSE_JOURNEYS=1` on the **live city backend**, open Journey View in the city,
+set the paired MiniShop URL to `http://127.0.0.1:8090/#/admin`, and open it there.
+Keep the paired window and city open. Without pairing, aggregate live city traffic
+still works; the panel's journey lists only directly observed storefront calls.
+
+If an action fails, its error is shown and **Reset demos** remains available after
+the in-flight operation ends. Reset restores normal payment acceptance/100 ms delay;
+orders and baskets are retained. Normal operator shutdown also attempts rush
+restoration. A forced process kill loses the in-memory baseline: redeploy MiniShop
+or manually restore Checkout's replicas and remove `KUBEVERSE_DEMO_CAPACITY` and
+`KUBEVERSE_DEMO_WORK_MS` overrides. Scaling improvements and traffic visibility
+must be checked against your running cluster; neither is fabricated by the panel.
+
+**Normal running** adds optional illustrative traffic independently of the three
+real application demos. Keep the city open in Traffic view, choose 0.5–5 vehicles/s,
+and press **Start normal traffic**. Change the slider and press **Apply rate** to
+update it; **Turn off normal traffic** stops new spawns (existing trips finish).
+Origins and destinations are random visible buildings; cross-district vehicles
+are lorries. These packets never enter measured application telemetry. The
+operator owns the job, so closing the panel does not stop it; operator shutdown
+does. If the city disconnects, the generator stops with an error rather than
+silently claiming successful delivery.

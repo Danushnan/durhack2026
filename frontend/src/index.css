@@ -307,3 +307,8 @@ details.more > summary:focus-visible { outline: 2px solid var(--accent); outline
 @media (min-width: 721px) {
   .app:has(.journey-panel) .ticker { left: 424px; width: min(620px, calc(100vw - 436px)); }
 }
+
+/* Keep the live city unobscured until activity details are requested. */
+.discovery-activity > details > summary { cursor: pointer; font-size: 13px; }
+.discovery-activity > details[open] > summary { margin-bottom: 12px; }
+.discovery-activity:has(> details:not([open])) { max-height: none; }

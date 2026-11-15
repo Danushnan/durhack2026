@@ -1,109 +1,133 @@
 import {useEffect, useRef, useState} from 'react';
+import {beginCheckoutAction, reportBasketAction, type CheckoutAction} from './journey';
 import './admin.css';
 
+type Measurements = {samples:number; rps:number; incoming_rps:number; average_ms:number|null; p95_ms:number|null; successful:number; failed:number};
 type Status = {
-  traffic: {running:boolean; attempted:number; failed:number; refused?:number; checkouts:number; last_status:number|null; error:string|null};
-  operation: {action:string; status:'running'|'succeeded'|'failed'; message:string}|null;
-  verified: {delay_ms:number; rejection:boolean; payment_ready:boolean; checkout_ready:boolean; checkout_replicas:number; checked_at:number}|null;
+  operation:{action:string; status:string; message:string}|null;
+  verified:{payment_ready:boolean; checkout_ready:boolean; checkout_replicas:number}|null;
   namespace:string; context:string;
+  ambient:{running:boolean; rate:number; sent:number; error:string|null};
+  scenario:{request_id?:string; active:'order'|'failure'|'rush'|null; phase:string; message:string; steps:{label:string;status:number;ms:number}[]; result:Record<string,unknown>|null};
+  rush:Measurements & {target_rps:number; elapsed:number; scaled:boolean; running:boolean; sent:number; skipped:number; before:Measurements|null; comparison:string};
 };
 const cityUrl = import.meta.env.VITE_KUEBEC_URL || 'http://127.0.0.1:5173';
-
-const packetPresets = [
-  { label: 'Send a single request', count: 1, cross_district: false },
-  { label: 'Send 5 requests', count: 5, cross_district: false },
-  { label: 'Send 1 cross-district request', count: 1, cross_district: true },
-  { label: 'Send 5 cross-district requests', count: 5, cross_district: true },
-  { label: 'Send 100 requests', count: 100, cross_district: false },
-];
+const ms = (value:number|null|undefined) => value == null ? '—' : `${value} ms`;
 
 export function AdminMenu() {
   const [status,setStatus] = useState<Status>();
-  const [busy,setBusy] = useState(false);
-  const [message,setMessage] = useState('Connecting to the local operator server…');
   const [error,setError] = useState('');
   const [connectionError,setConnectionError] = useState('');
-  const [rate,setRate] = useState('1');
-  const [replicas,setReplicas] = useState('1');
+  const [busy,setBusy] = useState(false);
+  const [ambientRate,setAmbientRate] = useState('1');
+  const [ambientBusy,setAmbientBusy] = useState(false);
+  const ambientLock = useRef(false);
   const lock = useRef(false);
-  const running = busy || status?.operation?.status === 'running';
-
-  async function request<T = Status>(path:string, method='GET', body?:unknown):Promise<T> {
-    const response = await fetch(`/api/demo/${path}`, {method, headers:{'Content-Type':'application/json'},
-      body:body === undefined ? undefined : JSON.stringify(body), signal:AbortSignal.timeout(10000)});
-    const result = await response.json().catch(()=>null);
-    if(!response.ok) throw new Error(typeof result?.detail === 'string' ? result.detail : `Operation unavailable (HTTP ${response.status}). Check the local operator server.`);
-    return result;
+  const journey = useRef<CheckoutAction|null>(null);
+  const registered = useRef(false);
+  const active = status?.scenario.active;
+  const working = busy || status?.operation?.status === 'running';
+  const rush = status?.rush;
+  async function request(path:string, body?:unknown):Promise<Status> {
+    const response = await fetch(`/api/demo/${path}`, {method:body?'POST':'GET',
+      headers:{'Content-Type':'application/json'}, body:body?JSON.stringify(body):undefined,
+      signal:AbortSignal.timeout(10000)});
+    const value = await response.json();
+    if(!response.ok) throw new Error(typeof value.detail === 'string'?value.detail:`Operator unavailable (${response.status})`);
+    return value;
   }
   useEffect(()=>{
     let cancelled=false;
-    async function poll(){try{const value=await request('status');if(!cancelled){setStatus(value);setConnectionError('');setMessage(current=>current.startsWith('Connecting')?'Connected to the local operator server.':current);}}catch(e){if(!cancelled){setConnectionError((e as Error).message);setStatus(undefined);}}}
-    void poll();const timer=setInterval(()=>void poll(),2000);
+    const poll=async()=>{try{const value=await request('status');if(!cancelled){setStatus(value);setConnectionError('');}}catch(e){if(!cancelled){setStatus(undefined);setConnectionError((e as Error).message);}}};
+    void poll();const timer=setInterval(()=>void poll(),1000);
     return()=>{cancelled=true;clearInterval(timer);};
   },[]);
-
-  async function run(path:string, body?:unknown) {
+  useEffect(()=>{
+    if(!status || !journey.current || status.scenario.request_id !== journey.current.request_id) return;
+    if(status.scenario.phase==='requesting' && !registered.current) {registered.current=true;void beginCheckoutAction(journey.current);}
+    if(status.operation?.status==='running') return;
+    const action=journey.current;
+    const success=status.scenario.active==='order' && status.scenario.phase==='completed';
+    reportBasketAction({...action,checkout:success?'succeeded':'failed',
+      ...(success?{basket_cleared:status.scenario.result?.basket_cleared === true}:{})});
+    journey.current=null;
+  },[status]);
+  async function run(action:string) {
     if(lock.current)return;
-    lock.current=true;setBusy(true);setError('');setMessage('Submitting operation…');
+    lock.current=true;setBusy(true);setError('');
     try {
-      const result = await request<{ sent?: number }>(path,'POST',body);
+      let request_id: string|undefined;
+      if(action==='order'||action==='failure') {
+        registered.current=false;
+        journey.current={kind:'checkout',action_id:crypto.randomUUID(),request_id:crypto.randomUUID(),checkout:'pending'};
+        request_id=journey.current.request_id;
+      }
+      await request('scenario',{action,...(request_id?{request_id}:{})});
       setStatus(await request('status'));
-      if (path === 'packets') setMessage(`Queued ${result.sent} ${result.sent === 1 ? 'vehicle' : 'vehicles'} on the KubeVerse map.`);
-      else if (path === 'packets/reset') setMessage('Demo vehicles and routes cleared.');
-      else setMessage(path==='actions'?'Operation submitted. Follow its verified outcome below.':path.endsWith('stop')?'Traffic stopped. An in-flight request may already have reached MiniShop.':'Traffic job acknowledged. Watch the real request counters below.');
-    } catch(e){setError((e as Error).message);setMessage('');}
+    } catch(e){setError((e as Error).message);if(journey.current){reportBasketAction({...journey.current,checkout:'failed'});journey.current=null;}}
     finally{lock.current=false;setBusy(false);}
   }
-  const action=(name:string, extra={})=>void run('actions',{action:name,...extra});
-  const fault=status?.verified;
+  async function normalTraffic(enabled:boolean) {
+    if(ambientLock.current)return;
+    ambientLock.current=true;setAmbientBusy(true);setError('');
+    try {await request('ambient',{enabled,rate:Number(ambientRate)});setStatus(await request('status'));}
+    catch(e){setError((e as Error).message);}
+    finally{ambientLock.current=false;setAmbientBusy(false);}
+  }
+  const unavailable=!status||working||active==='rush';
   return <div className="operator">
-    <header className="operator-header"><a href="#/" className="operator-brand">mini<span>shop.</span></a><span>DurHack 2026 / operator desk</span><a href={cityUrl} target="_blank" rel="noreferrer">Open KubeVerse ↗</a></header>
+    <header className="operator-header"><a href="#/" className="operator-brand">KubeVerse<span> / demos</span></a><span>{status?`${status.context} · ${status.namespace}`:'Connecting to operator…'}</span><a href={cityUrl} target="_blank" rel="noreferrer">Open city ↗</a></header>
     <main className="operator-main">
-      <div className="operator-intro"><p className="operator-eyebrow">Live demonstration</p><h1>Demo Control Centre</h1><p>Generate activity in MiniShop. Observe its real dependencies and behaviour in KubeVerse.</p></div>
-      <div className="operator-feedback" aria-live="polite"><p>{message}</p>{(connectionError||error)&&<p role="alert" className="operator-error">{connectionError||error}</p>}
-        {status?.operation&&<p className={status.operation.status==='failed'?'operator-error':''}><strong>{status.operation.action} · {status.operation.status}</strong> — {status.operation.message}</p>}
+      <div className="operator-intro"><p className="operator-eyebrow">Three stories. One living city.</p><h1>Watch the system respond.</h1><p>Keep the city alongside this panel. The three demos use real MiniShop requests and Kubernetes rollouts. Normal traffic adds an illustrative city backdrop.</p></div>
+      <div className="operator-feedback" aria-live="polite" aria-busy={working}>
+        <p><strong>{working?'Working…':status?`${active?{order:'Follow an Order',failure:'Payment Failure',rush:'Rush Hour'}[active]:'Ready'} · ${status.scenario.phase}`:'Connecting…'}</strong></p>
+        <p>{status?.scenario.message}</p>
+        {(error||connectionError)&&<p role="alert" className="operator-error">{error||connectionError}</p>}
+        {status?.scenario.phase==='failed'&&<p className="operator-error">Demo could not complete. Use Reset below before retrying.</p>}
       </div>
-      <div className="operator-grid">
-        <section className="operator-card"><h2>Map traffic presets</h2>
-          <p>Open KubeVerse alongside this panel. These presets send illustrated packets to the map. Cross-district packets travel by lorry.</p>
+      <section className="operator-card normal-traffic" aria-label="Normal traffic">
+        <span className="operator-step">City ambience · illustrative traffic</span><h2>Normal running</h2>
+        <p>Watch vehicles travel between random visible buildings, like a city with everyday users.</p>
+        <label htmlFor="ambient-rate">Spawn rate · {ambientRate} vehicles / second</label>
+        <input id="ambient-rate" type="range" min="0.5" max="5" step="0.5" value={ambientRate} onChange={e=>setAmbientRate(e.target.value)} />
+        <div className="operator-buttons"><button disabled={!status||ambientBusy} onClick={()=>void normalTraffic(true)}>{ambientBusy?'Updating…':status?.ambient.running?'Apply rate':'Start normal traffic'}</button>
+          <button className="secondary" disabled={!status||ambientBusy||!status.ambient.running} onClick={()=>void normalTraffic(false)}>Turn off normal traffic</button></div>
+        <p aria-live="polite"><strong>{status?.ambient.running?'Running':'Off'}</strong>{status?.ambient.running?` · ${status.ambient.rate} vehicles/s`:''} · {status?.ambient.sent??0} vehicles sent</p>
+        {status?.ambient.error&&<p role="alert" className="operator-error">{status.ambient.error}</p>}
+        <p className="operator-note">Illustrative cars and cross-district lorries only; these do not make real requests or affect health metrics. Open the city in Traffic view. Turning off stops new spawns; vehicles already moving finish their trips. This control runs independently of the demos below.</p>
+      </section>
+      <div className="operator-grid demo-grid">
+        <section className={`operator-card ${active==='order'?'is-active':''}`} aria-label="Follow an Order">
+          <span className="operator-step">01 / Normal operation {active==='order'?'· Active':''}</span><h2>Follow an Order</h2>
+          <p>Browse a product, fill a basket, and place a real order. Follow Checkout’s measured calls through the city.</p>
+          <button disabled={unavailable} onClick={()=>void run('order')}>Place Order</button>
+          {active==='order'&&status?.scenario.result&&<p className="demo-outcome">✓ Order confirmed · {String(status.scenario.result.id ?? '')}</p>}
+          <p className="operator-note">Payments are simulated; orders are persisted in PostgreSQL. No money is charged.</p>
+        </section>
+        <section className={`operator-card ${active==='failure'?'is-active':''}`} aria-label="Payment Failure">
+          <span className="operator-step">02 / Application failure {active==='failure'?'· Active':''}</span><h2>When payment fails</h2>
+          <p>The same checkout meets a rejected payment. Watch the error return while Kubernetes Pods remain Ready.</p>
+          <button disabled={unavailable} onClick={()=>void run('failure')}>Simulate Payment Failure</button>
+          {active==='failure'&&status?.scenario.phase==='completed'&&<p className="demo-outcome">Payment declined · HTTP 402<br/>No order confirmed. Basket retained.</p>}
+          <p className="operator-note">A rejected transaction is an application outcome. Payment acceptance is restored after the attempt.</p>
+        </section>
+        <section className={`operator-card rush-card ${active==='rush'?'is-active':''}`} aria-label="Rush Hour">
+          <span className="operator-step">03 / Main showcase {active==='rush'?'· Active':''}</span><h2>Can our city handle the traffic?</h2>
+          <p>Six customers per second compete for one Checkout Pod. Scale to three replicas and compare real response times under the same requested load.</p>
           <div className="operator-buttons">
-            {packetPresets.map(({ label, ...preset }) => <button key={label} disabled={!status || busy}
-              onClick={() => void run('packets', preset)}>{label}</button>)}
-            <button disabled title="This preset is not implemented">Overload requests to 1 API</button>
-            <button className="secondary" disabled={!status || busy} onClick={() => void run('packets/reset')}>Reset map traffic</button>
+            <button disabled={unavailable} onClick={()=>void run('rush')}>Start Rush Hour</button>
+            {active==='rush'&&<button disabled={!status||working||!rush?.running||rush.scaled||rush.elapsed<10} onClick={()=>void run('scale')}>{rush?.scaled?'Scaled to 3 replicas':'Scale Up → 3 replicas'}</button>}
           </div>
-        </section>
-        <section className="operator-card"><span className="operator-step">01 / Activity</span><h2>Traffic generation</h2><p>Traffic runs until stopped. Each run attempts up to 20 checkouts.</p>
-          <label htmlFor="traffic-rate">Maximum storefront requests per second</label><select id="traffic-rate" value={rate} onChange={e=>setRate(e.target.value)}><option value="0.2">Gentle · 0.2/s</option><option value="1">Presentation · 1/s</option><option value="2">Busy · 2/s</option><option value="20">20/s</option></select>
-          <div className="operator-buttons"><button disabled={!status||running||status.traffic.running} onClick={()=>void run('traffic/start',{rps:Number(rate),requests:null})}>Start traffic</button><button className="secondary" disabled={!status||busy} onClick={()=>void run('traffic/stop')}>Stop traffic</button></div>
-          <dl className="operator-counters"><div><dt>Status</dt><dd>{status?status.traffic.running?'Running':'Stopped':'Unknown'}</dd></div><div><dt>Attempted</dt><dd>{status?.traffic.attempted??'—'}</dd></div><div><dt>Unsuccessful</dt><dd>{status?.traffic.failed??'—'}</dd></div><div><dt>Verified pod refusals</dt><dd>{status?.traffic.refused??'—'}</dd></div></dl>
-          <p className="operator-note">Unsuccessful counts failed storefront attempts, including HTTP 402 declines, other HTTP errors and communication failures. Verified pod refusals is the subset checked after a network/gateway failure with zero Ready pods on a serving workload; it does not identify every failure’s cause. Checkout attempts: {status?.traffic.checkouts??'—'}. Last HTTP status: {status?.traffic.last_status??'—'}.</p>
-          {status?.traffic.error&&<p role="alert" className="operator-error">{status.traffic.error}</p>}
-        </section>
-        <section className="operator-card"><span className="operator-step">02 / Experiments</span><h2>Payments</h2><p>Change the real payment Deployment configuration. Success is shown only after rollout and configuration verification.</p>
-          <h3>Latency</h3><p>{status?.operation?.status === 'running' && ['slowdown','restore-delay'].includes(status.operation.action)
-            ? 'Updating payment pods…'
-            : <>Verified delay: <strong>{fault?`${fault.delay_ms} ms`:'Not checked'}</strong></>}</p>
-          <div className="operator-buttons"><button disabled={!status||running} onClick={()=>action('slowdown')}>Introduce 2,000 ms delay</button><button className="secondary" disabled={!status||running} onClick={()=>action('restore-delay')}>Restore normal delay</button></div>
-          <p className="operator-note">Once the delay is verified, place a checkout to see it in KubeVerse. Product browsing and basket requests don't call Payments.</p>
-          {(status?.traffic.checkouts ?? 0) >= 20 && <p className="operator-note">Generated traffic reached its checkout limit. Place a checkout in the storefront, or stop and restart traffic to generate more checkouts.</p>}
-          <h3>Test-payment rejection</h3><p>Verified setting: <strong>{fault?fault.rejection?'Rejections enabled':'Accepting payments':'Not checked'}</strong>. A declined checkout returns HTTP 402.</p>
-          <div className="operator-buttons"><button className="secondary" disabled={!status||running} onClick={()=>action('reject')}>Enable rejection</button><button className="secondary" disabled={!status||running} onClick={()=>action('accept')}>Disable rejection</button></div>
-          <p className="operator-note">To see the explosion and red return in KubeVerse, enable rejection, wait for rollout verification, then run a checkout or start storefront traffic.</p>
-        </section>
-        <section className="operator-card"><span className="operator-step">03 / Kubernetes</span><h2>Checkout replicas</h2><p>Only <code>minishop/checkout-api</code> can be scaled, from one to three replicas. No arbitrary commands or namespaces.</p>
-          <label htmlFor="checkout-replicas">Desired replicas</label><select id="checkout-replicas" value={replicas} onChange={e=>setReplicas(e.target.value)}>{[1,2,3].map(n=><option key={n} value={n}>{n}</option>)}</select>
-          <button disabled={!status||running} onClick={()=>action('scale',{replicas:Number(replicas)})}>Apply replica count</button>
-          <p className="operator-note">Verified replicas: {fault?.checkout_replicas??'Not checked'}. Pod deletion is not exposed in this panel.</p>
-        </section>
-        <section className="operator-card"><span className="operator-step">04 / Restore</span><h2>System & demo status</h2><p>Namespace: <strong>{status?.namespace??'Not connected'}</strong><br/>Context: <strong>{status?.context??'Not connected'}</strong></p>
-          <p>Payments ready: {fault?String(fault.payment_ready):'Unknown'} · Checkout ready: {fault?String(fault.checkout_ready):'Unknown'}</p>
-          <p className="operator-note">Last verification: {fault?new Date(fault.checked_at*1000).toLocaleTimeString():'None'}. These settings are a readback, not a continuous health feed. Use KubeVerse for current health.</p>
-          <div className="operator-buttons"><button className="secondary" disabled={!status||running} onClick={()=>action('inspect')}>Refresh verified settings</button><button disabled={!status||running} onClick={()=>action('reset')}>Reset demo configuration</button></div>
-          <p className="operator-note">Reset stops traffic, restores 100 ms payments, disables rejection and scales Checkout to one. Orders, baskets and databases are retained. Discovery reset remains separate in KubeVerse.</p>
+          {active==='rush'&&rush&&<>
+            <dl className="operator-counters"><div><dt>Customers sent / s</dt><dd>{rush.incoming_rps}</dd></div><div><dt>Completed / s</dt><dd>{rush.rps}</dd></div><div><dt>Average</dt><dd>{ms(rush.average_ms)}</dd></div><div><dt>p95</dt><dd>{ms(rush.p95_ms)}</dd></div><div><dt>Success / failed</dt><dd>{rush.successful} / {rush.failed}</dd></div><div><dt>Verified replicas</dt><dd>{status?.verified?.checkout_replicas??'—'}</dd></div></dl>
+            {rush.before&&<p>Before scaling: {ms(rush.before.average_ms)} average · {ms(rush.before.p95_ms)} p95 · {rush.before.incoming_rps} customers/s. {rush.comparison}</p>}
+            <p className="operator-note">{rush.running?'Load running':'Load stopped'} · Target {rush.target_rps}/s · {rush.sent} customers sent · {rush.skipped} skipped at the concurrency limit. Metrics cover completed attempts in the last 10 seconds, excluding responses completed before the scale rollout finished. Failed attempts before Checkout use total customer duration.</p>
+          </>}
+          <p className="operator-note">Demo-only capacity: two processing slots per Pod, 600 ms work per checkout, and a two-second queue timeout (HTTP 429). Health probes bypass the queue. Load is capped at 24 concurrent customers and three minutes.</p>
         </section>
       </div>
-      <footer><a href="#/">← Back to MiniShop</a><p>Local operator controls · disabled unless explicitly configured</p></footer>
+      {status?.scenario.steps.length ? <section className="demo-journey" aria-label="Observed storefront requests"><h2>Request journey</h2><ol>{status.scenario.steps.map((s,i)=><li key={i}><strong>{s.label}</strong><span>HTTP {s.status} · {s.ms} ms</span></li>)}</ol><p className="operator-note">These are observed storefront responses. Internal service calls and database operations appear from real logs in the city. For step-by-step highlighting, open this panel at <code>#/admin</code> from the city’s paired Journey View.</p></section>:null}
+      <footer><div><button className="secondary" disabled={!status||working} onClick={()=>void run('reset')}>{active==='rush'?'Stop Rush Hour / Reset':'Reset demos'}</button><p className="operator-note">Stops load and restores the pre-rush replica count and capacity settings. Restores normal payments. Orders and baskets are retained.</p></div><p>{status?.verified?`Last readback: Payments ${status.verified.payment_ready?'Ready':'not Ready'} · Checkout ${status.verified.checkout_ready?'Ready':'not Ready'}`:'Configuration not yet verified'}<br/><a href="#/">Back to MiniShop</a></p></footer>
     </main>
   </div>;
 }

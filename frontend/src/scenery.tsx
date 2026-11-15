@@ -54,7 +54,7 @@ export function buildScenery(core: Rect, districts: District[], obstacles: Obsta
   for (const dist of districts) {
     const ring = { x0: dist.x0 - 5.5, x1: dist.x1 + 5.5, z0: dist.z0 - 5.5, z1: dist.z1 + 5.5 }
     const w = ring.x1 - ring.x0, d = ring.z1 - ring.z0
-    for (let u = r() * 3; u < 2 * (w + d); u += 6 + r() * 1.5) {
+    for (let u = r() * 3; u < 2 * (w + d); u += 24 + r() * 6) {
       // Walk the perimeter: top edge, right, bottom, left. `a` turns each building to face the District.
       const [x, z, a] = u < w ? [ring.x0 + u, ring.z0, 0] : u < w + d ? [ring.x1, ring.z0 + u - w, Math.PI / 2]
         : u < 2 * w + d ? [ring.x1 - (u - w - d), ring.z1, 0] : [ring.x0, ring.z1 - (u - 2 * w - d), Math.PI / 2]
@@ -81,7 +81,7 @@ export function buildScenery(core: Rect, districts: District[], obstacles: Obsta
   }
 
   // Skyline: further out, rising with distance, never taller than the height cap allows.
-  for (let tries = 0, made = 0; tries < 1400 && made < 64; tries++) {
+  for (let tries = 0, made = 0; tries < 1400 && made < 8; tries++) {
     const { x, z } = sample(70)
     const dist = outside(core, x, z)
     if (dist < 9 || inAny(districts, x, z, 4) || !free(x, z, 4.8)) continue
@@ -115,7 +115,7 @@ export function buildScenery(core: Rect, districts: District[], obstacles: Obsta
   }
 
   // Warehouses and houses: low, closer in, all around.
-  for (let tries = 0, made = 0; tries < 500 && made < 10; tries++) {
+  for (let tries = 0, made = 0; tries < 500 && made < 2; tries++) {
     const { x, z } = sample(40)
     const dist = outside(core, x, z)
     if (dist < 5 || dist > 36 || inAny(districts, x, z, 3) || !free(x, z, 5) || cap(x, z) < 4.2) continue
@@ -125,7 +125,7 @@ export function buildScenery(core: Rect, districts: District[], obstacles: Obsta
     m.walls.push({ x, y: h / 2, z, w, h, d, rot: a, tone: r() })
     m.gables.push({ x, y: h, z, w, h: 1.4, d: d + 0.2, rot: a, tone: r() })
   }
-  for (let tries = 0, made = 0; tries < 600 && made < 28; tries++) {
+  for (let tries = 0, made = 0; tries < 600 && made < 1; tries++) {
     const { x, z } = sample(38)
     const dist = outside(core, x, z)
     if (dist < 4 || dist > 34 || inAny(districts, x, z, 2) || !free(x, z, 2.8) || cap(x, z) < 4.6) continue
@@ -137,14 +137,14 @@ export function buildScenery(core: Rect, districts: District[], obstacles: Obsta
   }
 
   // Ponds, then tree clusters (trees may also stand on Districts, between the services).
-  for (let tries = 0, made = 0; tries < 300 && made < 4; tries++) {
+  for (let tries = 0, made = 0; tries < 300 && made < 1; tries++) {
     const { x, z } = sample(30)
     const s = 3 + r() * 2.5
     if (outside(core, x, z) < 6 || inAny(districts, x, z, s) || !free(x, z, s)) continue
     solids.push({ x, z, rad: s }); made++
     m.ponds.push({ x, y: 0.03, z, w: s, h: 1, d: s * (0.6 + r() * 0.3), rot: r() * Math.PI, tone: 0 })
   }
-  for (let c = 0; c < 80; c++) {
+  for (let c = 0; c < 12; c++) {
     const centre = sample(50)
     const n = 2 + Math.floor(r() * 5)
     for (let i = 0; i < n; i++) {
@@ -155,6 +155,34 @@ export function buildScenery(core: Rect, districts: District[], obstacles: Obsta
       m.trunks.push({ x, y: 0.5 * s, z, w: s, h: s, d: s, rot: 0, tone })
       m.crowns.push({ x, y: 1.55 * s, z, w: s, h: s * (0.9 + r() * 0.4), d: s, rot: r() * 3, tone })
     }
+  }
+  // A few low-rise neighbours outside the working city. Reuse the same road,
+  // service-lot and sightline exclusions as the existing scenery.
+  for (let tries = 0, made = 0; tries < 700 && made < 12; tries++) {
+    const { x, z } = sample(38)
+    const distance = outside(core, x, z)
+    if (distance < 6 || distance > 32 || inAny(districts, x, z, 4) || !free(x, z, 4.5)) continue
+    const top = cap(x, z)
+    if (top < 3) continue
+    const w = 3.2 + r() * 1.4, d = 3 + r(), h = Math.min(2.2 + r(), top - 0.7), a = rot()
+    solids.push({ x, z, rad: 4.5 })
+    boxTower(m.walls, x, z, w, d, h, a)
+    made++
+  }
+
+  // Low clustered bushes on the outskirts, clear of streets and service plots.
+  for (let tries = 0, made = 0; tries < 800 && made < 32; tries++) {
+    const { x, z } = sample(34)
+    const distance = outside(core, x, z)
+    if (distance < 3 || distance > 30 || inAny(districts, x, z, 2.5) || !free(x, z, 2.3) || cap(x, z) < 1.4) continue
+    solids.push({ x, z, rad: 2.3 })
+    const tone = r(), a = rot()
+    for (const offset of [-0.7, 0, 0.7]) {
+      const size = 0.65 + r() * 0.25
+      m.crowns.push({ x: x + offset, y: size * 0.6, z, w: size, h: size * 0.75,
+        d: size, rot: a, tone })
+    }
+    made++
   }
   return m
 }
@@ -191,7 +219,7 @@ function Instanced({ geometry, items, material, palette, castShadow = true }: {
     mesh.instanceMatrix.needsUpdate = true
     if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true
   }, [items, palette, material, geometry]) // material: swapping it recreates the mesh, which must be refilled
-  return <instancedMesh ref={ref} args={[geometry, material, items.length]} castShadow={castShadow} receiveShadow />
+  return <instancedMesh ref={ref} args={[geometry, material, items.length]} castShadow={castShadow} receiveShadow raycast={() => {}} />
 }
 
 // Varied but softer than the landmark accents, so Scenery never competes with the services.
