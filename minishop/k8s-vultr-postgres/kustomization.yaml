@@ -1,0 +1,38 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - ../k8s-vultr
+patches:
+  - path: remove-local-postgres.yaml
+  - target:
+      kind: ConfigMap
+      name: minishop-config
+    patch: |-
+      - op: remove
+        path: /data/DB_TARGET
+  - target:
+      kind: Deployment|Job
+      name: product-api|checkout-api|minishop-migrate
+    patch: |-
+      - op: add
+        path: /spec/template/spec/volumes
+        value:
+          - name: postgres-ca
+            secret:
+              secretName: minishop-postgres-ca
+      - op: add
+        path: /spec/template/spec/containers/0/volumeMounts
+        value:
+          - name: postgres-ca
+            mountPath: /etc/minishop/postgres
+            readOnly: true
+      - op: add
+        path: /spec/template/spec/containers/0/env/-
+        value:
+          name: PGSSLROOTCERT
+          value: /etc/minishop/postgres/ca.crt
+      - op: add
+        path: /spec/template/spec/containers/0/env/-
+        value:
+          name: PGSSLMODE
+          value: verify-full

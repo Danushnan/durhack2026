@@ -19,6 +19,8 @@ import { districtOf } from './streetNetwork'
 
 const DISTRICT_COLORS = ['#22d3ee', '#e879f9', '#bef264', '#fbc08c', '#93a9ff', '#fba6c8']
 
+const JOURNEYS_ENABLED = import.meta.env.VITE_KUBEVERSE_JOURNEYS !== '0'
+
 export default function App() {
   const cluster = useCluster()
   const [selected, setSelected] = useState<string | null>(null)
@@ -124,7 +126,7 @@ export default function App() {
           !!cluster.metricsError || (!!activeDiscovery && !discoveryReady(cluster)))} />
 
       <header className="hud brand">
-        <h1>Kuebec <small>Port Kube</small></h1>
+        <h1>KubeVerse <small>Port Kube</small></h1>
         <span className={`dot ${cluster.connected ? 'on' : ''}`} title={cluster.connected ? 'WebSocket connected; source health shown separately' : 'WebSocket reconnecting…'}
           aria-label={cluster.connected ? 'WebSocket connected' : 'WebSocket reconnecting'} />
         {cluster.context && <span className="badge" title="Watching a real Kubernetes cluster through kubectl. Simulator controls are hidden.">
@@ -169,12 +171,12 @@ export default function App() {
         </>}
       </section>}
 
-      {miniShopSource && <section className="hud journey-controls" aria-label="Activity view">
+      {JOURNEYS_ENABLED && miniShopSource && <section className="hud journey-controls" aria-label="Activity view">
         <button aria-pressed={!journey.enabled} onClick={() => journey.setEnabled(false)}>Traffic</button>
         <button aria-pressed={journey.enabled} onClick={() => journey.setEnabled(true)}>Journey</button>
         {!journey.enabled && <span>Cars illustrate aggregate service activity.</span>}
       </section>}
-      {miniShopSource && journey.enabled && <JourneyPanel controller={journey} />}
+      {JOURNEYS_ENABLED && miniShopSource && journey.enabled && <JourneyPanel controller={journey} />}
 
       {live ? <>
         <LiveIncidentBanner deployments={deployments} views={liveViews} onPick={setSelected} />

@@ -48,7 +48,7 @@ export function AdminMenu() {
     try {
       const result = await request<{ sent?: number }>(path,'POST',body);
       setStatus(await request('status'));
-      if (path === 'packets') setMessage(`Queued ${result.sent} ${result.sent === 1 ? 'vehicle' : 'vehicles'} on the Kuebec map.`);
+      if (path === 'packets') setMessage(`Queued ${result.sent} ${result.sent === 1 ? 'vehicle' : 'vehicles'} on the KubeVerse map.`);
       else if (path === 'packets/reset') setMessage('Demo vehicles and routes cleared.');
       else setMessage(path==='actions'?'Operation submitted. Follow its verified outcome below.':path.endsWith('stop')?'Traffic stopped. An in-flight request may already have reached MiniShop.':'Traffic job acknowledged. Watch the real request counters below.');
     } catch(e){setError((e as Error).message);setMessage('');}
@@ -65,7 +65,7 @@ export function AdminMenu() {
       </div>
       <div className="operator-grid">
         <section className="operator-card"><h2>Map traffic presets</h2>
-          <p>Open Kuebec alongside this panel. These presets send illustrated packets to the map. Cross-district packets travel by lorry.</p>
+          <p>Open KubeVerse alongside this panel. These presets send illustrated packets to the map. Cross-district packets travel by lorry.</p>
           <div className="operator-buttons">
             {packetPresets.map(({ label, ...preset }) => <button key={label} disabled={!status || busy}
               onClick={() => void run('packets', preset)}>{label}</button>)}

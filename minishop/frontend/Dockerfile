@@ -9,6 +9,7 @@ FROM nginx:1.28-alpine
 COPY --from=build /app/dist /usr/share/nginx/html
 COPY frontend/nginx.conf.template /etc/nginx/templates/default.conf.template
 COPY frontend/resolver.sh /resolver.sh
+RUN sed -i 's/\r$//' /resolver.sh
 EXPOSE 8080
 ENTRYPOINT ["/bin/sh", "/resolver.sh"]
 CMD ["nginx", "-g", "daemon off;"]
