@@ -138,7 +138,7 @@ export default function App() {
           !!cluster.metricsError || (!!activeDiscovery && !discoveryReady(cluster)))} />
 
       <header className="hud brand">
-        <h1>Kuebec <small>Port Kube</small></h1>
+        <h1>KubeVerse <small>Port Kube</small></h1>
         <span className={`dot ${cluster.connected ? 'on' : ''}`} title={cluster.connected ? 'WebSocket connected; source health shown separately' : 'WebSocket reconnecting…'}
           aria-label={cluster.connected ? 'WebSocket connected' : 'WebSocket reconnecting'} />
         {cluster.context && <span className="badge" title="Watching a real Kubernetes cluster through kubectl. Simulator controls are hidden.">

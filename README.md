@@ -1,4 +1,4 @@
-# Kuebec — Watch Kubernetes Think
+# KubeVerse — Watch Kubernetes Think
 
 Port Kube is a 3D city that renders a (simulated) Kubernetes cluster live. Namespaces are Districts, each service
 (Deployment) is a distinct landmark Building, its Pods are Units on plots out front, and requests are Cars driving between Buildings on shared Roads and roundabouts. Lorries carry requests across districts on highways.
