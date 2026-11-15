@@ -12,6 +12,7 @@ import { routeKey, Telemetry, useTelemetry } from './Telemetry'
 import { liveServiceView } from './liveMetrics'
 import { LiveIncidentBanner, LiveOverview, LiveServiceDetails, LiveSourceStatus } from './LiveMonitoring'
 import type { LiveServiceView } from './liveMetrics'
+import { discoveryReady, type RoadDiscovery, startDiscovery, updateDiscovery } from './roadDiscovery'
 
 export default function App() {
   const cluster = useCluster()
@@ -81,13 +82,25 @@ export default function App() {
   const unhealthyPods = all.some((o) => o.kind === 'Pod' && podStatus(o) !== 'Running')
   const outages = nodes.filter((n) => !nodeReady(n))
   const live = typeof cluster.context === 'string'
+  const [discovery, setDiscovery] = useState<RoadDiscovery | null>(null)
+  useEffect(() => { setDiscovery((current) => updateDiscovery(current, cluster)) }, [cluster])
+  const activeDiscovery = discovery?.source === cluster.metrics?.source_id ? discovery : null
+  const miniShopSource = activeDiscovery?.source ??
+    (cluster.metrics?.services.some(({ deployment_uid }) => deployment_uid && cluster.objects[deployment_uid])
+      ? cluster.metrics.source_id : undefined)
+  const beginDiscovery = () => {
+    if (miniShopSource) setDiscovery(startDiscovery(miniShopSource, Date.now()))
+    setHover(null)
+  }
   const liveViews = Object.fromEntries(Object.entries(states).flatMap(([key, s]) => s.live ? [[key, s.live]] : [])) as Record<string, LiveServiceView>
 
   return (
     <div className={`app ${mode}`}>
       <City cluster={cluster} selected={selected} onSelect={setSelected} powerGrid={powerGrid} theme={theme}
         onHover={setHover} states={states} homeTick={homeTick} flows={flows} replay={simulatorSource && replayAt !== null} mode={view}
-        trafficPaused={live && (!cluster.connected || !!cluster.awaitingSnapshot || !!cluster.stale || !!cluster.metricsStale || !!cluster.metricsError)} />
+        discoveredRoads={activeDiscovery?.roads}
+        trafficPaused={live && (!cluster.connected || !!cluster.awaitingSnapshot || !!cluster.stale || !!cluster.metricsStale ||
+          !!cluster.metricsError || (!!activeDiscovery && !discoveryReady(cluster)))} />
 
       <header className="hud brand">
         <h1>Kuebec <small>Port Kube</small></h1>
@@ -122,6 +135,19 @@ export default function App() {
             setAnalyticsOpen(!analyticsOpen)
           }}>▥</button>}
       </nav>
+
+      {miniShopSource && <section className="hud discovery-controls" aria-label="MiniShop roads">
+        <button type="button" aria-pressed={!activeDiscovery} onClick={() => { setDiscovery(null); setHover(null) }}>Architecture</button>
+        <button type="button" aria-pressed={!!activeDiscovery} onClick={() => { if (!activeDiscovery) beginDiscovery() }}>Discovery</button>
+        {activeDiscovery && <>
+          <button type="button" onClick={beginDiscovery}>Reset Discovery</button>
+          <span role="status">
+            {activeDiscovery.roads.size} discovered
+            {!discoveryReady(cluster) ? ' · Waiting for live telemetry'
+              : !activeDiscovery.armed ? ' · Arming for a fresh window' : ' · Ready to observe'}
+          </span>
+        </>}
+      </section>}
 
       {live ? <>
         <LiveIncidentBanner deployments={deployments} views={liveViews} onPick={setSelected} />

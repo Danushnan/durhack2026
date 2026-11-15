@@ -18,14 +18,18 @@ export function reduceWatchMessage(previous: ClusterState, data: unknown, receiv
   let batch: unknown
   try { batch = typeof data === 'string' ? JSON.parse(data) : data } catch { return { ...previous, metricsError: 'Invalid WebSocket JSON; retaining last data' } }
   if (!Array.isArray(batch)) return { ...previous, metricsError: 'Expected an event array; retaining last data' }
-  let state = { ...previous }
+  let state: ClusterState = { ...previous, trafficSnapshotAt: undefined }
   let objects = previous.objects
+  let receivedSource = false
+  let receivedTraffic = false
+  let receivedMetrics = false
   const writeObjects = () => { if (objects === previous.objects) objects = { ...objects } }
   for (const event of batch) {
     if (!record(event)) continue
     switch (event.type) {
       case 'SOURCE': {
         if (event.context !== null && typeof event.context !== 'string') break
+        receivedSource = true
         const context = event.context as string | null
         const changed = state.context !== context
         if (state.awaitingSnapshot || changed) {
@@ -46,9 +50,13 @@ export function reduceWatchMessage(previous: ClusterState, data: unknown, receiv
         // Reconnect's initial snapshot may come from a restarted backend with a different clock.
         if (!previous.awaitingSnapshot && state.metrics?.source_id === event.source_id && Date.parse(event.observed_at) < Date.parse(state.metrics.observed_at)) break
         state.metrics = event; state.metricsReceivedAt = receivedAt; state.metricsStale = false; state.metricsError = undefined
+        receivedMetrics = true
         break
       case 'TRAFFIC':
-        if (Array.isArray(event.edges) && event.edges.every(edgeGuard)) state.edges = event.edges
+        if (Array.isArray(event.edges) && event.edges.every(edgeGuard)) {
+          state.edges = event.edges
+          receivedTraffic = true
+        }
         break
       case 'HEALTH':
         if (typeof event.stale === 'boolean' && (event.lastRefresh === null || typeof event.lastRefresh === 'number' && Number.isFinite(event.lastRefresh))) {
@@ -64,5 +72,7 @@ export function reduceWatchMessage(previous: ClusterState, data: unknown, receiv
       default: break // Future events must never be interpreted as Kubernetes objects.
     }
   }
+  // An initial/reconnect snapshot can replay the previous traffic window.
+  if (receivedTraffic && receivedMetrics && !receivedSource) state.trafficSnapshotAt = state.metrics?.observed_at
   return { ...state, objects }
 }

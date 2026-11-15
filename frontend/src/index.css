@@ -59,6 +59,15 @@ button.small { padding: 2px 8px; font-size: 11px; }
 .controls { top: 12px; right: 12px; display: flex; gap: 6px; padding: 5px; }
 .controls button { width: 34px; height: 34px; padding: 0; font-size: 16px; font-weight: 700; }
 .controls button.on { border-color: var(--accent); color: var(--accent); }
+.discovery-controls { top: 62px; right: 12px; display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 5px; padding: 5px; max-width: calc(100vw - 76px); }
+.discovery-controls:has([role="status"]) { width: 285px; }
+.discovery-controls button { font-size: 12px; }
+.discovery-controls button[aria-pressed="true"] { border-color: var(--accent); color: var(--accent); }
+.discovery-controls [role="status"] { flex-basis: 100%; color: var(--muted); font-size: 11px; text-align: right; padding: 2px 4px; }
+.discovery-controls ~ .help { top: 124px; }
+@media (min-width: 801px) {
+  .discovery-controls ~ .inspect { top: 124px; max-height: calc(100vh - 190px); }
+}
 
 .telemetry { top: 60px; left: 60px; width: 390px; max-width: calc(100vw - 72px);
   max-height: calc(100vh - 120px); overflow: auto; z-index: 21; }
@@ -206,6 +215,8 @@ i { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin
 @media (max-width: 720px) {
   .brand { top: 8px; left: 8px; max-width: calc(100vw - 16px); right: 8px; }
   .controls { top: 98px; right: 8px; max-width: calc(100vw - 16px); flex-wrap: wrap; }
+  .discovery-controls { top: 146px; right: 8px; }
+  .discovery-controls ~ .help, .discovery-controls ~ .banner { top: 222px; }
   .services { top: 150px; max-height: calc(100vh - 220px); }
   .live-overview { left: 64px; right: 8px; bottom: 58px; width: auto; max-height: 32vh; }
   .inspect { right: 8px; max-width: calc(100vw - 16px); bottom: 58px; max-height: 60vh; z-index: 22; }

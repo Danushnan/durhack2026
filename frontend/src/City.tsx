@@ -7,7 +7,7 @@ import {
   keyOf, NODE_COLORS, nodeReady, podsOf, podStatus, rolloutOf, STATUS_COLOR, versionColor,
 } from './k8s'
 import { FacadeSign, Landmark, type LandmarkInfo, landmarkFor } from './landmarks'
-import { BUILDING, buildRoads, carTrip, type CityLayout, checkRoads, KERB, layoutCity, offsetPath, Path, ROAD_W } from './layout'
+import { BUILDING, buildRoads, carTrip, type Call, type CityLayout, checkRoads, KERB, layoutCity, offsetPath, Path, ROAD_W } from './layout'
 import { Scenery } from './scenery'
 import { COMPONENTS, componentOf, nameOf, roleOf } from './teach'
 import { textTexture, type TextLine } from './textures'
@@ -15,6 +15,8 @@ import type { Theme } from './theme'
 import { type Affected, describeFlow, type Flow, rates, type serviceFlow, SIGNAL, signalOf } from './health'
 import { admit, bendLimit, type CarAgent, CARS_PER_REQUEST, newCar, stepCars } from './traffic'
 import { label, latencyText, type LiveServiceView } from './liveMetrics'
+import { miniShopLayoutCalls } from './miniShopRoads'
+import { roadKey, roadVisible } from './roadDiscovery'
 
 export interface HoverInfo { title: string; lines: string[]; x: number; y: number }
 type OnHover = (h: HoverInfo | null) => void
@@ -189,8 +191,8 @@ const arrow = (() => {
  * A two-lane Road: pavement, asphalt, a dashed centre line, arrows in the outbound lane, and edge lines
  * that glow with the health of the call (blue fine, orange answered-with-errors, red refused, grey idle).
  */
-function Road({ pts, edge, emphasis, theme, onHover }: {
-  pts: THREE.Vector3[]; edge: RoadFlow; emphasis: 'normal' | 'dim' | 'strong'; theme: Theme; onHover: OnHover
+function Road({ pts, call, edge, emphasis, theme, onHover }: {
+  pts: THREE.Vector3[]; call: Call; edge?: RoadFlow; emphasis: 'normal' | 'dim' | 'strong'; theme: Theme; onHover: OnHover
 }) {
   const geo = useMemo(() => ({
     kerb: ribbon(pts, ROAD_W + 2 * KERB, 0.006),
@@ -199,13 +201,19 @@ function Road({ pts, edge, emphasis, theme, onHover }: {
     right: ribbon(offsetPath(pts, ROAD_W / 2 - 0.14), 0.16, 0.022),
   }), [pts])
   useEffect(() => () => Object.values(geo).forEach((g) => g.dispose()), [geo])
-  const signal = SIGNAL[signalOf(edge)]
+  const signal = SIGNAL[edge ? signalOf(edge) : 'idle']
   const color = signal.color
   const dim = emphasis === 'dim' ? 0.3 : 1
   const hover = (e: ThreeEvent<PointerEvent>) => {
     e.stopPropagation()
-    const r = rates(edge), src = edge.from.startsWith('ingress:') ? 'customers' : nameOf(edge.from)
-    onHover({ title: `🛣️ ${src} → ${nameOf(edge.to)} · ${signal.icon} ${signal.label}`, lines: [
+    const src = call.from.startsWith('ingress:') ? 'customers' : nameOf(call.from)
+    const title = `🛣️ ${src} → ${nameOf(call.to)}`
+    if (!edge) {
+      onHover({ title, lines: ['Previously observed dependency. Current traffic measurements are unavailable.'], ...at(e) })
+      return
+    }
+    const r = rates(edge)
+    onHover({ title: `${title} · ${signal.icon} ${signal.label}`, lines: [
       describeFlow(edge),
       edge.rps > 0 ? `Observed aggregate calls · ${(r.error * 100).toFixed(1)}% HTTP response errors (4xx/5xx) · ${(r.refused * 100).toFixed(1)}% refused`
         : 'Known dependency: declared or previously observed. No calls observed in the current traffic window; the Road stays.',
@@ -219,8 +227,8 @@ function Road({ pts, edge, emphasis, theme, onHover }: {
       <mesh geometry={geo.asphalt} receiveShadow onPointerOver={hover} onPointerMove={hover} onPointerOut={() => onHover(null)}>
         <meshStandardMaterial color={theme.street} roughness={0.95} side={THREE.DoubleSide} />
       </mesh>
-      <mesh geometry={geo.left} renderOrder={edge.healthy ? 1 : 2}>{glow}</mesh>
-      <mesh geometry={geo.right} renderOrder={edge.healthy ? 1 : 2}>{glow}</mesh>
+      <mesh geometry={geo.left} renderOrder={edge?.healthy === false ? 2 : 1}>{glow}</mesh>
+      <mesh geometry={geo.right} renderOrder={edge?.healthy === false ? 2 : 1}>{glow}</mesh>
       <Marks pts={pts} every={2.6} offset={0} start={4} geometry={dash} color={theme.laneMark} opacity={0.9 * dim} />
       <Marks pts={pts} every={13} offset={ROAD_W / 4} start={7} geometry={arrow} color={theme.laneMark} opacity={0.55 * dim} />
     </group>
@@ -844,8 +852,9 @@ function CameraRig({ focus, layout, homeTick, mode }: { focus: THREE.Vector3 | n
 
 // ---------- the City ----------
 
-export function City({ cluster, selected, onSelect, powerGrid, theme, onHover, states, homeTick, flows, replay, mode, trafficPaused }: {
+export function City({ cluster, selected, onSelect, powerGrid, theme, onHover, states, homeTick, flows, replay, mode, trafficPaused, discoveredRoads }: {
   flows: RoadFlow[]; replay: boolean; mode: ViewMode; trafficPaused: boolean
+  discoveredRoads?: ReadonlySet<string>
   cluster: ClusterState; selected: string | null; onSelect: (key: string | null) => void
   powerGrid: boolean; theme: Theme; onHover: OnHover; states: ServiceState; homeTick: number
 }) {
@@ -855,9 +864,18 @@ export function City({ cluster, selected, onSelect, powerGrid, theme, onHover, s
   const nodes = all.filter((o) => o.kind === 'Node').sort((a, b) => a.metadata.name.localeCompare(b.metadata.name))
   const nodeColors = Object.fromEntries(nodes.map((n, i) => [n.metadata.name, NODE_COLORS[i % NODE_COLORS.length]]))
   // Keyed on names and from→to pairs only: failures change rps/health, and the city must not rearrange.
-  const layoutKey = [deployments.map(keyOf).sort(), nodes.map((n) => n.metadata.name), cluster.edges.map((e) => `${e.from}>${e.to}`).sort()].join('|')
+  const workloadKeys = deployments.map(keyOf).sort()
+  const reportedKeys = new Set(cluster.edges.map(roadKey))
+  // A backend restart can forget learned relationships while this browser still remembers them.
+  const remembered = [...(discoveredRoads ?? [])].filter((key) => !reportedKeys.has(key)).map((key) => {
+    const [from, to] = key.split('>')
+    return { from, to }
+  })
+  const { known, supplemental } = cluster.metrics ? miniShopLayoutCalls([...cluster.edges, ...remembered], workloadKeys)
+    : { known: cluster.edges, supplemental: [] }
+  const layoutKey = [workloadKeys, nodes.map((n) => n.metadata.name), known.map(roadKey).sort()].join('|')
   const { layout, roads, obstacles, lamps, keep } = useMemo(() => {
-    const calls = cluster.edges.map((e) => ({ from: e.from, to: e.to }))
+    const calls = known.map(({ from, to }) => ({ from, to }))
     const layout = layoutCity(deployments.map((d) => ({ namespace: d.metadata.namespace!, name: d.metadata.name })),
       nodes.map((n) => n.metadata.name), calls, calls.filter((c) => c.from.startsWith('ingress:')))
     const roads = buildRoads(layout, calls)
@@ -866,14 +884,15 @@ export function City({ cluster, selected, onSelect, powerGrid, theme, onHover, s
     const clear = (p: THREE.Vector3) => lots.every((l) => Math.abs(p.x - l.center.x) > BUILDING.halfW + 1 ||
       p.z < l.center.z + BUILDING.back - 1 || p.z > l.center.z + BUILDING.front + 1)
     // Lamps every ~9 units on the left kerb of each Road, wherever that is clear of Buildings.
-    const lamps = Object.values(roads).flatMap((r) => {
+    const lamps = Object.entries(roads).map(([key, r]) => {
       const kerb = new Path(offsetPath(r, -(ROAD_W / 2 + KERB + 0.3)))
-      return Array.from({ length: Math.floor(kerb.length / 9) }, (_, i) => {
+      const points = Array.from({ length: Math.floor(kerb.length / 9) }, (_, i) => {
         const v = new THREE.Vector3()
         kerb.at(4.5 + i * 9, v)
         return v
-      })
-    }).filter(clear)
+      }).filter(clear)
+      return { key, points }
+    })
     // What Scenery must keep clear of: Buildings at full size, Power Stations, Roads.
     const obstacles = [
       ...Object.values(layout.lots).map((l) => ({ x: l.center.x, z: l.center.z - 0.4, rad: 9.5 })),
@@ -891,7 +910,14 @@ export function City({ cluster, selected, onSelect, powerGrid, theme, onHover, s
     ]
     return { layout, roads, obstacles, lamps, keep }
   }, [layoutKey]) // eslint-disable-line react-hooks/exhaustive-deps
-  const edges = flows.filter((e) => roads[`${e.from}>${e.to}`])
+  // Each observed-only route uses the fixed layout and its own driveway slots.
+  const supplementalKey = supplemental.map(roadKey).sort().join(',')
+  const extraRoads = useMemo(() => Object.assign({}, ...supplemental.map((call) => buildRoads(layout, [call]))) as typeof roads,
+    [layout, supplementalKey]) // eslint-disable-line react-hooks/exhaustive-deps
+  const pathFor = (call: Call) => roads[roadKey(call)] ?? extraRoads[roadKey(call)]
+  const edges = flows.filter((edge) => pathFor(edge) && roadVisible(edge, discoveredRoads))
+  const visibleLamps = useMemo(() => lamps.filter(({ key }) => !discoveredRoads || discoveredRoads.has(key)).flatMap(({ points }) => points),
+    [lamps, discoveredRoads])
   const related = new Set(flows.filter((e) => e.from === selected || e.to === selected).flatMap((e) => [e.from, e.to]))
   const focus = !selected ? null : selected === 'city-hall' ? layout.hall?.center ?? null
     : selected.startsWith('node:') ? layout.stations[selected.slice(5)]?.center ?? null : layout.lots[selected]?.center ?? null
@@ -942,10 +968,10 @@ export function City({ cluster, selected, onSelect, powerGrid, theme, onHover, s
         shadow-bias={-0.0004} shadow-normalBias={0.04} />
       <Ground layout={layout} theme={theme} />
       {ready && <Scenery core={layout.core} districts={layout.districts} obstacles={obstacles} keep={keep} theme={theme} />}
-      {ready && <Lamps points={lamps} theme={theme} />}
-      {edges.map((e) => (
-        <Road key={`${e.from}>${e.to}`} pts={roads[`${e.from}>${e.to}`]} edge={e} theme={theme} onHover={onHover}
-          emphasis={!selected ? 'normal' : e.from === selected || e.to === selected ? 'strong' : 'dim'} />
+      {ready && <Lamps points={visibleLamps} theme={theme} />}
+      {[...edges.map((edge) => ({ call: edge, edge })), ...remembered.filter(pathFor).map((call) => ({ call, edge: undefined }))].map(({ call, edge }) => (
+        <Road key={roadKey(call)} pts={pathFor(call)} call={call} edge={edge} theme={theme} onHover={onHover}
+          emphasis={!selected ? 'normal' : call.from === selected || call.to === selected ? 'strong' : 'dim'} />
       ))}
       {nodes.map((n) => layout.stations[n.metadata.name] && (
         <PowerStation key={n.metadata.uid} node={n} pos={layout.stations[n.metadata.name].center} used={podsOn(n.metadata.name)}
@@ -977,7 +1003,7 @@ export function City({ cluster, selected, onSelect, powerGrid, theme, onHover, s
       {edges.map((e) => {
         if (replay && !e.measured) return null // replaying history: only routes with recorded traffic get Cars
         // A Car wears its caller's colour (customers: yellow taxis); how its request went shows at the door.
-        return <Traffic key={`${e.from}>${e.to}`} edge={e} road={roads[`${e.from}>${e.to}`]} theme={theme} onHover={onHover}
+        return <Traffic key={roadKey(e)} edge={e} road={pathFor(e)} theme={theme} onHover={onHover}
           accent={e.from.startsWith('ingress:') ? CUSTOMER : landmarkFor(nameOf(e.from)).accent} endpoints={endpoints(e.to)} paused={trafficPaused} liveMode={typeof cluster.context === 'string'} />
       })}
       {mode === 'iso'

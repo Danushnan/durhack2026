@@ -45,6 +45,7 @@ export interface ClusterState {
   awaitingSnapshot?: boolean
   metrics?: LiveMetricsSnapshot
   metricsReceivedAt?: number
+  trafficSnapshotAt?: string // server time of a TRAFFIC update paired with an accepted metrics snapshot
   metricsStale?: boolean
   metricsError?: string
 }
