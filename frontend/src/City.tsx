@@ -452,15 +452,17 @@ function Building({ dep, info, pods, pos, selected, related, onSelect, powerGrid
     ], ...at(e) })
   }
   const tag = tagFor(dep, info, state, theme, rolloutOf(dep, pods), selected)
-  const size = sizeFor(desired)
+  // Enlarge the landmark within its existing reserved plot; roads stay untouched.
+  const size = Math.min(1.5, sizeFor(desired) * 1.35)
+  const height = sizeFor(desired) * 1.5
   const body = useRef<THREE.Group>(null)
-  useFrame((_, dt) => { body.current?.scale.lerp(new THREE.Vector3(size, size, size), Math.min(1, dt * 4)) })
+  useFrame((_, dt) => { body.current?.scale.lerp(new THREE.Vector3(size, height, size), Math.min(1, dt * 4)) })
   return (
     <group position={pos}>
       {selected && <Pad w={17} d={17} r={3.5} position={[0, 0.008, -0.6]} color={info.accent} opacity={0.4} />}
       {!selected && related && <Pad w={17} d={17} r={3.5} position={[0, 0.008, -0.6]} color={info.accent} opacity={0.16} />}
       {state?.affected && <Alarm color={state.affected.color} strong={state.affected.rank >= SERIOUS && state.live?.infrastructure !== 'scaled_down'} />}
-      <group ref={body} position={[0, 0, -2]} scale={size}>
+      <group ref={body} position={[0, 0, -2]} scale={[size, height, size]}>
         <Landmark info={info} glow={glow} theme={theme} />
         {/* One invisible hit-box for hover/click instead of handlers on every part */}
         <mesh position={[0, info.height / 2, -0.5]} visible={false}
@@ -478,7 +480,7 @@ function Building({ dep, info, pods, pos, selected, related, onSelect, powerGrid
           attached={pods.find((p) => !p.metadata.deletionTimestamp && p.spec.volumes?.[0]?.persistentVolumeClaim?.claimName === c.metadata.name)?.metadata.name} />
       ))}
       {/* outside the scaled group: a sprite would inherit its scale */}
-      <Tag lines={tag.lines} border={selected ? info.accent : tag.border} position={[0, info.height * size + 0.8, -2]} theme={theme} />
+      <Tag lines={tag.lines} border={selected ? info.accent : tag.border} position={[0, info.height * height + 0.8, -2]} theme={theme} />
     </group>
   )
 }
@@ -523,7 +525,7 @@ function PowerStation({ node, pos, used, color, theme, onHover, selected, onSele
     })
   }
   return (
-    <group position={pos} scale={0.85}>
+    <group position={pos} scale={1.05}>
       <Pad w={13} d={10.5} r={2.5} position={[0, 0.006, -0.3]} color={selected ? color : theme.district} opacity={selected ? 0.5 : 1} />
       {cordoned && (
         <group position={[-1.2, 0, 4.6]}>
@@ -885,6 +887,7 @@ function CityHall({ pos, theme, onHover, selected, onSelect }: {
   }
   return (
     <group position={pos}>
+      <group scale={[1.1, 1.35, 1.1]}>
       <Pad w={18} d={13} r={3} position={[0, 0.006, 0]} color={selected ? accent : theme.district} opacity={selected ? 0.45 : 1} />
       <mesh position={[0, 0.2, 0.4]} receiveShadow><boxGeometry args={[12, 0.4, 8]} /><meshStandardMaterial color={stone} /></mesh>
       <mesh position={[0, 0.5, 0.6]}><boxGeometry args={[11, 0.3, 7.4]} /><meshStandardMaterial color={stone} /></mesh>
@@ -903,7 +906,8 @@ function CityHall({ pos, theme, onHover, selected, onSelect }: {
         onClick={(e) => { e.stopPropagation(); if (!dragged(e)) onSelect() }}>
         <boxGeometry args={[12, 9, 9]} />
       </mesh>
-      <Tag theme={theme} position={[0, 11, -0.6]} border={accent} size={0.04}
+      </group>
+      <Tag theme={theme} position={[0, 14.85, -0.6]} border={accent} size={0.04}
         lines={[{ text: '🏛️ City Hall', px: 56, color: theme.labelFg }, { text: 'control plane', px: 40, color: night ? '#a5b4fc' : '#4338ca' }]} />
     </group>
   )

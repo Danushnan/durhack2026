@@ -184,6 +184,32 @@ export function buildScenery(core: Rect, districts: District[], obstacles: Obsta
     }
     made++
   }
+  // Enlarge decoration in place, limiting each footprint against the existing
+  // road/landmark exclusions. Geometry never feeds back into street routing.
+  const groups = new Map<string, { parts: Part[]; radius: number; top: number }>()
+  for (const [kind, parts] of Object.entries(m)) {
+    if (kind === 'ponds') continue
+    for (const part of parts) {
+      const key = `${part.x}:${part.z}`
+      const group = groups.get(key) ?? { parts: [], radius: 0, top: 0 }
+      const foliage = kind === 'crowns' || kind === 'rounds' || kind === 'rings'
+      group.radius = Math.max(group.radius, Math.hypot(part.w, part.d) * (foliage ? 1 : 0.5))
+      group.top = Math.max(group.top, part.y + part.h * (foliage ? 1 : 0.5))
+      group.parts.push(part)
+      groups.set(key, group)
+    }
+  }
+  for (const { parts, radius, top } of groups.values()) {
+    const { x, z } = parts[0]
+    const clearance = obstacles.reduce((space, obstacle) => Math.min(space,
+      Math.hypot(obstacle.x - x, obstacle.z - z) - obstacle.rad - 0.5), Infinity)
+    const widthScale = Math.max(1, Math.min(1.25, clearance / radius))
+    const heightScale = Math.max(1, Math.min(1.4, cap(x, z) / top))
+    for (const part of parts) {
+      part.w *= widthScale; part.d *= widthScale
+      part.y *= heightScale; part.h *= heightScale
+    }
+  }
   return m
 }
 
