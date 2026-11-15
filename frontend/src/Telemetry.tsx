@@ -35,9 +35,10 @@ type Snapshot =
 
 export const routeKey = (from: string, to: string) => `${from}→${to}`
 
-export function useTelemetry(at: number | null) {
+export function useTelemetry(at: number | null, enabled = true) {
   const [snapshot, setSnapshot] = useState<Snapshot>({ status: 'waiting' })
   useEffect(() => {
+    if (!enabled) return
     const controller = new AbortController()
     let timer: ReturnType<typeof setTimeout>
     async function refresh() {
@@ -58,8 +59,8 @@ export function useTelemetry(at: number | null) {
     }
     timer = setTimeout(refresh, at === null ? 0 : 150)
     return () => { controller.abort(); clearTimeout(timer) }
-  }, [at])
-  return snapshot
+  }, [at, enabled])
+  return enabled ? snapshot : { status: 'disabled' as const }
 }
 
 const clock = (iso: string) => new Date(iso).toLocaleTimeString()

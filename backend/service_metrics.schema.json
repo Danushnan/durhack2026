@@ -1,0 +1,332 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "KubeVerse SERVICE_METRICS v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "type",
+    "schema_version",
+    "mode",
+    "application",
+    "source_id",
+    "context",
+    "observed_at",
+    "window",
+    "source",
+    "services"
+  ],
+  "properties": {
+    "type": {
+      "const": "SERVICE_METRICS"
+    },
+    "schema_version": {
+      "const": 1
+    },
+    "mode": {
+      "const": "live"
+    },
+    "application": {
+      "const": "minishop"
+    },
+    "source_id": {
+      "type": "string"
+    },
+    "context": {
+      "type": "string"
+    },
+    "observed_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "window": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "start",
+        "end",
+        "seconds"
+      ],
+      "properties": {
+        "start": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "end": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "seconds": {
+          "type": "number",
+          "exclusiveMinimum": 0
+        }
+      }
+    },
+    "source": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "status",
+        "last_resource_refresh_at",
+        "last_log_poll_at",
+        "last_application_event_at",
+        "rejected_records",
+        "error"
+      ],
+      "properties": {
+        "status": {
+          "enum": [
+            "connected",
+            "degraded",
+            "disconnected",
+            "unavailable"
+          ]
+        },
+        "last_resource_refresh_at": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "date-time"
+        },
+        "last_log_poll_at": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "date-time"
+        },
+        "last_application_event_at": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "date-time"
+        },
+        "rejected_records": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "error": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
+    },
+    "services": {
+      "type": "array",
+      "minItems": 7,
+      "maxItems": 7,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "service",
+          "namespace",
+          "deployment_uid",
+          "measurement_kind",
+          "request_count",
+          "requests_per_second",
+          "avg_latency_ms",
+          "p95_latency_ms",
+          "error_count",
+          "error_rate",
+          "business_rejection_count",
+          "business_decline_count",
+          "checkout",
+          "desired_replicas",
+          "ready_replicas",
+          "infrastructure_status",
+          "application_status",
+          "availability",
+          "window_complete",
+          "last_log_poll_at",
+          "last_event_at"
+        ],
+        "properties": {
+          "service": {
+            "type": "string",
+            "pattern": "^[a-z0-9][a-z0-9-]*/[a-z0-9][a-z0-9-]*$"
+          },
+          "namespace": {
+            "type": "string"
+          },
+          "deployment_uid": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "measurement_kind": {
+            "enum": [
+              "http_server",
+              "proxy_access",
+              "unsupported"
+            ]
+          },
+          "request_count": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 0
+          },
+          "requests_per_second": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "minimum": 0
+          },
+          "avg_latency_ms": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "minimum": 0
+          },
+          "p95_latency_ms": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "minimum": 0
+          },
+          "error_count": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 0
+          },
+          "error_rate": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "minimum": 0,
+            "maximum": 1
+          },
+          "business_rejection_count": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 0
+          },
+          "business_decline_count": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 0
+          },
+          "checkout": {
+            "anyOf": [
+              {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "attempt_count",
+                  "success_count",
+                  "business_rejection_count",
+                  "failure_count",
+                  "success_rate"
+                ],
+                "properties": {
+                  "attempt_count": {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  "success_count": {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  "business_rejection_count": {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  "failure_count": {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  "success_rate": {
+                    "type": [
+                      "number",
+                      "null"
+                    ],
+                    "minimum": 0,
+                    "maximum": 1
+                  }
+                }
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "desired_replicas": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 0
+          },
+          "ready_replicas": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 0
+          },
+          "infrastructure_status": {
+            "enum": [
+              "healthy",
+              "degraded",
+              "unavailable",
+              "scaled_down",
+              "unknown"
+            ]
+          },
+          "application_status": {
+            "enum": [
+              "healthy",
+              "degraded",
+              "unavailable",
+              "unknown",
+              "not_applicable"
+            ]
+          },
+          "availability": {
+            "enum": [
+              "active",
+              "idle",
+              "partial",
+              "stale",
+              "unavailable",
+              "unsupported"
+            ]
+          },
+          "window_complete": {
+            "type": "boolean"
+          },
+          "last_log_poll_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "last_event_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          }
+        }
+      }
+    }
+  }
+}

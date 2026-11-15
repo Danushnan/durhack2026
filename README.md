@@ -1,8 +1,8 @@
-# Kuebec — Watch Kubernetes Think
+# KubeVerse — Watch Kubernetes Think
 
 Port Kube is a 3D city that renders a (simulated) Kubernetes cluster live. Namespaces are Districts, each service
-(Deployment) is a distinct landmark Building, its Pods are Units on plots out front, a Road joins two Buildings only
-where one service calls the other, and requests are Cars driving those Roads. Break things and watch the control loop heal them. See `GLOSSARY.md` for the vocabulary.
+(Deployment) is a distinct landmark Building, its Pods are Units on plots out front, and requests are Cars driving between Buildings on shared Roads and roundabouts. Lorries carry requests across districts on highways.
+Break things and watch the control loop heal them. See `GLOSSARY.md` for the vocabulary.
 
 ## Run the demo
 
@@ -74,7 +74,7 @@ Live cluster mode is read-only. The demo script below uses the simulator.
    ```
 4. Break and heal things with real `kubectl` and watch the city react within a few seconds:
    ```bash
-   kubectl -n shop scale deploy/payments --replicas=0     # payments DOWN: red Cars; checkout and frontend Impacted, orange Cars
+   kubectl -n shop scale deploy/payments --replicas=0     # payments DOWN: failures burst and return red; inspect HTTP replies versus failed communication
    kubectl -n shop scale deploy/payments --replicas=2     # it heals
    kubectl -n shop delete pod -l app=cart --wait=false    # Pods replaced by the ReplicaSet controller
    kubectl -n shop scale deploy/frontend --replicas=5     # the Building grows, new Units warm up before taking traffic
@@ -93,7 +93,7 @@ logs one JSON line per call (`200` served, `500` answered with an error, `503` r
 3. **Demolish** a Unit → it shuts down, Kubernetes creates a replacement, the scheduler places it. Watch the glowing
    **messengers** fly from **City Hall** (the control plane) and from the Power Stations' kubelets.
 4. **Sabotage** `payments` (the Bank) → its Units crash; Cars to it are refused and turn back **red**; checkout is now
-   **Impacted**, so Cars to checkout wait at its door, queue, and come back **orange** (an error answer).
+   **Impacted**, so Cars to checkout wait at its door, queue, burst, and come back **red** (an HTTP error answer). Both error replies and failed communication use red return vehicles; route details distinguish them. A MiniShop HTTP 402 payment decline is a business outcome, not evidence of a pod outage.
 5. **Release v2** of the Bank → Unit caps change colour one at a time and the Service never drops below 2 ready Units.
    **Release buggy v3** → the rollout stalls with v2 still serving; **Roll back** returns to v2.
 6. Customers (yellow taxis) enter through the **City Gate** (an Ingress). Each delivered request flashes the ready Unit
@@ -107,9 +107,9 @@ logs one JSON line per call (`200` served, `500` answered with an error, `503` r
    service's disruption budget; **Cut power** is the sudden version: Kubernetes only notices once the heartbeats stop,
    marks the Node NotReady, takes its Units out of rotation, and evicts them when their toleration runs out.
    Toggle **⚡ Power Grid** to colour Units by Node.
-9. Request health is shown apart from Pod health. A Building glows (and each Road's edges are coloured) by its
-   requests: healthy, slow (≥ 300 ms), errors (≥ 1% answered with an error), refused (nobody answered) or idle; its Units
-   show its Pods. Each tag has a Pods line and a requests line. A pulsing ring (with a light beam when serious) marks every
+9. Request health is shown apart from Pod health. A Building glows by its requests, and a shared Road shows the most
+   affected route using it. The states are healthy, slow (≥ 300 ms), errors (≥ 1% answered with an error), refused
+   (nobody answered) and idle. A Building’s Units show its Pods. Each tag has a Pods line and a requests line. A pulsing ring (with a light beam when serious) marks every
    Building that needs attention, and the **overview** (bottom left) gives total requests/s in, latency, the failing share,
    counts of healthy, degraded (ring only: slow, missing Pods) and failed (ring and beam: down, refusing, errors, impacted)
    services, and lists the affected ones. A Building's inspect panel shows its **recent errors**: failed requests from the
@@ -144,11 +144,11 @@ Both modes stream Kubernetes-shaped updates (`ADDED`/`MODIFIED`/`DELETED`) over 
 `rps`, `latency_ms`, `error_rate` (answered with an error) and `refused_rate` (nobody answered). The simulator models
 latency from load per ready Pod and spreads failures to callers by how often they need the broken service.
 
-In live mode, Roads are the union of the calls each app declares (an `architecture.json` manifest such as
+In live mode, request routes are the union of the calls each app declares (an `architecture.json` manifest such as
 `minishop/architecture.json`, or a workload's `CALLS`/`DEPENDENCIES` env var), the calls seen since the backend started,
-and the last five seconds of logs. A known call keeps its Road at 0 req/s when traffic stops, so the topology never
-disappears. Only declared calls place Buildings, so a call first seen in the logs adds a Road without rearranging the city,
-and a manifest component missing from its (existing) namespace is still drawn, marked **Not deployed**. Log lines may report `latency_ms`, `duration_ms` or `duration_seconds`; a call counts as refused only when
+and the last five seconds of logs. A known route stays visible at 0 req/s when traffic stops. Hover a shared Road
+to see the calls that use it. A manifest component missing from its (existing) namespace is still drawn, marked
+**Not deployed**. Log lines may report `latency_ms`, `duration_ms` or `duration_seconds`; a call counts as refused only when
 the caller got no HTTP answer (a 504, a plain 503, or an exception such as a connection error), and as an error when the
 callee answered with one (e.g. MiniShop's 402 payment declines, which leave every Pod Ready).
 

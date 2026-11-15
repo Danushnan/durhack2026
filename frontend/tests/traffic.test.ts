@@ -40,6 +40,32 @@ test('refused Cars turn back at the door', () => {
   assert.ok(r.cars.every((c) => c.phase === 'out' || c.fate === 'refused'))
 })
 
+for (const fate of ['refused', 'error'] as const) {
+  test(`a request with outcome ${fate} bursts once at the door before returning`, () => {
+    const trip = straight(40)
+    const car = newCar(0, () => 0.5)
+    const rates = { refused: Number(fate === 'refused'), error: Number(fate === 'error') }
+    const step = (now: number) => stepCars([car], 1 / 60, now, trip, rates)
+    assert.equal(step(0).bursts, 0)
+    car.s = trip.door - 0.01
+    let burstAt = 1
+    const arrival = step(burstAt)
+    if (fate === 'error') {
+      assert.equal(arrival.bursts, 0)
+      assert.equal(car.phase, 'wait')
+      burstAt += DRIVE.wait
+    }
+    assert.equal((fate === 'error' ? step(burstAt) : arrival).bursts, 1)
+    assert.equal(car.phase, 'burst')
+    assert.equal(car.s, trip.door)
+    assert.equal(step(burstAt + DRIVE.burst / 2).bursts, 0)
+    assert.equal(car.phase, 'burst')
+    assert.equal(step(burstAt + DRIVE.burst).bursts, 0)
+    assert.equal(car.phase, 'back')
+    assert.equal(car.fate, fate)
+  })
+}
+
 test('Cars slow down for bends', () => {
   // A quarter circle of radius 2, then a straight: grip 10 allows sqrt(10 * 2) ≈ 4.5 in the bend.
   const arc = Array.from({ length: 9 }, (_, i) => ({ x: 2 * Math.sin((i / 8) * Math.PI / 2), z: 2 - 2 * Math.cos((i / 8) * Math.PI / 2) }))
@@ -73,41 +99,58 @@ test('rush hour puts clearly more Cars on a Road, up to what the exit lets out',
   assert.ok(leaving(2) > 0.1, 'a quiet Road still sees Cars')
 })
 
+test('quiet live activity can produce an illustration without changing simulator density or inventing idle traffic', () => {
+  const simulateRate = (rps: number, density?: number) => {
+    let credit = 0, departures = 0
+    for (let i = 0; i < 300; i++) {
+      const result = admit(credit, rps, 1 / 60, [], () => 0.5, density)
+      credit = result.credit
+      departures += Number(result.leave)
+    }
+    return departures
+  }
+  assert.ok(simulateRate(0.4, 1) >= 1)
+  assert.equal(simulateRate(0.4), 0)
+  assert.equal(simulateRate(0, 1), 0)
+})
+
 test('the demo city: no Road runs through another Building', async () => {
-  const { buildRoads, checkRoads, layoutCity } = await import('../src/layout.ts')
+  const { checkRoads, layoutCity } = await import('../src/layout.ts')
+  const { buildStreetNetwork } = await import('../src/streetNetwork.ts')
   const deps = ['shop/frontend', 'shop/cart', 'shop/checkout', 'shop/payments', 'data/postgres', 'data/redis']
     .map((k) => ({ namespace: k.split('/')[0], name: k.split('/')[1] }))
   const calls = [['shop/frontend', 'shop/cart'], ['shop/frontend', 'shop/checkout'], ['shop/cart', 'data/redis'],
     ['shop/checkout', 'shop/payments'], ['shop/checkout', 'data/postgres'], ['ingress:shop/storefront', 'shop/frontend']]
     .map(([from, to]) => ({ from, to }))
   const layout = layoutCity(deps, ['node-1', 'node-2', 'node-3'], calls, calls.filter((c) => c.from.startsWith('ingress:')))
-  const roads = buildRoads(layout, calls)
-  assert.equal(Object.keys(roads).length, calls.length)
+  const { routes } = buildStreetNetwork(layout, calls)
+  assert.equal(Object.keys(routes).length, calls.length)
   const failures: string[] = []
   const realAssert = console.assert
   console.assert = (ok?: boolean, ...msg: unknown[]) => { if (!ok) failures.push(String(msg[0])) }
-  try { checkRoads(layout, roads) } finally { console.assert = realAssert }
+  try { checkRoads(layout, routes) } finally { console.assert = realAssert }
   assert.deepEqual(failures, [])
 })
 
 test('MiniShop: no Road runs through another Building', async () => {
-  const { buildRoads, checkRoads, layoutCity } = await import('../src/layout.ts')
+  const { checkRoads, layoutCity } = await import('../src/layout.ts')
+  const { buildStreetNetwork } = await import('../src/streetNetwork.ts')
   const fs = await import('node:fs')
   const arch = JSON.parse(fs.readFileSync(new URL('../../minishop/architecture.json', import.meta.url), 'utf8'))
   const deps = arch.components.map((c: { deployment: string }) => ({ namespace: arch.namespace, name: c.deployment }))
   const calls = arch.components.flatMap((c: { deployment: string; dependencies: string[] }) =>
     c.dependencies.map((d) => ({ from: `${arch.namespace}/${c.deployment}`, to: `${arch.namespace}/${d}` })))
   const layout = layoutCity(deps, ['minishop-control-plane', 'minishop-worker'], calls)
-  const roads = buildRoads(layout, calls)
-  assert.equal(Object.keys(roads).length, 10)
+  const { routes } = buildStreetNetwork(layout, calls)
+  assert.equal(Object.keys(routes).length, 10)
   const failures: string[] = []
   const realAssert = console.assert
   console.assert = (ok?: boolean, ...msg: unknown[]) => { if (!ok) failures.push(String(msg[0])) }
-  try { checkRoads(layout, roads) } finally { console.assert = realAssert }
+  try { checkRoads(layout, routes) } finally { console.assert = realAssert }
   assert.deepEqual(failures, [])
 })
 
-test('partial error rates: about that share of Cars come back orange', () => {
+test('partial error rates: about that share of Cars come back with an error', () => {
   let cars: CarAgent[] = [], seed = 1, n = 0, errors = 0, served = 0
   const rand = () => ((seed = (seed * 16807) % 2147483647) / 2147483647)
   for (let t = 0; t < 120; t += 1 / 60) {

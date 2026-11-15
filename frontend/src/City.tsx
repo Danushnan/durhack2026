@@ -1,3 +1,10 @@
+import { trafficOutcomeRates } from './trafficOutcome'
+import { startsDiscoveryActivity, type DiscoveryActivityPeriod } from './discoveryTraffic'
+import { DiscoveryFocus } from './DiscoveryFocus'
+import { DISCOVERY_CAR_DENSITY } from './discoveryActivity'
+import { JourneyGuide, JourneyFollowCamera } from './JourneyScene'
+import type { JourneyAnchor, JourneySpeed } from './journeyPlayback'
+import type { JourneyStep } from './Journey'
 import { Canvas, type ThreeEvent, useFrame, useThree } from '@react-three/fiber'
 import { Edges, OrbitControls, OrthographicCamera, PerspectiveCamera } from '@react-three/drei'
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef } from 'react'
@@ -7,13 +14,18 @@ import {
   keyOf, NODE_COLORS, nodeReady, podsOf, podStatus, rolloutOf, STATUS_COLOR, versionColor,
 } from './k8s'
 import { FacadeSign, Landmark, type LandmarkInfo, landmarkFor } from './landmarks'
-import { BUILDING, buildRoads, carTrip, type CityLayout, checkRoads, KERB, layoutCity, offsetPath, Path, ROAD_W } from './layout'
+import { BUILDING, carTrip, type Call, type CityLayout, KERB, layoutCity, offsetPath, Path, ROAD_W } from './layout'
 import { Scenery } from './scenery'
 import { COMPONENTS, componentOf, nameOf, roleOf } from './teach'
 import { textTexture, type TextLine } from './textures'
 import type { Theme } from './theme'
-import { type Affected, describeFlow, type Flow, rates, SERIOUS, type serviceFlow, SIGNAL, signalOf } from './health'
-import { admit, bendLimit, type CarAgent, newCar, stepCars } from './traffic'
+import { type Affected, describeFlow, type Flow, SERIOUS, type serviceFlow, SIGNAL, signalOf } from './health'
+import { admit, bendLimit, type CarAgent, CARS_PER_REQUEST, DRIVE, exitClear, newCar, stepCars } from './traffic'
+import { label, latencyText, type LiveServiceView } from './liveMetrics'
+import { miniShopLayoutCalls } from './miniShopRoads'
+import { roadKey, roadVisible } from './roadDiscovery'
+import { DEMO_DEPOT } from './demoPackets'
+import { buildStreetNetwork, crossesDistricts, districtOf, HIGHWAY_WIDTH, ROUNDABOUT_RADIUS, type Roundabout, type StreetRoute } from './streetNetwork'
 
 export interface HoverInfo { title: string; lines: string[]; x: number; y: number }
 type OnHover = (h: HoverInfo | null) => void
@@ -22,6 +34,7 @@ export type ServiceState = Record<string, {
   down: boolean; chain: string[] | null
   flow: ReturnType<typeof serviceFlow>   // how its requests are going (separate from its Pods)
   affected: Affected | null              // why it needs attention, if it does
+  live?: LiveServiceView
 }>
 /** Isometric (fixed angle, orthographic) or free 3D (perspective, orbit). */
 export type ViewMode = 'iso' | '3d'
@@ -42,7 +55,6 @@ const ISO_RIGHT = new THREE.Vector3(1, 0, -1).normalize(), ISO_UP = new THREE.Ve
 const TAG_SCALE = 1 / (2 * Math.tan(Math.PI / 8)) // keeps tags the size they had under the old 45° perspective camera
 /** A pan that ends over a Building must not also select it. */
 const dragged = (e: ThreeEvent<MouseEvent>) => e.delta > 4
-const ORANGE = SIGNAL.errors.color // an error response: the service answered, but could not do the job
 /** A Building's size follows its desired replica count: small when asked for 0, half again as big at 10. */
 export const sizeFor = (replicas: number) => 0.75 + 0.075 * Math.max(0, Math.min(10, replicas))
 const AMBER = '#f59e0b'
@@ -136,24 +148,29 @@ function GroundText({ text, height, position, color }: { text: string; height: n
 
 // ---------- ground and Districts ----------
 
-function Ground({ layout, theme }: { layout: CityLayout; theme: Theme }) {
+function Ground({ layout, theme, districtColors }: { layout: CityLayout; theme: Theme; districtColors: ReadonlyMap<string, string> }) {
   return (
     <group>
       <mesh rotation-x={-Math.PI / 2} position={[0, -0.08, 0]} receiveShadow>
         <planeGeometry args={[900, 900]} />
         <meshStandardMaterial color={theme.ground} />
       </mesh>
-      {layout.districts.map((d) => (
-        <group key={d.name}>
+      {layout.districts.map((d) => {
+        const color = districtColors.size > 1 ? districtColors.get(d.name) : undefined
+        return <group key={d.name}>
           <Pad w={d.x1 - d.x0} d={d.z1 - d.z0} r={5} position={[(d.x0 + d.x1) / 2, 0, (d.z0 + d.z1) / 2]} color={theme.district} />
-          <GroundText text={`${d.name.toUpperCase()} DISTRICT`} height={1.5} position={[d.x0 + 2.5, 0.03, d.z1 - 1.4]} color={theme.groundText} />
+          {color && <>
+            <Pad w={1.55} d={1.3} r={0.22} position={[d.x0 + 3.14, 0.025, d.z1 - 1.4]} color="#1e293b" />
+            <Pad w={1.18} d={0.93} r={0.14} position={[d.x0 + 3.14, 0.035, d.z1 - 1.4]} color={color} />
+          </>}
+          <GroundText text={`${d.name.toUpperCase()} DISTRICT`} height={1.5} position={[d.x0 + (color ? 4.1 : 2.5), 0.04, d.z1 - 1.4]} color={theme.groundText} />
         </group>
-      ))}
+      })}
     </group>
   )
 }
 
-// ---------- Roads: one per call between two services ----------
+// ---------- Shared streets and roundabouts ----------
 
 /** Painted marks along a Road (centre dashes, lane arrows) as one instanced mesh. */
 function Marks({ pts, every, offset, start, geometry, color, opacity = 1 }: {
@@ -183,43 +200,74 @@ const arrow = (() => {
   return new THREE.ShapeGeometry(s).rotateX(-Math.PI / 2).translate(0, 0.023, 0)
 })()
 
-/**
- * A two-lane Road: pavement, asphalt, a dashed centre line, arrows in the outbound lane, and edge lines
- * that glow with the health of the call (blue fine, orange answered-with-errors, red refused, grey idle).
- */
-function Road({ pts, edge, emphasis, theme, onHover }: {
-  pts: THREE.Vector3[]; edge: RoadFlow; emphasis: 'normal' | 'dim' | 'strong'; theme: Theme; onHover: OnHover
+type StreetUse = { call: Call; edge?: RoadFlow; preview?: boolean }
+
+const callLabel = ({ from, to }: Call) => `${from.startsWith('ingress:') ? 'customers' : nameOf(from)} → ${nameOf(to)}`
+
+function Road({ pts, uses, highway, selected, theme, onHover, calm, connection }: {
+  pts: THREE.Vector3[]; uses: StreetUse[]; highway: boolean; selected: string | null; theme: Theme; onHover: OnHover; calm?: boolean; connection?: string | null
 }) {
+  const width = highway ? HIGHWAY_WIDTH : ROAD_W
   const geo = useMemo(() => ({
-    kerb: ribbon(pts, ROAD_W + 2 * KERB, 0.006),
-    asphalt: ribbon(pts, ROAD_W, 0.014),
-    left: ribbon(offsetPath(pts, -(ROAD_W / 2 - 0.14)), 0.16, 0.022),
-    right: ribbon(offsetPath(pts, ROAD_W / 2 - 0.14), 0.16, 0.022),
-  }), [pts])
+    kerb: ribbon(pts, width + 2 * KERB, 0.006),
+    asphalt: ribbon(pts, width, 0.014),
+    left: ribbon(offsetPath(pts, -(width / 2 - 0.14)), 0.16, 0.022),
+    right: ribbon(offsetPath(pts, width / 2 - 0.14), 0.16, 0.022),
+  }), [pts, width])
   useEffect(() => () => Object.values(geo).forEach((g) => g.dispose()), [geo])
-  const signal = SIGNAL[signalOf(edge)]
-  const color = signal.color
-  const dim = emphasis === 'dim' ? 0.3 : 1
+  const signal = uses.reduce((worst, { edge }) => {
+    const current = SIGNAL[edge ? signalOf(edge) : 'idle']
+    return current.rank > worst.rank ? current : worst
+  }, SIGNAL.idle)
+  const focused = !!connection && uses.some(({call}) => roadKey(call) === connection)
+  const dim = connection ? focused ? 1 : 0.18 : !selected || uses.some(({ call }) => call.from === selected || call.to === selected) ? 1 : 0.3
+  const active = uses.some(({edge}) => edge && (edge.requests ?? 0) > 0 && edge.rps > 0)
+  const opacity = dim * (calm && !active && !focused ? 0.2 : 1)
+  const outlines = useRef<(THREE.MeshBasicMaterial | null)[]>([])
+  useFrame((_,dt) => { for (const material of outlines.current) if (material) material.opacity += (opacity-material.opacity)*(1-Math.exp(-Math.min(dt,.1)*4)) })
   const hover = (e: ThreeEvent<PointerEvent>) => {
     e.stopPropagation()
-    const r = rates(edge), src = edge.from.startsWith('ingress:') ? 'customers' : nameOf(edge.from)
-    onHover({ title: `🛣️ ${src} → ${nameOf(edge.to)} · ${signal.icon} ${signal.label}`, lines: [
-      describeFlow(edge),
-      edge.rps > 0 ? `${(r.error * 100).toFixed(1)}% answered with an error · ${(r.refused * 100).toFixed(1)}% refused (nobody answered)` : 'This call is part of the app, so its Road stays while traffic is quiet.',
-      `${signal.label}: ${signal.means}.`,
-    ], ...at(e) })
+    const title = highway ? 'District highway' : uses.length === 1 ? callLabel(uses[0].call) : 'Shared road'
+    onHover({ title: `🛣️ ${title}`, lines: uses.map(({ call, edge, preview }) => edge
+      ? `${callLabel(call)} · ${SIGNAL[signalOf(edge)].label} · ${describeFlow(edge)}`
+      : `${callLabel(call)} · ${preview ? 'map preview' : 'awaiting traffic measurements'}`), ...at(e) })
   }
-  const glow = <meshBasicMaterial color={color} toneMapped={false} transparent opacity={dim} side={THREE.DoubleSide} />
+  const glow = (index: number) => <meshBasicMaterial ref={material => {outlines.current[index]=material}} color={focused ? theme.roadGlow : signal.color} toneMapped={false} transparent opacity={1} side={THREE.DoubleSide} />
   return (
     <group>
       <mesh geometry={geo.kerb} receiveShadow><meshStandardMaterial color={theme.kerb} side={THREE.DoubleSide} /></mesh>
       <mesh geometry={geo.asphalt} receiveShadow onPointerOver={hover} onPointerMove={hover} onPointerOut={() => onHover(null)}>
-        <meshStandardMaterial color={theme.street} roughness={0.95} side={THREE.DoubleSide} />
+        <meshStandardMaterial color={highway ? new THREE.Color(theme.street).multiplyScalar(0.78) : theme.street} roughness={0.95} side={THREE.DoubleSide} />
       </mesh>
-      <mesh geometry={geo.left} renderOrder={edge.healthy ? 1 : 2}>{glow}</mesh>
-      <mesh geometry={geo.right} renderOrder={edge.healthy ? 1 : 2}>{glow}</mesh>
-      <Marks pts={pts} every={2.6} offset={0} start={4} geometry={dash} color={theme.laneMark} opacity={0.9 * dim} />
-      <Marks pts={pts} every={13} offset={ROAD_W / 4} start={7} geometry={arrow} color={theme.laneMark} opacity={0.55 * dim} />
+      <mesh geometry={geo.left}>{glow(0)}</mesh>
+      <mesh geometry={geo.right}>{glow(1)}</mesh>
+      <Marks pts={pts} every={highway ? 3.8 : 2.6} offset={0} start={2} geometry={dash} color={theme.laneMark} opacity={0.9 * opacity} />
+    </group>
+  )
+}
+
+function RoundaboutMesh({ center, theme }: { center: Roundabout['center']; theme: Theme }) {
+  const outer = ROUNDABOUT_RADIUS + ROAD_W / 2
+  const island = ROUNDABOUT_RADIUS - ROAD_W / 2 + 0.35
+  return (
+    <group position={center}>
+      <mesh rotation-x={-Math.PI / 2} position-y={0.007} receiveShadow>
+        <circleGeometry args={[outer + KERB, 40]} /><meshStandardMaterial color={theme.kerb} />
+      </mesh>
+      <mesh rotation-x={-Math.PI / 2} position-y={0.015} receiveShadow>
+        <circleGeometry args={[outer, 40]} /><meshStandardMaterial color={theme.street} roughness={0.95} />
+      </mesh>
+      <mesh position-y={0.15} receiveShadow>
+        <cylinderGeometry args={[island, island + 0.14, 0.27, 32]} /><meshStandardMaterial color={theme.kerb} />
+      </mesh>
+      <mesh rotation-x={-Math.PI / 2} position-y={0.29} receiveShadow>
+        <circleGeometry args={[island - 0.2, 32]} /><meshStandardMaterial color={theme.ground} />
+      </mesh>
+      {[0, 1, 2, 3].map((i) => {
+        const angle = (i + 0.5) * Math.PI / 2, radius = ROUNDABOUT_RADIUS + ROAD_W / 4
+        return <mesh key={i} geometry={arrow} position={[radius * Math.cos(angle), 0.004, radius * Math.sin(angle)]}
+          rotation-y={Math.PI / 2 - angle}><meshBasicMaterial color={theme.laneMark} /></mesh>
+      })}
     </group>
   )
 }
@@ -247,7 +295,7 @@ function Unit({ pod, target, powerGrid, nodeColor, onHover }: {
     }
   })
   const faint = status === 'Terminating' || status === 'Pending'
-  const version = pod.metadata.labels?.version ?? 'v1'
+  const version = pod.metadata.labels?.version
   const ring = useRef<THREE.Mesh>(null)
   useFrame(({ clock }) => {
     if (!ring.current) return
@@ -263,7 +311,7 @@ function Unit({ pod, target, powerGrid, nodeColor, onHover }: {
       : 'Not in rotation: receives no requests.'
   return (
     <group ref={ref} position={[target.x, 3, target.z]}
-      onPointerOver={(e) => { e.stopPropagation(); onHover({ title: `Unit ${pod.metadata.name} · ${version}`, lines: [describePod(pod), rotation, `Pod · ${status} · runs on ${pod.spec.nodeName ?? 'no Node yet'}`], ...at(e) }) }}
+      onPointerOver={(e) => { e.stopPropagation(); onHover({ title: `Unit ${pod.metadata.name}${version ? ` · ${version}` : ''}`, lines: [describePod(pod), rotation, `Pod · ${status} · runs on ${pod.spec.nodeName ?? 'no Node yet'}`], ...at(e) }) }}
       onPointerOut={() => onHover(null)}>
       <mesh ref={ring} rotation-x={-Math.PI / 2} position={[0, 0.06, 0]} visible={false}>
         <ringGeometry args={[0.72, 1.08, 28]} />
@@ -276,7 +324,7 @@ function Unit({ pod, target, powerGrid, nodeColor, onHover }: {
       <mesh position={[0, 0.98, 0]}>
         <boxGeometry args={[UNIT + 0.1, 0.12, UNIT + 0.1]} />
         {/* the cap shows the version, so a rolling update is visible as caps changing colour */}
-        <meshStandardMaterial color={versionColor(version)} transparent opacity={faint ? 0.4 : 1} />
+        <meshStandardMaterial color={versionColor(version ?? 'v1')} transparent opacity={faint ? 0.4 : 1} />
       </mesh>
     </group>
   )
@@ -298,6 +346,13 @@ function tagFor(dep: K8sObject, info: LandmarkInfo, state: ServiceState[string] 
   const ready = dep.status?.readyReplicas ?? 0, want = dep.spec.replicas
   const health = deploymentHealth(dep)
   const title: TextLine = { text: `${state?.affected ? `${state.affected.icon} ` : ''}${info.emoji} ${dep.metadata.name}`, px: 56, color: theme.labelFg }
+  if (state?.live) {
+    const live = state.live, m = live.metrics
+    return { lines: [title,
+      { text: `Infrastructure: ${label(live.infrastructure)} · ${m?.ready_replicas ?? ready}/${m?.desired_replicas ?? want} Ready`, px: 40, color: theme.labelFg },
+      { text: `App: ${label(live.application)} · ${label(live.availability)}${m?.p95_latency_ms == null ? '' : ` · p95 ${latencyText(m.p95_latency_ms)}`}`, px: 40, color: live.color }],
+      border: live.affected?.color ?? live.color }
+  }
   const night = theme.mode === 'night'
   const amber = night ? AMBER : '#b45309', red = night ? '#f87171' : '#dc2626', green = night ? '#4ade80' : '#15803d' // text needs more contrast on the light tag
   // Line 2: the Pods (are copies running and ready?).
@@ -361,17 +416,17 @@ function Tank({ claim, attached, index, accent, theme, onHover }: {
   )
 }
 
-function Building({ dep, info, pods, pos, selected, onSelect, powerGrid, nodeColors, theme, onHover, state, claims }: {
+function Building({ dep, info, pods, pos, selected, related, onSelect, powerGrid, nodeColors, theme, onHover, state, claims }: {
   dep: K8sObject; info: LandmarkInfo; pods: K8sObject[]; pos: THREE.Vector3; selected: boolean; onSelect: () => void
   powerGrid: boolean; nodeColors: Record<string, string>; theme: Theme; onHover: OnHover; state?: ServiceState[string]
-  claims: K8sObject[]
+  claims: K8sObject[]; related: boolean
 }) {
   const health = deploymentHealth(dep)
   const desired: number = dep.spec.replicas
   const sorted = [...pods].sort((a, b) => (a.metadata.creationTimestamp ?? '').localeCompare(b.metadata.creationTimestamp ?? ''))
   const total = Math.max(desired, sorted.length)
   // The Building glows with its request health; its Units show its Pod health.
-  const glow = state?.flow ? SIGNAL[state.flow.signal].color : HEALTH_COLOR[health]
+  const glow = state?.live?.color ?? (state?.flow ? SIGNAL[state.flow.signal].color : HEALTH_COLOR[health])
   const role = roleOf(dep.metadata.name)
   const hover = (e: ThreeEvent<PointerEvent>) => {
     e.stopPropagation()
@@ -379,8 +434,10 @@ function Building({ dep, info, pods, pos, selected, onSelect, powerGrid, nodeCol
     onHover({ title: `${info.emoji} ${info.title}: ${dep.metadata.name}`, lines: [
       role.does,
       ...(state?.affected ? [`${state.affected.icon} Needs attention: ${state.affected.label}`] : []),
+      ...(related ? ['Connected to the selection. Potential impact is not proof of measured failure.'] : []),
       `Pods: ${ready} of ${desired} ready${ready < desired ? ' (Kubernetes is fixing it)' : ''}`,
-      f ? `Requests ${f.basis}: ${describeFlow(f)} · ${SIGNAL[f.signal].icon} ${SIGNAL[f.signal].label}` : 'Requests: no measurements',
+      state?.live ? `Application: ${label(state.live.application)} · Telemetry: ${label(state.live.availability)} · p95 ${latencyText(state.live.metrics?.p95_latency_ms)}`
+        : f ? `Requests ${f.basis}: ${describeFlow(f)} · ${SIGNAL[f.signal].icon} ${SIGNAL[f.signal].label}` : 'Requests: no measurements',
       `If it stops: ${role.ifDown}`, 'Click to inspect',
     ], ...at(e) })
   }
@@ -391,7 +448,8 @@ function Building({ dep, info, pods, pos, selected, onSelect, powerGrid, nodeCol
   return (
     <group position={pos}>
       {selected && <Pad w={17} d={17} r={3.5} position={[0, 0.008, -0.6]} color={info.accent} opacity={0.4} />}
-      {state?.affected && <Alarm color={state.affected.color} strong={state.affected.rank >= SERIOUS} />}
+      {!selected && related && <Pad w={17} d={17} r={3.5} position={[0, 0.008, -0.6]} color={info.accent} opacity={0.16} />}
+      {state?.affected && <Alarm color={state.affected.color} strong={state.affected.rank >= SERIOUS && state.live?.infrastructure !== 'scaled_down'} />}
       <group ref={body} position={[0, 0, -2]} scale={size}>
         <Landmark info={info} glow={glow} theme={theme} />
         {/* One invisible hit-box for hover/click instead of handlers on every part */}
@@ -505,97 +563,255 @@ function PowerStation({ node, pos, used, color, theme, onHover, selected, onSele
 
 // ---------- Cars ----------
 
+// Shared alpha texture for lorry markers and refusal flashes.
+const softGlow = (() => {
+  const size = 32, pixels = new Uint8Array(size * size * 4)
+  for (let y = 0; y < size; y++) {
+    for (let x = 0; x < size; x++) {
+      const distance = Math.hypot(x + 0.5 - size / 2, y + 0.5 - size / 2) / (size / 2)
+      const offset = 4 * (x + y * size)
+      pixels.set([255, 255, 255, Math.round(255 * Math.max(0, 1 - distance) ** 2)], offset)
+    }
+  }
+  const texture = new THREE.DataTexture(pixels, size, size)
+  texture.magFilter = THREE.LinearFilter
+  texture.needsUpdate = true
+  return texture
+})()
+
+/** A flash and sparks at the door while the failed vehicle is hidden. */
+function RefusalBurst({ position, started }: { position: THREE.Vector3; started: { current: number } }) {
+  const group = useRef<THREE.Group>(null)
+  const flash = useRef<THREE.Sprite>(null)
+  const sparks = useRef<(THREE.Mesh | null)[]>([])
+  useFrame(({ clock }) => {
+    if (!group.current || !flash.current) return
+    const t = (clock.elapsedTime - started.current) / DRIVE.burst
+    group.current.visible = t >= 0 && t < 1
+    if (!group.current.visible) return
+    const spread = 1 - (1 - t) ** 2
+    flash.current.scale.setScalar(3.4 + spread * 5)
+    flash.current.material.opacity = 1 - t
+    sparks.current.forEach((spark, i) => {
+      if (!spark) return
+      const angle = i * 2 * Math.PI / sparks.current.length
+      const radius = (2 + 0.55 * (i % 3)) * spread
+      spark.position.set(Math.cos(angle) * radius, Math.sin(Math.PI * t) * (0.9 + i % 3 * 0.35), Math.sin(angle) * radius)
+      spark.scale.setScalar(1 - t)
+    })
+  })
+  return <group ref={group} position={position} visible={false}>
+    <sprite ref={flash} renderOrder={12} raycast={() => {}}>
+      <spriteMaterial map={softGlow} color="#ff6622" transparent depthTest={false} depthWrite={false} toneMapped={false} fog={false} />
+    </sprite>
+    {Array.from({ length: 12 }, (_, i) => <mesh key={i} ref={(m) => { sparks.current[i] = m }} renderOrder={13} raycast={() => {}}>
+      <octahedronGeometry args={[0.34]} />
+      <meshBasicMaterial color={i % 2 ? '#ff3b1f' : '#fff3a0'} transparent depthTest={false} depthWrite={false} toneMapped={false} fog={false} />
+    </mesh>)}
+  </group>
+}
+
 /**
  * Cars are independent drivers (see traffic.ts): they pull out of the caller as requests arrive, follow
- * the Car ahead, slow for bends, and at the callee's door are served, refused (red) or answered with an
- * error (orange). Fate is decided on arrival, from the live state, so Cars already on the road react to failures.
+ * the Car ahead and slow for bends. Fate is decided on arrival, from the live state.
  */
-function Traffic({ edge, road, theme, accent, onHover, endpoints }: {
-  edge: RoadFlow; road: THREE.Vector3[]; theme: Theme; accent: string; onHover: OnHover
-  endpoints: string[] // uids of the destination's ready Pods: the Service only sends requests to these
+function Traffic({ edge, road, theme, accent, onHover, endpoints, previewRefused = false, paused, liveMode, previewCount, districtColors, calm, emphasized = true, sourceId, resetKey }: {
+  edge: RoadFlow; road: StreetRoute; theme: Theme; accent: string; onHover: OnHover; calm?: boolean; emphasized?: boolean; sourceId?: string
+  districtColors: ReadonlyMap<string, string>
+  previewRefused?: boolean; resetKey?: number
+  endpoints: string[]; paused: boolean; liveMode: boolean; previewCount?: number // Pod flashes illustrate distribution, not observed request routing
 }) {
+  const lorry = crossesDistricts(edge)
+  const sourceDistrict = districtOf(edge.from), destinationDistrict = districtOf(edge.to)
+  const destinationHue = districtColors.get(destinationDistrict)
+  const destinationColor = useMemo(() => new THREE.Color(destinationHue ?? '#ffffff'), [destinationHue])
+  const signals = useRef<(THREE.MeshBasicMaterial | null)[]>([])
+  const halos = useRef<(THREE.SpriteMaterial | null)[]>([])
+  const length = lorry ? 2.4 : DRIVE.length
+  const front = lorry ? 1.2 : 0.56, rear = -front
+  const lampOffset = lorry ? 0.34 : 0.22
+  const preview = previewCount !== undefined
+  const poolSize = previewCount === undefined ? CAR_POOL : Math.min(4, previewCount)
+  const dispatched = useRef(0)
   const targets = useRef(endpoints)
   targets.current = endpoints
   const trips = useMemo(() => {
-    const ok = new Path(carTrip(road, false)), back = new Path(carTrip(road, true))
-    return { ok, back, trip: { okLength: ok.length, backLength: back.length, door: ok.length - CAR_GROW,
+    const ok = new Path(carTrip(road.outbound, false)), back = new Path(carTrip(road.outbound, true, road.inbound))
+    const door = Math.max(0, ok.length - CAR_GROW), burstAt = new THREE.Vector3()
+    ok.at(door, burstAt)
+    burstAt.y = 0.85
+    return { ok, back, burstAt, trip: { okLength: ok.length, backLength: back.length, door, vehicleLength: length,
       limitOk: bendLimit(ok.pts, GRIP), limitBack: bendLimit(back.pts, GRIP) } }
-  }, [road])
+  }, [road, length])
   const cars = useRef<CarAgent[]>([])
-  const credit = useRef(0) // requests waiting to leave as a Car
+  const burstStarted = useRef(-Infinity)
+  const credit = useRef(0) // visual admission credit, separate from measured counts
+  const activityPeriod = useRef<DiscoveryActivityPeriod>({source:sourceId, active:false})
+  useLayoutEffect(() => {
+    if (preview) dispatched.current -= cars.current.length
+    cars.current = []
+    credit.current = 0
+    burstStarted.current = -Infinity
+    activityPeriod.current = {source:sourceId, active:false}
+  }, [preview, trips, sourceId])
+  useLayoutEffect(() => { activityPeriod.current = {source:sourceId, active:false} }, [calm, sourceId])
+  const previousReset = useRef(resetKey)
+  useLayoutEffect(() => {
+    if (previousReset.current === resetKey) return
+    previousReset.current = resetKey
+    cars.current = []; credit.current = 0; burstStarted.current = -Infinity
+    activityPeriod.current = {source:sourceId, active:false}
+    // Abandon queued illustrations on reset; only newly requested previews may leave.
+    if (preview) dispatched.current = previewCount ?? 0
+  }, [resetKey, sourceId, preview, previewCount])
   const live = useRef(edge)
   live.current = edge
+  const pause = useRef(paused)
+  useLayoutEffect(() => {
+    pause.current = paused
+    if (paused) {
+      cars.current = []; credit.current = 0; burstStarted.current = -Infinity
+      activityPeriod.current = {source:sourceId, active:false}
+      if (preview) dispatched.current = previewCount ?? 0
+    }
+  }, [paused, sourceId, preview, previewCount])
   const groups = useRef<(THREE.Group | null)[]>([])
   const paints = useRef<(THREE.MeshStandardMaterial | null)[]>([])
   const hazards = useRef<(THREE.Group | null)[]>([])
   const brakes = useRef<(THREE.Group | null)[]>([])
   const tmp = useMemo(() => new THREE.Vector3(), [])
-  const colors = useMemo(() => ({ ok: new THREE.Color(accent), refused: new THREE.Color(RED), error: new THREE.Color(ORANGE) }), [accent])
+  const colors = useMemo(() => ({ outbound: new THREE.Color(accent), failed: new THREE.Color('#ff2424') }), [accent])
   useFrame(({ clock }, rawDt) => {
+    if (pause.current) {
+      cars.current = []; credit.current = 0; burstStarted.current = -Infinity
+      groups.current.forEach((g) => { if (g) g.visible = false })
+      return
+    }
     const dt = Math.min(rawDt, 0.1) // a hidden tab must not dump a burst of Cars
     const now = clock.elapsedTime
     const e = live.current
+    const activityStarted = calm && startsDiscoveryActivity(activityPeriod.current, e, sourceId)
+    if (calm && e.rps <= 0) credit.current = 0
     // Arrivals at the request rate, jittered; a backlog waits (up to 3) while the caller's exit is blocked.
     const used = new Set(cars.current.map((c) => c.slot))
-    const slot = [...Array(CAR_POOL).keys()].find((i) => !used.has(i))
-    const arrival = admit(credit.current, slot === undefined ? 0 : e.rps, dt, cars.current, Math.random)
-    credit.current = arrival.credit
-    if (arrival.leave && slot !== undefined) cars.current.push(newCar(slot, Math.random))
+    const slot = [...Array(poolSize).keys()].find((i) => !used.has(i))
+    // MiniShop's manual traffic is much quieter than the simulator. Normalise only the illustration;
+    // measured rates are unchanged, and the same pool/exit limits still bound the rendering cost.
+    if (slot !== undefined) {
+      if (previewCount !== undefined) {
+        if (dispatched.current < previewCount && exitClear(cars.current, length)) {
+          cars.current.push(newCar(slot, Math.random))
+          dispatched.current++
+        }
+      } else if (activityStarted && exitClear(cars.current, length)) {
+        // A positive measured window deserves immediate visual feedback, even
+        // below one car's rate-admission threshold. Debit it from future admission.
+        cars.current.push(newCar(slot, Math.random))
+        credit.current = -1
+      } else {
+        const arrival = admit(credit.current, e.rps, dt, cars.current, Math.random, liveMode ? calm ? DISCOVERY_CAR_DENSITY : 1 : CARS_PER_REQUEST, length)
+        credit.current = arrival.credit
+        if (arrival.leave) cars.current.push(newCar(slot, Math.random))
+      }
+    }
     const steps = Math.ceil(dt * 60) // small steps keep the car-following stable
+    const outcomeRates = trafficOutcomeRates(e, preview, previewRefused)
     for (let k = 0; k < steps; k++) {
-      const r = stepCars(cars.current, dt / steps, now, trips.trip, rates(e))
-      for (let n = 0; n < r.served.length; n++) deliver(e.to, targets.current, now)
+      const r = stepCars(cars.current, dt / steps, now, trips.trip, outcomeRates)
+      if (r.bursts) burstStarted.current = now
+      if (!preview) {
+        for (let n = 0; n < r.served.length; n++) deliver(e.to, targets.current, now)
+      }
       cars.current = r.cars
     }
     const blink = Math.sin(now * 12) > 0
     groups.current.forEach((g, i) => {
       if (!g) return
       const car = cars.current.find((c) => c.slot === i)
-      g.visible = !!car
-      if (!car) return
+      g.visible = !!car && car.phase !== 'burst'
+      if (!car || car.phase === 'burst') return
       const trip = car.phase === 'back' ? trips.back : trips.ok
       g.rotation.y = trip.at(car.s, tmp)
       g.position.copy(tmp)
       g.scale.setScalar(1.15 * Math.max(0.01, Math.min(1, car.s / CAR_GROW, (trip.length - car.s) / CAR_GROW)))
-      paints.current[i]?.color.copy(car.fate ? colors[car.fate] : colors.ok)
+      const returning = car.phase === 'back'
+      const paint = paints.current[i]
+      if (paint) {
+        paint.color.copy(returning ? colors.failed : colors.outbound)
+        paint.emissive.copy(colors.failed)
+        paint.emissiveIntensity = returning ? 1.6 : 0
+      }
+      const hue = returning ? colors.failed : destinationColor
+      signals.current[i]?.color.copy(hue)
+      const halo = halos.current[i]
+      if (halo) {
+        halo.color.copy(hue)
+        halo.opacity = returning ? 1 : lorry ? 0.92 : 0
+        halo.blending = returning ? THREE.NormalBlending : THREE.AdditiveBlending
+        halo.depthTest = !returning
+      }
       if (hazards.current[i]) hazards.current[i]!.visible = !!car.fate && blink
       if (brakes.current[i]) brakes.current[i]!.visible = car.a < -1.5 || (car.v < 0.3 && car.phase !== 'in')
     })
   })
   const [src, dst] = [edge.from.startsWith('ingress:') ? 'customers' : nameOf(edge.from), nameOf(edge.to)]
   const night = theme.mode === 'night'
-  const story = (c?: CarAgent) => !c ? '' : c.fate === 'refused' ? `Refused: ${dst} has no ready Units to answer, so it turns straight back.`
-    : c.fate === 'error' ? `${dst} answered with an error: something it depends on is down.`
-      : c.phase === 'in' ? `Being served by the next ready ${dst} Unit (round-robin).`
-        : c.v < 1 ? `Queuing for ${dst}: the Car ahead is waiting.` : `On its way to ${dst}.`
+  const story = (c?: CarAgent) => preview
+    ? previewRefused ? 'Synthetic refusal illustration after an operator request failed and a serving workload had zero Ready pods. Not measured request evidence.' : 'Illustrated packet from the Demo Control Centre.'
+    : c?.fate === 'refused' ? 'Illustrates measured failed communication with no HTTP answer. This does not diagnose pod readiness or a root cause.'
+    : c?.fate === 'error' ? 'Illustrates measured HTTP error replies, including business rejections such as HTTP 402. An error reply does not prove an infrastructure outage.'
+      : 'Illustrates normalised aggregate activity; car count, travel time, queuing and Pod flashes are not request-level measurements.'
   return (
-    <group>
-      {Array.from({ length: CAR_POOL }, (_, i) => (
+    <group visible={emphasized && !paused}>
+      <RefusalBurst position={trips.burstAt} started={burstStarted} />
+      {Array.from({ length: poolSize }, (_, i) => (
         <group key={i} visible={false} ref={(g) => { groups.current[i] = g }}
           onPointerOver={(e) => {
             e.stopPropagation()
             const car = cars.current.find((c) => c.slot === i)
             onHover({
-              title: `🚗 Request: ${src} → ${dst}`,
-              lines: [story(car), `This Road: ${describeFlow(live.current)}.`],
+              title: `${lorry ? '🚚' : '🚗'} ${preview ? 'Demo packet' : 'Aggregate activity'}: ${src} → ${dst}`,
+              lines: [
+                ...(lorry ? [`Heading to ${car?.phase === 'back' ? sourceDistrict : destinationDistrict} district.`] : []),
+                story(car), ...(!preview ? [`This route: ${describeFlow(live.current)}.`] : []),
+              ],
               ...at(e),
             })
           }}
           onPointerOut={() => onHover(null)}>
-          <mesh position={[0, 0.3, 0]} castShadow><boxGeometry args={[1.1, 0.35, 0.6]} /><meshStandardMaterial ref={(m) => { paints.current[i] = m }} color={accent} /></mesh>
-          <mesh position={[-0.1, 0.6, 0]}><boxGeometry args={[0.6, 0.3, 0.52]} /><meshStandardMaterial color={night ? '#0f172a' : '#e2e8f0'} /></mesh>
-          {[-0.32, 0.32].map((x) => <mesh key={x} position={[x, 0.13, 0]}><boxGeometry args={[0.26, 0.26, 0.66]} /><meshStandardMaterial color="#111827" /></mesh>)}
-          {night && [-0.18, 0.18].map((z) => (
-            <mesh key={z} position={[0.56, 0.32, z]}><boxGeometry args={[0.04, 0.1, 0.12]} /><meshBasicMaterial color="#fef9c3" toneMapped={false} /></mesh>
+          {lorry ? <>
+            <mesh position={[-0.36, 0.63, 0]} castShadow><boxGeometry args={[1.62, 0.81, 0.92]} /><meshStandardMaterial ref={(m) => { paints.current[i] = m }} color={accent} /></mesh>
+            <mesh position={[-0.36, 1.045, 0]}>
+              <boxGeometry args={[1.64, 0.09, 0.94]} />
+              <meshBasicMaterial ref={(m) => { signals.current[i] = m }} color={destinationHue} toneMapped={false} />
+            </mesh>
+            <sprite position={[-0.36, 1.22, 0]} scale={[6, 4.6, 1]} renderOrder={10} raycast={() => {}}>
+              <spriteMaterial ref={(m) => { halos.current[i] = m }} map={softGlow} color={destinationHue}
+                blending={THREE.AdditiveBlending} transparent opacity={0.92} depthWrite={false} toneMapped={false} />
+            </sprite>
+            <mesh position={[0.78, 0.47, 0]} castShadow><boxGeometry args={[0.78, 0.64, 0.84]} /><meshStandardMaterial color={night ? '#64748b' : '#f8fafc'} /></mesh>
+            <mesh position={[1.176, 0.62, 0]}><boxGeometry args={[0.02, 0.2, 0.68]} /><meshStandardMaterial color="#18273e" /></mesh>
+          </> : <>
+            <mesh position={[0, 0.3, 0]} castShadow><boxGeometry args={[1.1, 0.35, 0.6]} /><meshStandardMaterial ref={(m) => { paints.current[i] = m }} color={accent} /></mesh>
+            <mesh position={[-0.1, 0.6, 0]}><boxGeometry args={[0.6, 0.3, 0.52]} /><meshStandardMaterial color={night ? '#0f172a' : '#e2e8f0'} /></mesh>
+            <sprite position={[0, 0.8, 0]} scale={[5.2, 4.2, 1]} renderOrder={10} raycast={() => {}}>
+              <spriteMaterial ref={(m) => { halos.current[i] = m }} map={softGlow} color={RED}
+                blending={THREE.AdditiveBlending} transparent opacity={0} depthWrite={false} toneMapped={false} />
+            </sprite>
+          </>}
+          {(lorry ? [-0.9, -0.52, 0.78] : [-0.32, 0.32]).map((x) => <mesh key={x} position={[x, 0.14, 0]}>
+            <boxGeometry args={lorry ? [0.3, 0.3, 0.98] : [0.26, 0.26, 0.66]} /><meshStandardMaterial color="#111827" /></mesh>)}
+          {night && [-lampOffset, lampOffset].map((z) => (
+            <mesh key={z} position={[front, 0.32, z]}><boxGeometry args={[0.04, 0.1, 0.12]} /><meshBasicMaterial color="#fef9c3" toneMapped={false} /></mesh>
           ))}
           <group ref={(g) => { brakes.current[i] = g }} visible={false}>
-            {[-0.22, 0.22].map((z) => (
-              <mesh key={z} position={[-0.56, 0.22, z]}><boxGeometry args={[0.05, 0.08, 0.12]} /><meshBasicMaterial color="#dc2626" toneMapped={false} /></mesh>
+            {[-lampOffset, lampOffset].map((z) => (
+              <mesh key={z} position={[rear, 0.22, z]}><boxGeometry args={[0.05, 0.08, 0.12]} /><meshBasicMaterial color="#dc2626" toneMapped={false} /></mesh>
             ))}
           </group>
           <group ref={(g) => { hazards.current[i] = g }} visible={false}>
-            {[-0.22, 0.22].map((z) => (
-              <mesh key={z} position={[-0.56, 0.35, z]}><boxGeometry args={[0.06, 0.12, 0.14]} /><meshBasicMaterial color="#fb923c" toneMapped={false} /></mesh>
+            {[-lampOffset, lampOffset].map((z) => (
+              <mesh key={z} position={[rear, 0.35, z]}><boxGeometry args={[0.06, 0.12, 0.14]} /><meshBasicMaterial color="#fb923c" toneMapped={false} /></mesh>
             ))}
           </group>
         </group>
@@ -771,7 +987,7 @@ interface Controls extends THREE.EventDispatcher<{ start: object }> { target: TH
  * Flies the camera to the overview or to a selected Building. Isometric: the view direction never
  * changes; flying moves the look-at point and the zoom. 3D: it moves the camera itself.
  */
-function CameraRig({ focus, layout, homeTick, mode }: { focus: THREE.Vector3 | null; layout: CityLayout; homeTick: number; mode: ViewMode }) {
+function CameraRig({ focus, layout, homeTick, mode, disabled, journeyMode }: { disabled?: boolean; journeyMode?: boolean; focus: THREE.Vector3 | null; layout: CityLayout; homeTick: number; mode: ViewMode }) {
   const view = useThree((s) => s.size)
   const fov = useThree((s) => (s.camera as THREE.PerspectiveCamera).fov ?? 45)
   const controls = useThree((s) => s.controls) as unknown as Controls | null
@@ -786,16 +1002,17 @@ function CameraRig({ focus, layout, homeTick, mode }: { focus: THREE.Vector3 | n
   const { x0, x1, z0, z1 } = layout.core
   // Overview: the whole core (and the tallest Buildings on it) fits the viewport.
   useEffect(() => {
+    if (disabled) return
     const corners = [x0, x1].flatMap((x) => [z0, z1].flatMap((z) => [0, 14].map((y) => new THREE.Vector3(x, y, z))))
     const span = (axis: THREE.Vector3) => { const d = corners.map((c) => c.dot(axis)); return Math.max(...d) - Math.min(...d) }
     const zoom = 0.94 * Math.min(view.width / span(ISO_RIGHT), view.height / span(ISO_UP))
     const wide = Math.max(x1 - x0, (z1 - z0) * 1.5, 40)
     const dist = (wide * 0.62) / (Math.tan((fov * Math.PI) / 360) * Math.min(view.width / view.height, 2))
     fly(new THREE.Vector3((x0 + x1) / 2, 0, (z0 + z1) / 2), zoom, new THREE.Vector3(0, dist * 0.62, dist * 0.78))
-  }, [x0, x1, z0, z1, homeTick, mode]) // eslint-disable-line react-hooks/exhaustive-deps
+  }, [x0, x1, z0, z1, homeTick, mode, journeyMode]) // eslint-disable-line react-hooks/exhaustive-deps
   // Fly-to: look slightly right of the Building so it is not hidden behind the inspect panel.
   useEffect(() => {
-    if (!focus) return
+    if (!focus || disabled) return
     if (mode === 'iso') fly(focus.clone().addScaledVector(ISO_RIGHT, 8).setY(2), view.height / 46, new THREE.Vector3())
     else fly(focus.clone().add(new THREE.Vector3(5, 2, 0)), 1, new THREE.Vector3(6, 19, 24))
   }, [focus, mode]) // eslint-disable-line react-hooks/exhaustive-deps
@@ -805,8 +1022,9 @@ function CameraRig({ focus, layout, homeTick, mode }: { focus: THREE.Vector3 | n
     controls.addEventListener('start', stop)
     return () => controls.removeEventListener('start', stop)
   }, [controls])
+  useEffect(() => { if (disabled) flying.current = false }, [disabled])
   useFrame(({ camera }, dt) => {
-    if (!flying.current || !controls) return
+    if (disabled || !flying.current || !controls) return
     const k = Math.min(1, dt * 2.5)
     controls.target.lerp(goal.current.target, k)
     if ((camera as THREE.OrthographicCamera).isOrthographicCamera) {
@@ -824,57 +1042,99 @@ function CameraRig({ focus, layout, homeTick, mode }: { focus: THREE.Vector3 | n
 
 // ---------- the City ----------
 
-export function City({ cluster, selected, onSelect, powerGrid, theme, onHover, states, homeTick, flows, replay, mode }: {
-  flows: RoadFlow[]; replay: boolean; mode: ViewMode
+function addDemoDepot(layout: CityLayout): CityLayout {
+  const x = layout.core.x1 + 28, z = (layout.core.z0 + layout.core.z1) / 2
+  return { ...layout,
+    lots: { ...layout.lots, [DEMO_DEPOT]: { key: DEMO_DEPOT, center: new THREE.Vector3(x, 0, z) } },
+    districts: [...layout.districts, { name: 'demo-transit', x0: x - 11, x1: x + 11, z0: z - 11, z1: z + 11 }],
+    core: { ...layout.core, x1: x + 14 },
+  }
+}
+
+export function City({ cluster, selected, onSelect, powerGrid, theme, onHover, states, homeTick, flows, replay, mode, trafficPaused, discoveredRoads, districtColors, journeyActive, journeyStep, journeyPlaybackKey, journeyServices, journeyFollowing, onJourneyManualCamera, journeySpeed = 0.5, discoveryMode, discoveryConnection, discoveryResetKey }: {
+  flows: RoadFlow[]; replay: boolean; mode: ViewMode; trafficPaused: boolean
+  discoveryMode?: boolean; discoveryConnection?: string | null; discoveryResetKey?: number
+  discoveredRoads?: ReadonlySet<string>
+  districtColors: ReadonlyMap<string, string>
+  journeyFollowing?: boolean; onJourneyManualCamera: () => void; journeySpeed?: JourneySpeed
+  journeyActive?: boolean; journeyStep?: JourneyStep; journeyPlaybackKey?: string; journeyServices?: string[]
   cluster: ClusterState; selected: string | null; onSelect: (key: string | null) => void
   powerGrid: boolean; theme: Theme; onHover: OnHover; states: ServiceState; homeTick: number
 }) {
+  const journeyAnchor = useRef<JourneyAnchor>({ position: new THREE.Vector3(), active: false })
   const all = Object.values(cluster.objects)
   const deployments = all.filter(isWorkload)
   const pods = all.filter((o) => o.kind === 'Pod')
   const nodes = all.filter((o) => o.kind === 'Node').sort((a, b) => a.metadata.name.localeCompare(b.metadata.name))
   const nodeColors = Object.fromEntries(nodes.map((n, i) => [n.metadata.name, NODE_COLORS[i % NODE_COLORS.length]]))
   // Keyed on names and from→to pairs only: failures change rps/health, and the city must not rearrange.
-  // Live: only declared calls (architecture.json, env vars) place Buildings, so a call first seen in the logs adds a Road, never a reshuffle.
-  const declared = cluster.edges.filter((e) => e.declared ?? true).map((e) => `${e.from}>${e.to}`).sort()
-  const layoutKey = [deployments.map(keyOf).sort(), nodes.map((n) => n.metadata.name), declared, cluster.edges.map((e) => `${e.from}>${e.to}`).sort()].join('|')
-  const { layout, roads, obstacles, lamps, keep } = useMemo(() => {
-    const calls = cluster.edges.map((e) => ({ from: e.from, to: e.to }))
-    const placed = calls.filter((_, i) => cluster.edges[i].declared ?? true)
-    const layout = layoutCity(deployments.map((d) => ({ namespace: d.metadata.namespace!, name: d.metadata.name })),
-      nodes.map((n) => n.metadata.name), placed, placed.filter((c) => c.from.startsWith('ingress:')))
-    const roads = buildRoads(layout, calls)
-    if (import.meta.env.DEV) checkRoads(layout, roads)
+  const workloadKeys = deployments.map(keyOf).sort()
+  const reportedKeys = new Set(cluster.edges.map(roadKey))
+  // A backend restart can forget learned relationships while this browser still remembers them.
+  const remembered = [...(discoveredRoads ?? [])].filter((key) => !reportedKeys.has(key)).map((key) => {
+    const [from, to] = key.split('>')
+    return { from, to }
+  })
+  const { known, supplemental } = cluster.metrics ? miniShopLayoutCalls([...cluster.edges, ...remembered], workloadKeys)
+    : { known: cluster.edges, supplemental: [] }
+  const layoutKey = [workloadKeys, nodes.map((n) => n.metadata.name), known.map(roadKey).sort()].join('|')
+  const currentWorkloads = new Set([...workloadKeys, DEMO_DEPOT])
+  const previews = Object.values(cluster.demoPackets?.routes ?? {}).filter(({ call: { from, to } }) =>
+    currentWorkloads.has(from) && currentWorkloads.has(to))
+  const usesDepot = previews.some(({ call }) => call.from === DEMO_DEPOT || call.to === DEMO_DEPOT)
+  const networkCalls = [...supplemental, ...previews.map(({ call }) => call)]
+  const supplementalKey = [...new Set(networkCalls.map(roadKey))].sort().join(',')
+  const baseLayout = useMemo(() => layoutCity(deployments.map((d) => ({ namespace: d.metadata.namespace!, name: d.metadata.name })),
+    nodes.map((n) => n.metadata.name), known, known.filter((c) => c.from.startsWith('ingress:'))),
+  [layoutKey]) // eslint-disable-line react-hooks/exhaustive-deps
+  const layout = useMemo(() => usesDepot ? addDemoDepot(baseLayout) : baseLayout, [baseLayout, usesDepot])
+  const { network, obstacles, lamps, keep } = useMemo(() => {
+    const network = buildStreetNetwork(layout, known, networkCalls)
     const lots = [...Object.values(layout.lots), ...Object.values(layout.stations), ...Object.values(layout.gates), ...(layout.hall ? [layout.hall] : [])]
     const clear = (p: THREE.Vector3) => lots.every((l) => Math.abs(p.x - l.center.x) > BUILDING.halfW + 1 ||
       p.z < l.center.z + BUILDING.back - 1 || p.z > l.center.z + BUILDING.front + 1)
-    // Lamps every ~9 units on the left kerb of each Road, wherever that is clear of Buildings.
-    const lamps = Object.values(roads).flatMap((r) => {
-      const kerb = new Path(offsetPath(r, -(ROAD_W / 2 + KERB + 0.3)))
-      return Array.from({ length: Math.floor(kerb.length / 9) }, (_, i) => {
-        const v = new THREE.Vector3()
-        kerb.at(4.5 + i * 9, v)
-        return v
-      })
-    }).filter(clear)
-    // What Scenery must keep clear of: Buildings at full size, Power Stations, Roads.
+    const sample = (points: THREE.Vector3[], gap: number, start: number, end: number) => {
+      const path = new Path(points), samples: THREE.Vector3[] = []
+      for (let s = start; s < path.length - end; s += gap) {
+        const p = new THREE.Vector3()
+        path.at(s, p)
+        samples.push(p)
+      }
+      return samples
+    }
+    const lamps = network.segments.map(({ calls, points, highway }) => ({ calls,
+      points: sample(offsetPath(points, -((highway ? HIGHWAY_WIDTH : ROAD_W) / 2 + KERB + 0.3)), 9, 5, 5).filter(clear),
+    }))
     const obstacles = [
       ...Object.values(layout.lots).map((l) => ({ x: l.center.x, z: l.center.z - 0.4, rad: 9.5 })),
       ...Object.values(layout.stations).map((l) => ({ x: l.center.x, z: l.center.z, rad: 8 })),
       ...Object.values(layout.gates).map((l) => ({ x: l.center.x, z: l.center.z, rad: 7 })),
       ...(layout.hall ? [{ x: layout.hall.center.x, z: layout.hall.center.z, rad: 11 }] : []),
-      ...Object.values(roads).flatMap((r) => r.filter((_, i) => i % 2 === 0).map((p) => ({ x: p.x, z: p.z, rad: ROAD_W / 2 + KERB + 1.2 }))),
+      ...network.segments.flatMap(({ points, highway }) => sample(points, 3, 0, 0).map(({ x, z }) => ({ x, z, rad: (highway ? HIGHWAY_WIDTH : ROAD_W) / 2 + KERB + 1.2 }))),
+      ...network.roundabouts.map(({ center: { x, z } }) => ({ x, z, rad: ROUNDABOUT_RADIUS + ROAD_W / 2 + KERB + 1.2 })),
     ]
-    // What Scenery must never hide from the isometric camera: the Buildings' rooms inside each District
-    // (its edge padding may be hidden), City Hall, Power Stations and City Gates.
     const box = (c: THREE.Vector3, r: number) => ({ x0: c.x - r, x1: c.x + r, z0: c.z - r, z1: c.z + r })
     const keep = [
       ...layout.districts.map((d) => ({ x0: d.x0 + 3, x1: d.x1 - 3, z0: d.z0 + 3, z1: d.z1 - 3 })),
       ...lots.filter((l) => !layout.lots[l.key]).map((l) => box(l.center, 8)),
     ]
-    return { layout, roads, obstacles, lamps, keep }
-  }, [layoutKey]) // eslint-disable-line react-hooks/exhaustive-deps
-  const edges = flows.filter((e) => roads[`${e.from}>${e.to}`])
+    return { network, obstacles, lamps, keep }
+  }, [layout, supplementalKey]) // eslint-disable-line react-hooks/exhaustive-deps
+  const journeyKey = journeyStep?.from_service && journeyStep.to_service ? `${journeyStep.from_service}>${journeyStep.to_service}` : null
+  const visibleRoads = discoveredRoads && journeyKey ? new Set([...discoveredRoads, journeyKey]) : discoveredRoads
+  const edges = flows.filter((edge) => network.routes[roadKey(edge)] && roadVisible(edge, visibleRoads))
+  const flowsByKey = new Map(edges.map((edge) => [roadKey(edge), edge]))
+  const visibleUses = new Map<string, StreetUse>([...known, ...supplemental].filter((call) => roadVisible(call, visibleRoads))
+    .map((call) => [roadKey(call), { call, edge: discoveryMode && trafficPaused ? undefined : flowsByKey.get(roadKey(call)) }]))
+  for (const { call } of previews) if (!visibleUses.has(roadKey(call))) visibleUses.set(roadKey(call), { call, preview: true })
+  const visibleKeys = [...visibleUses.keys()].sort().join(',')
+  const highwayZ = network.segments.reduce((z, segment) => segment.highway && segment.calls.some((key) => visibleUses.has(key))
+    ? Math.max(z, segment.points[0].z + HIGHWAY_WIDTH) : z, layout.core.z1)
+  const cameraLayout = { ...layout, core: { ...layout.core, z1: highwayZ } }
+  const visibleLamps = useMemo(() => lamps.filter(({ calls }) => calls.some((key) => visibleUses.has(key)))
+    .flatMap(({ points }) => points), [lamps, visibleKeys]) // eslint-disable-line react-hooks/exhaustive-deps
+  const connectionBuildings = discoveryConnection?.split('>') ?? []
+  const related = new Set([...connectionBuildings, ...flows.filter((e) => e.from === selected || e.to === selected).flatMap((e) => [e.from, e.to])])
   const focus = !selected ? null : selected === 'city-hall' ? layout.hall?.center ?? null
     : selected.startsWith('node:') ? layout.stations[selected.slice(5)]?.center ?? null : layout.lots[selected]?.center ?? null
   const podsOn = (node: string) => pods.filter((p) => p.spec.nodeName === node && !p.metadata.deletionTimestamp).length
@@ -922,12 +1182,17 @@ export function City({ cluster, selected, onSelect, powerGrid, theme, onHover, s
       <directionalLight position={[30, 45, 25]} intensity={theme.sun} color={theme.sunColor} castShadow
         shadow-mapSize={[2048, 2048]} shadow-camera-left={-80} shadow-camera-right={80} shadow-camera-top={80} shadow-camera-bottom={-80} shadow-camera-far={220}
         shadow-bias={-0.0004} shadow-normalBias={0.04} />
-      <Ground layout={layout} theme={theme} />
+      <Ground layout={layout} theme={theme} districtColors={districtColors} />
       {ready && <Scenery core={layout.core} districts={layout.districts} obstacles={obstacles} keep={keep} theme={theme} />}
-      {ready && <Lamps points={lamps} theme={theme} />}
-      {edges.map((e) => (
-        <Road key={`${e.from}>${e.to}`} pts={roads[`${e.from}>${e.to}`]} edge={e} theme={theme} onHover={onHover}
-          emphasis={!selected ? 'normal' : e.from === selected || e.to === selected ? 'strong' : 'dim'} />
+      {ready && <Lamps points={visibleLamps} theme={theme} />}
+      {network.segments.map(({ key, points, calls, highway }) => {
+        const uses = calls.flatMap((id) => visibleUses.get(id) ?? [])
+        return uses.length > 0 && <Road key={key} pts={points} uses={uses} highway={highway} selected={selected} theme={theme} onHover={onHover} calm={discoveryMode} connection={discoveryConnection} />
+      })}
+      {discoveryMode && discoveryConnection && network.routes[discoveryConnection] && <DiscoveryFocus road={network.routes[discoveryConnection]}
+        positions={connectionBuildings.flatMap(key => layout.lots[key] ? [layout.lots[key].center] : [])} color={theme.roadGlow} />}
+      {network.roundabouts.filter(({ calls }) => calls.some((key) => visibleUses.has(key))).map((junction) => (
+        <RoundaboutMesh key={junction.key} center={junction.center} theme={theme} />
       ))}
       {nodes.map((n) => layout.stations[n.metadata.name] && (
         <PowerStation key={n.metadata.uid} node={n} pos={layout.stations[n.metadata.name].center} used={podsOn(n.metadata.name)}
@@ -948,19 +1213,44 @@ export function City({ cluster, selected, onSelect, powerGrid, theme, onHover, s
         const lot = layout.lots[key]
         if (!lot) return null
         return (
-          <Building key={dep.metadata.uid} dep={dep} info={landmarkFor(dep.metadata.name)} pos={lot.center}
+          <Building key={key} dep={dep} info={landmarkFor(dep.metadata.name)} pos={lot.center}
             selected={selected === key} onSelect={() => onSelect(key)} powerGrid={powerGrid} nodeColors={nodeColors}
+            related={selected !== key && related.has(key)}
             theme={theme} onHover={onHover} state={states[key]}
             pods={podsOf(dep, pods)}
             claims={claims.filter((c) => c.metadata.namespace === dep.metadata.namespace && c.metadata.labels?.app === dep.metadata.name)} />
         )
       })}
+      {usesDepot && <group position={layout.lots[DEMO_DEPOT].center}>
+        <Pad w={14} d={12} r={2} position={[0, 0.008, 0]} color={theme.district} />
+        <mesh position-y={1.9} castShadow><boxGeometry args={[9, 3.8, 7]} /><meshStandardMaterial color="#92735e" /></mesh>
+        <mesh position-y={3.9} castShadow><boxGeometry args={[10, 0.35, 8]} /><meshStandardMaterial color="#4b5563" /></mesh>
+        <Tag theme={theme} position={[0, 6, 0]} border={theme.roadGlow} lines={[{ text: 'Demo depot', px: 48, color: theme.labelFg }]} />
+      </group>}
+      <group visible={!journeyActive}>
+      {previews.map(({ call, count, refused }) => {
+        const key = roadKey(call), road = network.routes[key]
+        return road && <Traffic key={`preview:${key}:${!!refused}:${cluster.demoPackets?.reset}`} edge={{ ...call, rps: 0, healthy: true }}
+          road={road} theme={theme} districtColors={districtColors} accent="#d6a53b" onHover={onHover} endpoints={[]} previewRefused={refused} paused={trafficPaused || !cluster.connected || !!cluster.awaitingSnapshot || !!cluster.stale} liveMode={false} previewCount={count}
+          resetKey={discoveryResetKey} sourceId={cluster.metrics?.source_id ?? cluster.context ?? undefined} emphasized={!discoveryMode || !discoveryConnection || discoveryConnection === key} />
+      })}
       {edges.map((e) => {
         if (replay && !e.measured) return null // replaying history: only routes with recorded traffic get Cars
         // A Car wears its caller's colour (customers: yellow taxis); how its request went shows at the door.
-        return <Traffic key={`${e.from}>${e.to}`} edge={e} road={roads[`${e.from}>${e.to}`]} theme={theme} onHover={onHover}
-          accent={e.from.startsWith('ingress:') ? CUSTOMER : landmarkFor(nameOf(e.from)).accent} endpoints={endpoints(e.to)} />
+        return <Traffic key={roadKey(e)} edge={e} road={network.routes[roadKey(e)]} theme={theme} districtColors={districtColors} onHover={onHover}
+          accent={e.from.startsWith('ingress:') ? CUSTOMER : landmarkFor(nameOf(e.from)).accent} endpoints={endpoints(e.to)} paused={trafficPaused} liveMode={typeof cluster.context === 'string'}
+          resetKey={discoveryResetKey} sourceId={cluster.metrics?.source_id ?? cluster.context ?? undefined} calm={discoveryMode} emphasized={!discoveryMode || !discoveryConnection || discoveryConnection === roadKey(e)} />
       })}
+      </group>
+      {journeyActive && [...new Set(journeyServices)].flatMap(key => {
+        const position = layout.lots[key]?.center
+        return position ? [<mesh key={`journey:${key}`} position={[position.x, 0.25, position.z]} rotation-x={-Math.PI / 2}>
+          <ringGeometry args={[8.7, 9, 48]} /><meshBasicMaterial color="#ffd166" transparent opacity={0.35} depthWrite={false} />
+        </mesh>] : []
+      })}
+      {journeyActive && journeyStep && <JourneyGuide key={journeyPlaybackKey} anchor={journeyAnchor} speed={journeySpeed} step={journeyStep} road={journeyKey ? network.routes[journeyKey] : undefined}
+        positions={(journeyKey ? [journeyStep.from_service, journeyStep.to_service] : journeyStep.focus_service ? [journeyStep.focus_service] : [journeyStep.key === 'browser' ? 'minishop-web' : 'cart-api'].map(name => workloadKeys.find(key => key.endsWith(`/${name}`))))
+          .flatMap(key => key && layout.lots[key] ? [layout.lots[key].center] : [])} />}
       {mode === 'iso'
         // Isometric: no rotation. Drag (or one finger) pans, wheel (or pinch) zooms towards the cursor.
         ? <OrbitControls key="controls-iso" makeDefault enableRotate={false} screenSpacePanning zoomToCursor minZoom={1.5} maxZoom={60}
@@ -968,7 +1258,9 @@ export function City({ cluster, selected, onSelect, powerGrid, theme, onHover, s
           touches={{ ONE: THREE.TOUCH.PAN, TWO: THREE.TOUCH.DOLLY_PAN }} />
         // 3D: drag orbits, right-drag pans, wheel zooms; the camera never goes below the ground.
         : <OrbitControls key="controls-3d" makeDefault maxPolarAngle={Math.PI / 2.15} minDistance={10} maxDistance={170} />}
-      <CameraRig focus={focus} layout={layout} homeTick={homeTick} mode={mode} />
+      <CameraRig focus={focus} layout={cameraLayout} homeTick={homeTick} mode={mode}
+        disabled={journeyActive && journeyFollowing && !!journeyStep} journeyMode={journeyActive} />
+      <JourneyFollowCamera anchor={journeyAnchor} active={!!journeyActive && !!journeyFollowing && !!journeyStep} onManualCamera={onJourneyManualCamera} />
     </Canvas>
   )
 }

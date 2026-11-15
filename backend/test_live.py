@@ -56,15 +56,16 @@ def test_env_declared_calls_and_rates():
 
 
 def test_undeployed_components_keep_their_buildings_and_errors_are_deduped(monkeypatch):
-    import time
     import live
-    web = {"kind": "Deployment", "metadata": {"uid": "d1", "name": "minishop-web", "namespace": "minishop"},
-           "spec": {"replicas": 1, "template": {"metadata": {"labels": {"app.kubernetes.io/part-of": "kubeverse-demo"}},
-                                                "spec": {"containers": []}}}, "status": {}}
-    ns = {"kind": "Namespace", "metadata": {"uid": "n1", "name": "minishop"}}
-    line = json.dumps({"source": "minishop-web", "target": "checkout-api", "timestamp_ms": int(time.time() * 1000),
-                       "request_id": "r1", "status": 402, "event": "http_client", "error": "HTTP 402", "route": "/api/checkout"})
-    monkeypatch.setattr(live, "kubectl", lambda *a: line if "logs" in a else json.dumps({"items": [ns, web]}))
+    from test_live_pipeline import resources
+    from test_live_telemetry import NOW, pod, record
+    # Only minishop-web (its Deployment, ReplicaSet and Pod) runs; the other manifest components are missing.
+    items = [i for i in json.loads(resources([pod("minishop-web")]))["items"] if i["metadata"]["name"].startswith("minishop-web")]
+    items.append({"kind": "Namespace", "metadata": {"uid": "n1", "name": "minishop"}})
+    line = json.dumps(record(service="minishop-web", event="http_client", source="minishop-web", target="checkout-api",
+                             status=402, error="HTTP 402", route="/api/checkout"))
+    monkeypatch.setattr(live, "kubectl", lambda *a: json.dumps({"items": items}) if "get" in a else line)
+    monkeypatch.setattr("live.time.time", lambda: NOW)
     cluster = live.LiveCluster("test")
     cluster.refresh()
     cluster.refresh()   # overlapping log poll: the same line again

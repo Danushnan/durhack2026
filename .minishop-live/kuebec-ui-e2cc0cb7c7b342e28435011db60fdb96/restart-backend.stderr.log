@@ -1,0 +1,15 @@
+INFO:     Started server process [68800]
+INFO:     Waiting for application startup.
+INFO:     Application startup complete.
+INFO:     Uvicorn running on http://127.0.0.1:8000 (Press CTRL+C to quit)
+INFO:     127.0.0.1:57276 - "WebSocket /ws?telemetry=1" [accepted]
+INFO:     connection open
+Log collection failed for minishop/minishop-web-b5b6c58bf-fx9s6 (CalledProcessError)
+INFO:     127.0.0.1:59061 - "WebSocket /ws?telemetry=1" [accepted]
+INFO:     connection open
+INFO:     127.0.0.1:55681 - "WebSocket /ws?telemetry=1" [accepted]
+INFO:     connection open
+INFO:     127.0.0.1:59351 - "WebSocket /ws?telemetry=1" [accepted]
+INFO:     connection open
+Log collection failed for minishop/payment-api-6fbf485c68-qggst (CalledProcessError)
+Log collection failed for minishop/payment-api-6fbf485c68-qggst (CalledProcessError)
