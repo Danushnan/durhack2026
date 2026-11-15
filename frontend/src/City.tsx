@@ -1,3 +1,4 @@
+import type { JourneyStep } from './Journey'
 import { Canvas, type ThreeEvent, useFrame, useThree } from '@react-three/fiber'
 import { Edges, OrbitControls, OrthographicCamera, PerspectiveCamera } from '@react-three/drei'
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef } from 'react'
@@ -955,10 +956,40 @@ function addDemoDepot(layout: CityLayout): CityLayout {
   }
 }
 
-export function City({ cluster, selected, onSelect, powerGrid, theme, onHover, states, homeTick, flows, replay, mode, trafficPaused, discoveredRoads, districtColors }: {
+/** Separate educational guide: samples the existing lane/roundabout polyline. */
+function JourneyGuide({step, road, positions}: {step: JourneyStep; road?: StreetRoute; positions: THREE.Vector3[]}) {
+  const marker = useRef<THREE.Mesh>(null)
+  const elapsed = useRef(0)
+  const path = useMemo(() => road ? new Path(road.outbound) : null, [road])
+  const line = useMemo(() => {
+    if (!road) return null
+    const geometry = new THREE.BufferGeometry().setFromPoints(road.outbound.map(p => p.clone().setY(0.35)))
+    return new THREE.Line(geometry, new THREE.LineBasicMaterial({color: '#ffd166', depthTest: false}))
+  }, [road])
+  useEffect(() => () => { line?.geometry.dispose(); line?.material.dispose() }, [line])
+  useEffect(() => { elapsed.current = 0 }, [step.key, path])
+  useFrame((_, delta) => {
+    if (!marker.current) return
+    elapsed.current = Math.min(3, elapsed.current + Math.min(delta, 0.1))
+    if (path) { path.at(path.length * elapsed.current / 3, marker.current.position); marker.current.position.y = 1.8 }
+    else if (positions[0]) marker.current.position.copy(positions[0]).setY(8)
+    marker.current.rotation.y += delta
+  })
+  if (!positions.length || !['observed', 'failed', 'succeeded'].includes(step.state)) return null
+  return <group>
+    {line && <primitive object={line} />}
+    {positions.map((position, i) => <mesh key={i} position={[position.x, 0.3, position.z]} rotation-x={-Math.PI / 2}>
+      <ringGeometry args={[8, 8.6, 48]} /><meshBasicMaterial color="#ffd166" transparent opacity={0.85} depthWrite={false} />
+    </mesh>)}
+    <mesh ref={marker} renderOrder={10}><octahedronGeometry args={[1.3]} /><meshStandardMaterial color="#ffd166" emissive="#ffd166" emissiveIntensity={1.5} depthTest={false} /></mesh>
+  </group>
+}
+
+export function City({ cluster, selected, onSelect, powerGrid, theme, onHover, states, homeTick, flows, replay, mode, trafficPaused, discoveredRoads, districtColors, journeyActive, journeyStep, journeyPlaybackKey, journeyServices }: {
   flows: RoadFlow[]; replay: boolean; mode: ViewMode; trafficPaused: boolean
   discoveredRoads?: ReadonlySet<string>
   districtColors: ReadonlyMap<string, string>
+  journeyActive?: boolean; journeyStep?: JourneyStep; journeyPlaybackKey?: string; journeyServices?: string[]
   cluster: ClusterState; selected: string | null; onSelect: (key: string | null) => void
   powerGrid: boolean; theme: Theme; onHover: OnHover; states: ServiceState; homeTick: number
 }) {
@@ -1020,9 +1051,11 @@ export function City({ cluster, selected, onSelect, powerGrid, theme, onHover, s
     ]
     return { network, obstacles, lamps, keep }
   }, [layout, supplementalKey]) // eslint-disable-line react-hooks/exhaustive-deps
-  const edges = flows.filter((edge) => network.routes[roadKey(edge)] && roadVisible(edge, discoveredRoads))
+  const journeyKey = journeyStep?.from_service && journeyStep.to_service ? `${journeyStep.from_service}>${journeyStep.to_service}` : null
+  const visibleRoads = discoveredRoads && journeyKey ? new Set([...discoveredRoads, journeyKey]) : discoveredRoads
+  const edges = flows.filter((edge) => network.routes[roadKey(edge)] && roadVisible(edge, visibleRoads))
   const flowsByKey = new Map(edges.map((edge) => [roadKey(edge), edge]))
-  const visibleUses = new Map<string, StreetUse>([...known, ...supplemental].filter((call) => roadVisible(call, discoveredRoads))
+  const visibleUses = new Map<string, StreetUse>([...known, ...supplemental].filter((call) => roadVisible(call, visibleRoads))
     .map((call) => [roadKey(call), { call, edge: flowsByKey.get(roadKey(call)) }]))
   for (const { call } of previews) if (!visibleUses.has(roadKey(call))) visibleUses.set(roadKey(call), { call, preview: true })
   const visibleKeys = [...visibleUses.keys()].sort().join(',')
@@ -1122,6 +1155,7 @@ export function City({ cluster, selected, onSelect, powerGrid, theme, onHover, s
         <mesh position-y={3.9} castShadow><boxGeometry args={[10, 0.35, 8]} /><meshStandardMaterial color="#4b5563" /></mesh>
         <Tag theme={theme} position={[0, 6, 0]} border={theme.roadGlow} lines={[{ text: 'Demo depot', px: 48, color: theme.labelFg }]} />
       </group>}
+      <group visible={!journeyActive}>
       {previews.map(({ call, count }) => {
         const key = roadKey(call), road = network.routes[key]
         return road && <Traffic key={`preview:${key}:${cluster.demoPackets?.reset}`} edge={{ ...call, rps: 0, healthy: true }}
@@ -1133,6 +1167,16 @@ export function City({ cluster, selected, onSelect, powerGrid, theme, onHover, s
         return <Traffic key={roadKey(e)} edge={e} road={network.routes[roadKey(e)]} theme={theme} districtColors={districtColors} onHover={onHover}
           accent={e.from.startsWith('ingress:') ? CUSTOMER : landmarkFor(nameOf(e.from)).accent} endpoints={endpoints(e.to)} paused={trafficPaused} liveMode={typeof cluster.context === 'string'} />
       })}
+      </group>
+      {journeyActive && [...new Set(journeyServices)].flatMap(key => {
+        const position = layout.lots[key]?.center
+        return position ? [<mesh key={`journey:${key}`} position={[position.x, 0.25, position.z]} rotation-x={-Math.PI / 2}>
+          <ringGeometry args={[8.7, 9, 48]} /><meshBasicMaterial color="#ffd166" transparent opacity={0.35} depthWrite={false} />
+        </mesh>] : []
+      })}
+      {journeyActive && journeyStep && <JourneyGuide key={journeyPlaybackKey} step={journeyStep} road={journeyKey ? network.routes[journeyKey] : undefined}
+        positions={(journeyKey ? [journeyStep.from_service, journeyStep.to_service] : [journeyStep.key === 'browser' ? 'minishop-web' : 'cart-api'].map(name => workloadKeys.find(key => key.endsWith(`/${name}`))))
+          .flatMap(key => key && layout.lots[key] ? [layout.lots[key].center] : [])} />}
       {mode === 'iso'
         // Isometric: no rotation. Drag (or one finger) pans, wheel (or pinch) zooms towards the cursor.
         ? <OrbitControls key="controls-iso" makeDefault enableRotate={false} screenSpacePanning zoomToCursor minZoom={1.5} maxZoom={60}

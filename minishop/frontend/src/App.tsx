@@ -1,3 +1,4 @@
+import { beginBasketAction, reportBasketAction } from './journey';
 import {useCallback, useEffect, useRef, useState} from 'react';
 import {ArrowLeft, ArrowRight, Bag, MagnifyingGlass, Plus} from '@phosphor-icons/react';
 import {api, ApiError, Cart, checkoutStorage, money, Order, Product, session} from './api';
@@ -36,7 +37,21 @@ export default function App() {
     actionLock.current=true;setBusy(true);setError(undefined);
     try{await work();}catch(e){setError(e as ApiError);}finally{actionLock.current=false;setBusy(false);}
   }
-  const add = (p:Product)=>void action(async()=>{await api(`/carts/${session}/items`,{method:'POST',body:JSON.stringify({product_id:p.id,quantity:1})});setCart((await api<Cart>(`/carts/${session}`)).data);setNotice(`${p.name} added to your basket`);});
+  const add = (p:Product)=>void action(async()=>{
+    const journey = await beginBasketAction();
+    try {
+      await api(`/carts/${session}/items`,{method:'POST',body:JSON.stringify({product_id:p.id,quantity:1})},journey.mutation_id);
+      journey.mutation = 'succeeded';
+    } catch(e) {
+      journey.mutation = 'failed'; journey.refresh = 'not_sent'; reportBasketAction(journey); throw e;
+    }
+    reportBasketAction(journey);
+    try {
+      setCart((await api<Cart>(`/carts/${session}`,{},journey.refresh_id)).data);
+      journey.refresh = 'succeeded'; setNotice(`${p.name} added to your basket`);
+    } catch(e) { journey.refresh = 'failed'; throw e; }
+    finally { reportBasketAction(journey); }
+  });
   const update = (p:Product,n:number)=>void action(async()=>{await api(`/carts/${session}/items/${p.id}`,{method:'PUT',body:JSON.stringify({quantity:n})});setCart((await api<Cart>(`/carts/${session}`)).data);});
   const remove = (p:Product)=>void action(async()=>{await api(`/carts/${session}/items/${p.id}`,{method:'DELETE'});setCart((await api<Cart>(`/carts/${session}`)).data);});
   const place = ()=>void action(async()=>{

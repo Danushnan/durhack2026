@@ -288,6 +288,18 @@ class LiveTelemetry:
             return tuple(row for row in self._observations
                          if now - 5 <= row.observed_at <= now and row.source is not None and row.target is not None)
 
+    def request_observations(self, request_ids, since, until, limit=256):
+        """Bounded immutable copy for opt-in journeys; no subscriber or database I/O."""
+        with self._lock:
+            rows = []
+            for row in self._observations:
+                if (row.application == "minishop" and row.service.startswith(self.namespace + "/")
+                        and row.request_id in request_ids and since <= row.observed_at <= until):
+                    if len(rows) >= limit:
+                        return tuple(rows), True
+                    rows.append(row)
+            return tuple(rows), False
+
     def health_event(self, now):
         with self._lock:
             return {"type": "HEALTH", "stale": bool(self.resource_error) or self.last_resource_refresh is None

@@ -11,8 +11,8 @@ export class ApiError extends Error {
   constructor(message: string, public requestId: string) {super(message);}
 }
 
-export async function api<T>(path: string, init: RequestInit = {}): Promise<{data:T; requestId:string}> {
-  const requestId = crypto.randomUUID();
+export async function api<T>(path: string, init: RequestInit = {}, explicitRequestId?: string): Promise<{data:T; requestId:string}> {
+  const requestId = explicitRequestId ?? crypto.randomUUID();
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 55000);
   try {
