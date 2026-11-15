@@ -140,3 +140,10 @@ export function summarizeLive(snapshot: LiveMetricsSnapshot) {
     complete: supported.every((r) => r.window_complete),
   }
 }
+
+/** Collapse only trustworthy healthy states; idle/unknown/stale remain explicit. */
+export function compactLiveTag(view: LiveServiceView, selected: boolean, changing = false): boolean {
+  return !selected && !changing && view.current && !view.affected && view.infrastructure === 'healthy' &&
+    (view.application === 'healthy' && view.availability === 'active' ||
+     view.application === 'not_applicable' && view.availability === 'unsupported')
+}

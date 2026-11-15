@@ -1,3 +1,5 @@
+import { discoveryCarDetails, type HoverInfo } from './carInspection'
+export type { HoverInfo } from './carInspection'
 import { trafficOutcomeRates } from './trafficOutcome'
 import { startsDiscoveryActivity, type DiscoveryActivityPeriod } from './discoveryTraffic'
 import { DiscoveryFocus } from './DiscoveryFocus'
@@ -21,13 +23,12 @@ import { textTexture, type TextLine } from './textures'
 import type { Theme } from './theme'
 import { type Affected, describeFlow, type Flow, SERIOUS, type serviceFlow, SIGNAL, signalOf } from './health'
 import { admit, bendLimit, type CarAgent, CARS_PER_REQUEST, DRIVE, exitClear, newCar, stepCars } from './traffic'
-import { label, latencyText, type LiveServiceView } from './liveMetrics'
+import { compactLiveTag, label, latencyText, type LiveServiceView } from './liveMetrics'
 import { miniShopLayoutCalls } from './miniShopRoads'
 import { roadKey, roadVisible } from './roadDiscovery'
 import { DEMO_DEPOT } from './demoPackets'
 import { buildStreetNetwork, crossesDistricts, districtOf, HIGHWAY_WIDTH, ROUNDABOUT_RADIUS, type Roundabout, type StreetRoute } from './streetNetwork'
 
-export interface HoverInfo { title: string; lines: string[]; x: number; y: number }
 type OnHover = (h: HoverInfo | null) => void
 /** Per-service state the City needs for labelling: down, or impacted via a chain of dependencies. */
 export type ServiceState = Record<string, {
@@ -352,7 +353,7 @@ function tagFor(dep: K8sObject, info: LandmarkInfo, state: ServiceState[string] 
   const title: TextLine = { text: `${state?.affected ? `${state.affected.icon} ` : ''}${info.emoji} ${dep.metadata.name}`, px: 56, color: theme.labelFg }
   if (state?.live) {
     const live = state.live, m = live.metrics
-    if (!selected && !live.affected) return { lines: [title], border: live.color }
+    if (compactLiveTag(live, selected, rollout.rolling || rollout.stalled || ready !== want)) return { lines: [title], border: live.color }
     return { lines: [title,
       { text: `Infrastructure: ${label(live.infrastructure)} · ${m?.ready_replicas ?? ready}/${m?.desired_replicas ?? want} Ready`, px: 40, color: theme.labelFg },
       { text: `App: ${label(live.application)} · ${label(live.availability)}${m?.p95_latency_ms == null ? '' : ` · p95 ${latencyText(m.p95_latency_ms)}`}`, px: 40, color: live.color }],
@@ -654,6 +655,8 @@ function Traffic({ edge, road, theme, accent, onHover, endpoints, previewRefused
   const cars = useRef<CarAgent[]>([])
   const burstStarted = useRef(-Infinity)
   const credit = useRef(0) // visual admission credit, separate from measured counts
+  const inspectionIds = useRef(new WeakMap<CarAgent, string>())
+  const nextInspectionId = useRef(0)
   const activityPeriod = useRef<DiscoveryActivityPeriod>({source:sourceId, active:false})
   const liveBurst = useRef(false)
   useLayoutEffect(() => {
@@ -783,12 +786,24 @@ function Traffic({ edge, road, theme, accent, onHover, endpoints, previewRefused
     : c?.fate === 'refused' ? 'Illustrates measured failed communication with no HTTP answer. This does not diagnose pod readiness or a root cause.'
     : c?.fate === 'error' ? 'Illustrates measured HTTP error replies, including business rejections such as HTTP 402. An error reply does not prove an infrastructure outage.'
       : 'Illustrates normalised aggregate activity; car count, travel time, queuing and Pod flashes are not request-level measurements.'
+  const inspectCar = (e: ThreeEvent<PointerEvent | MouseEvent>, slot: number, open = false) => {
+    const car = cars.current.find(candidate => candidate.slot === slot)
+    if (!calm || !emphasized || paused || !car || car.phase === 'burst' || !groups.current[slot]?.visible) return
+    e.stopPropagation()
+    let key = inspectionIds.current.get(car)
+    if (!key) {
+      key = `${sourceId}:${preview ? `preview:${previewRefused}` : 'measured'}:${roadKey(edge)}:${++nextInspectionId.current}`
+      inspectionIds.current.set(car, key)
+    }
+    onHover({...discoveryCarDetails(live.current, car, preview, previewRefused),
+      x:e.nativeEvent.clientX, y:e.nativeEvent.clientY, pinnedKey:key, pinMode:open ? 'open' : undefined})
+  }
   return (
     <group visible={emphasized && !paused}>
       <RefusalBurst position={trips.burstAt} started={burstStarted} />
       {Array.from({ length: poolSize }, (_, i) => (
         <group key={i} visible={false} ref={(g) => { groups.current[i] = g }}
-          onPointerOver={(e) => {
+          onPointerOver={calm ? undefined : (e) => {
             e.stopPropagation()
             const car = cars.current.find((c) => c.slot === i)
             onHover({
@@ -800,7 +815,11 @@ function Traffic({ edge, road, theme, accent, onHover, endpoints, previewRefused
               ...at(e),
             })
           }}
-          onPointerOut={() => onHover(null)}>
+          onPointerOut={calm ? undefined : () => onHover(null)}>
+          {calm && <mesh position={[0, 0.7, 0]} onPointerOver={e => inspectCar(e, i)} onClick={e => inspectCar(e, i, true)}>
+            <boxGeometry args={lorry ? [4.2, 2.4, 3] : [3.2, 2.2, 2.6]} />
+            <meshBasicMaterial transparent opacity={0} depthWrite={false} colorWrite={false} />
+          </mesh>}
           {lorry ? <>
             <mesh position={[-0.36, 0.63, 0]} castShadow><boxGeometry args={[1.62, 0.81, 0.92]} /><meshStandardMaterial ref={(m) => { paints.current[i] = m }} color={accent} /></mesh>
             <mesh position={[-0.36, 1.045, 0]}>
@@ -1294,7 +1313,7 @@ export function City({ cluster, selected, onSelect, powerGrid, theme, onHover, s
       {previews.map(({ call, count, refused }) => {
         const key = roadKey(call), road = network.routes[key]
         return road && <Traffic key={`preview:${key}:${!!refused}:${cluster.demoPackets?.reset}`} edge={{ ...call, rps: 0, healthy: true }}
-          road={road} theme={theme} districtColors={districtColors} accent="#d6a53b" onHover={onHover} endpoints={[]} previewRefused={refused} paused={trafficPaused || !cluster.connected || !!cluster.awaitingSnapshot || !!cluster.stale} liveMode={false} previewCount={count}
+          road={road} theme={theme} districtColors={districtColors} accent="#d6a53b" onHover={onHover} endpoints={[]} calm={discoveryMode} previewRefused={refused} paused={trafficPaused || !cluster.connected || !!cluster.awaitingSnapshot || !!cluster.stale} liveMode={false} previewCount={count}
           resetKey={discoveryResetKey} sourceId={cluster.metrics?.source_id ?? cluster.context ?? undefined} emphasized={!discoveryMode || !discoveryConnection || discoveryConnection === key} />
       })}
       {edges.map((e) => {

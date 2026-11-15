@@ -1,6 +1,8 @@
 import { DiscoveryActivity } from './DiscoveryActivityPanel'
+import { updateHover } from './carInspection'
+import { miniShopView, isMiniShopComponent } from './miniShopView'
 import { JourneyPanel, useJourney } from './Journey'
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { City, type HoverInfo, type RoadFlow, type ServiceState, type ViewMode } from './City'
 import { affected, describeFlow, ERROR_RATE, overview, serviceFlow, SIGNAL, type Signal, signalOf, SLOW_MS, tally } from './health'
 import {
@@ -12,7 +14,7 @@ import { COMPONENTS, componentOf, downServices, explain, impactChain, kubectl, n
 import { THEMES, useThemeMode } from './theme'
 import { routeKey, Telemetry, useTelemetry } from './Telemetry'
 import { liveServiceView } from './liveMetrics'
-import { LiveIncidentBanner, LiveOverview, LiveServiceDetails, LiveSourceStatus } from './LiveMonitoring'
+import { LiveOverview, LiveServiceDetails, LiveSourceStatus } from './LiveMonitoring'
 import type { LiveServiceView } from './liveMetrics'
 import { discoveryReady, type RoadDiscovery, startDiscovery, updateDiscovery } from './roadDiscovery'
 import { DEMO_DEPOT } from './demoPackets'
@@ -21,11 +23,19 @@ import { districtOf } from './streetNetwork'
 const DISTRICT_COLORS = ['#22d3ee', '#e879f9', '#bef264', '#fbc08c', '#93a9ff', '#fba6c8']
 
 export default function App() {
-  const cluster = useCluster()
+  const watchedCluster = useCluster()
+  const cluster = useMemo(() => miniShopView(watchedCluster), [watchedCluster])
+  const miniShopOnly = cluster !== watchedCluster
   const [selected, setSelected] = useState<string | null>(null)
   const [connection, setConnection] = useState<{source: string; key: string} | null>(null)
   const [powerGrid, setPowerGrid] = useState(false)
   const [hover, setHover] = useState<HoverInfo | null>(null)
+  const handleHover = useCallback((next: HoverInfo | null) => setHover(previous => updateHover(previous, next)), [])
+  useEffect(() => {
+    const dismiss = (event: KeyboardEvent) => { if (event.key === 'Escape') setHover(null) }
+    window.addEventListener('keydown', dismiss)
+    return () => window.removeEventListener('keydown', dismiss)
+  }, [])
   const [help, setHelp] = useState(false)
   const [sidebar, setSidebar] = useState(false)
   const [feedOpen, setFeedOpen] = useState(false)
@@ -48,7 +58,7 @@ export default function App() {
   const previousSource = useRef(source)
   useEffect(() => {
     if (previousSource.current !== undefined && previousSource.current !== source) {
-      setSelected(null); setConnection(null); setReplayAt(null); setAnalyticsOpen(false)
+      setSelected(null); setConnection(null); setReplayAt(null); setAnalyticsOpen(false); setHover(null)
     }
     previousSource.current = source
   }, [source])
@@ -114,7 +124,10 @@ export default function App() {
       ? cluster.metrics.source_id : undefined)
   const discoveryMode = !!activeDiscovery && !journey.enabled
   const focusedConnection = discoveryMode && connection && connection.source === miniShopSource && activeDiscovery.roads.has(connection.key) ? connection.key : null
-  const openJourney = () => { setSelected(null); journey.setEnabled(true) }
+  useEffect(() => {
+    setHover(previous => previous?.pinnedKey ? null : previous)
+  }, [discoveryMode, focusedConnection, cluster.connected, cluster.awaitingSnapshot, cluster.metricsStale, cluster.metricsError, cluster.stale, cluster.demoPackets?.reset])
+  const openJourney = () => { setSelected(null); setHover(null); journey.setEnabled(true) }
   const beginDiscovery = () => {
     setConnection(null)
     if (miniShopSource) setDiscovery(startDiscovery(miniShopSource, Date.now()))
@@ -125,7 +138,7 @@ export default function App() {
   return (
     <div className={`app ${mode}`}>
       <City cluster={cluster} selected={selected} onSelect={pickService} powerGrid={powerGrid} theme={theme}
-        onHover={setHover} states={states} homeTick={homeTick} flows={flows} districtColors={districtColors} replay={simulatorSource && replayAt !== null} mode={view}
+        onHover={handleHover} states={states} homeTick={homeTick} flows={flows} districtColors={districtColors} replay={simulatorSource && replayAt !== null} mode={view}
         journeyFollowing={journey.following} onJourneyManualCamera={pauseJourneyCamera} journeySpeed={journey.speed}
         journeyActive={journey.enabled && !!miniShopSource}
         journeyPlaybackKey={`${journey.journey?.action_id}:${journey.step}:${journey.replayTick}`}
@@ -198,7 +211,6 @@ export default function App() {
         onClear={() => setConnection(null)} onInspect={key => { setSelected(key); journey.setFollowing(false) }} onJourney={openJourney} />}
 
       {live ? <>
-        <LiveIncidentBanner deployments={deployments} views={liveViews} onPick={pickService} />
         <LiveOverview cluster={cluster} views={liveViews} onPick={pickService} />
       </> : simulatorSource ? <>
         <Banner deployments={deployments} states={states} outages={outages} edges={flows} onPick={pickService} />
@@ -214,10 +226,10 @@ export default function App() {
         setAnalyticsOpen(false)
       }} />}
 
-      <aside className={`hud services ${sidebar ? 'open' : ''}`} aria-label="Services">
+      <aside className={`hud services ${sidebar ? 'open' : ''}`} aria-label={miniShopOnly ? "MiniShop services" : "Services"}>
         <button className="toggle" aria-expanded={sidebar} title={sidebar ? 'Collapse' : 'Show service names'}
           onClick={() => setSidebar(!sidebar)}>{sidebar ? '‹' : '›'}</button>
-        {deployments.map((d) => {
+        {deployments.filter(d => !miniShopOnly || isMiniShopComponent(d)).map((d) => {
           const info = landmarkFor(d.metadata.name), k = keyOf(d), s = states[k]
           const color = s.live?.color ?? s.affected?.color ?? HEALTH_COLOR[deploymentHealth(d)]
           return (
@@ -228,6 +240,7 @@ export default function App() {
             </button>
           )
         })}
+        {!miniShopOnly && <>
         <hr />
         <button className={`svc ${selected === 'city-hall' ? 'sel' : ''}`} onClick={() => pickService('city-hall')}
           title="City Hall: the control plane" aria-label="City Hall, the control plane">
@@ -243,6 +256,7 @@ export default function App() {
             </button>
           )
         })}
+        </>}
       </aside>
 
       {node && <StationPanel node={node} all={all} sim={sim} onClose={() => setSelected(null)} />}
@@ -268,7 +282,12 @@ export default function App() {
 
       {toast && <div className="hud toast" role="alert"><b>⚠ Action failed.</b> {toast}<button className="close" aria-label="Dismiss" onClick={() => setToast(null)}>×</button></div>}
 
-      {hover && (
+      {hover?.pinnedKey ? <section className="hud car-inspection" role="dialog" aria-label="Discovery car details">
+        <button className="close" aria-label="Close car details" onClick={() => setHover(null)}>×</button>
+        <h2>{hover.title}</h2>
+        {hover.lines.map(line => <p key={line}>{line}</p>)}
+        <p className="small muted">Pinned. Hover over the same car again to close, or use × / Escape. Hover another car to switch.</p>
+      </section> : hover && (
         <div className="tooltip" style={{ left: hover.x + 14, top: hover.y + 14 }} role="tooltip">
           <b>{hover.title}</b>
           {hover.lines.map((l) => <div key={l}>{l}</div>)}
@@ -759,7 +778,7 @@ function Legend({ live, onClose }: { live: boolean; onClose: () => void }) {
       {(Object.keys(STATUS_COLOR) as PodStatus[]).map((s) => <div key={s}><i style={{ background: STATUS_COLOR[s] }} />{FRIENDLY[s]}</div>)}
       <h3>Vehicles</h3>
       <div>🚕 Customers · other Cars wear their caller's colour</div>
-      <div><i style={{ background: SIGNAL.refused.color }} />Glowing red: a failed request going back</div>
+      <div><i style={{ background: SIGNAL.refused.color }} />Failures burst at the door and return red. Route details distinguish HTTP error replies from failed communication.</div>
       <p className="muted small">Cars illustrate activity; they are not traced requests.{live && ' HTTP 402 is a payment decline, not evidence of a pod outage.'} Press ? for how the city works.</p>
     </aside>
   )
