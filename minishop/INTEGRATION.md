@@ -51,7 +51,7 @@ Nginx emits JSON access logs with upstream address/status and duration in second
 
 The frontend generates a UUID for each API request. Every FastAPI request accepts a valid `X-Request-ID` or generates a fresh UUID and echoes it in the response. Internal HTTPX calls propagate the same ID and add `X-Source-Service`. All database/Redis events inside that request carry the same context-local ID. The order confirmation/error state exposes the reference for log lookup. `X-Served-By` identifies the actual serving pod in Kubernetes.
 
-This is request correlation, **not** a complete OpenTelemetry trace: there are no span/parent IDs, W3C `traceparent`, collector, exporter or trace storage. The existing KubeVerse live adapter consumes aggregate edge health/rate, not individual trace IDs or latency. Its TigerData analytics are currently tied to simulated mode and disabled in live mode. MiniShop neither writes fabricated TigerData measurements nor modifies that behavior.
+Request IDs correlate log entries across services. Kuebec uses the logged requests for live road activity and can record their latency and status in TigerData when `TIGERDATA_DATABASE_URL` is configured. [The root README](../README.md#tigerdata-network-analytics) includes the traffic generator command.
 
 Real local browser evidence is preserved in [docs/checkout-events.jsonl](docs/checkout-events.jsonl) and [docs/checkout-database.json](docs/checkout-database.json). It was captured from independent local HTTP processes, **not Kubernetes pods**. The targets are consequently loopback hosts for those local calls. Kubernetes uses Service DNS from `k8s/01-config.yaml` instead; no evidence was relabelled to look like a cluster run.
 

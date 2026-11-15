@@ -134,8 +134,24 @@ Both modes stream Kubernetes-shaped updates (`ADDED`/`MODIFIED`/`DELETED`) over 
 
 ## TigerData network analytics
 
-Copy `backend/.env.example` to `backend/.env` and put your Tiger Cloud PostgreSQL connection
-string on the `TIGERDATA_DATABASE_URL` line. Use the URI from Tiger Console, including its TLS settings.
+In live mode, the city starts with no streets. Open **Admin menu** on the MiniShop home
+page to send demo cars within a district or lorries across districts. The controls animate
+the city using real workload names. They send no traffic to the depicted services.
+The first vehicle between two workloads adds a street if it needs one. Streets stay visible when idle.
+Cross-district traffic shares one highway per pair of namespaces. Cars use local streets
+and roundabout connections to reach the highway whenever possible.
+To generate real API measurements for TigerData, run the generator from the repository root:
+
+```powershell
+python.exe minishop/scripts/traffic.py --base http://127.0.0.1:18080
+```
+
+Use the storefront's forwarded port and press **Ctrl+C** to stop. The generator makes one
+request per second and periodically creates a simulated order.
+
+Set `TIGERDATA_DATABASE_URL` in `backend/.env` to your Tiger Cloud PostgreSQL connection string.
+Use the URI from Tiger Console, including its TLS settings.
+With this connection configured, live mode graphs request latency and status from the workload logs.
 The local file is ignored by Git. The database role needs permission to create the
 `kubeverse_requests` hypertable and its index and to insert and query rows.
 

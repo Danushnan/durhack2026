@@ -1,10 +1,10 @@
-"""Generate simulated request measurements and query them in TigerData."""
+"""Record request measurements and query them in TigerData."""
 
 import asyncio
 import logging
 import math
 import random
-from collections import defaultdict
+from collections import defaultdict, deque
 from contextlib import suppress
 from datetime import datetime, timedelta, timezone
 from uuid import uuid4
@@ -75,10 +75,25 @@ class SimulatedRequests:
         return rows
 
 
+class LiveRequests:
+    def __init__(self, cluster):
+        self.demo_id = uuid4()
+        self.pending = deque(maxlen=10000)
+        cluster.record_request = self.record
+
+    def record(self, timestamp, source, destination, latency, status):
+        observed_at = datetime.fromtimestamp(timestamp / 1000, timezone.utc)
+        self.pending.append((observed_at, self.demo_id, source, destination, latency,
+                             status >= 400, status in (502, 503, 504)))
+
+    def sample(self, _now, _duration):
+        return [self.pending.popleft() for _ in range(len(self.pending))]
+
+
 class TigerTelemetry:
-    def __init__(self, dsn, simulator):
+    def __init__(self, dsn, simulator, live=None):
         self.dsn = dsn
-        self.source = SimulatedRequests(simulator)
+        self.source = LiveRequests(live) if live else SimulatedRequests(simulator)
         self.ready = False
         self.read_slots = asyncio.Semaphore(4)
 

@@ -1,0 +1,510 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: product-api
+  namespace: minishop
+  labels:
+    app: product-api
+    app.kubernetes.io/name: product-api
+    app.kubernetes.io/part-of: kubeverse-demo
+    app.kubernetes.io/component: products
+spec:
+  replicas: 1
+  revisionHistoryLimit: 2
+  selector:
+    matchLabels:
+      app: product-api
+  template:
+    metadata:
+      labels:
+        app: product-api
+        app.kubernetes.io/name: product-api
+        app.kubernetes.io/part-of: kubeverse-demo
+        app.kubernetes.io/component: products
+    spec:
+      terminationGracePeriodSeconds: 30
+      securityContext:
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+      - name: workload
+        image: minishop-product-api:demo
+        imagePullPolicy: IfNotPresent
+        ports:
+        - name: http
+          containerPort: 8000
+        resources:
+          requests:
+            cpu: 50m
+            memory: 64Mi
+          limits:
+            cpu: 500m
+            memory: 192Mi
+        startupProbe:
+          httpGet:
+            path: /health/live
+            port: http
+          periodSeconds: 5
+          timeoutSeconds: 2
+          failureThreshold: 30
+        readinessProbe:
+          httpGet:
+            path: /health/ready
+            port: http
+          periodSeconds: 5
+          timeoutSeconds: 2
+          failureThreshold: 3
+        livenessProbe:
+          httpGet:
+            path: /health/live
+            port: http
+          periodSeconds: 5
+          timeoutSeconds: 2
+          failureThreshold: 6
+        securityContext:
+          allowPrivilegeEscalation: false
+          runAsNonRoot: true
+          runAsUser: 10001
+          capabilities:
+            drop:
+            - ALL
+          readOnlyRootFilesystem: true
+        envFrom:
+        - configMapRef:
+            name: minishop-config
+        env:
+        - name: DATABASE_URL
+          valueFrom:
+            secretKeyRef:
+              name: minishop-secrets
+              key: DATABASE_URL
+      dnsConfig:
+        options:
+        - name: ndots
+          value: '1'
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: product-api
+  namespace: minishop
+  labels:
+    app: product-api
+    app.kubernetes.io/name: product-api
+    app.kubernetes.io/part-of: kubeverse-demo
+    app.kubernetes.io/component: products
+spec:
+  selector:
+    app: product-api
+  ports:
+  - name: http
+    port: 8000
+    targetPort: 8000
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: cart-api
+  namespace: minishop
+  labels:
+    app: cart-api
+    app.kubernetes.io/name: cart-api
+    app.kubernetes.io/part-of: kubeverse-demo
+    app.kubernetes.io/component: cart
+spec:
+  replicas: 1
+  revisionHistoryLimit: 2
+  selector:
+    matchLabels:
+      app: cart-api
+  template:
+    metadata:
+      labels:
+        app: cart-api
+        app.kubernetes.io/name: cart-api
+        app.kubernetes.io/part-of: kubeverse-demo
+        app.kubernetes.io/component: cart
+    spec:
+      terminationGracePeriodSeconds: 30
+      securityContext:
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+      - name: workload
+        image: minishop-cart-api:demo
+        imagePullPolicy: IfNotPresent
+        ports:
+        - name: http
+          containerPort: 8000
+        resources:
+          requests:
+            cpu: 50m
+            memory: 64Mi
+          limits:
+            cpu: 500m
+            memory: 192Mi
+        startupProbe:
+          httpGet:
+            path: /health/live
+            port: http
+          periodSeconds: 5
+          timeoutSeconds: 2
+          failureThreshold: 30
+        readinessProbe:
+          httpGet:
+            path: /health/ready
+            port: http
+          periodSeconds: 5
+          timeoutSeconds: 2
+          failureThreshold: 3
+        livenessProbe:
+          httpGet:
+            path: /health/live
+            port: http
+          periodSeconds: 5
+          timeoutSeconds: 2
+          failureThreshold: 6
+        securityContext:
+          allowPrivilegeEscalation: false
+          runAsNonRoot: true
+          runAsUser: 10001
+          capabilities:
+            drop:
+            - ALL
+          readOnlyRootFilesystem: true
+        envFrom:
+        - configMapRef:
+            name: minishop-config
+        env:
+        - name: INTERNAL_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: minishop-secrets
+              key: INTERNAL_TOKEN
+      dnsConfig:
+        options:
+        - name: ndots
+          value: '1'
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: cart-api
+  namespace: minishop
+  labels:
+    app: cart-api
+    app.kubernetes.io/name: cart-api
+    app.kubernetes.io/part-of: kubeverse-demo
+    app.kubernetes.io/component: cart
+spec:
+  selector:
+    app: cart-api
+  ports:
+  - name: http
+    port: 8000
+    targetPort: 8000
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: checkout-api
+  namespace: minishop
+  labels:
+    app: checkout-api
+    app.kubernetes.io/name: checkout-api
+    app.kubernetes.io/part-of: kubeverse-demo
+    app.kubernetes.io/component: checkout
+spec:
+  replicas: 1
+  revisionHistoryLimit: 2
+  selector:
+    matchLabels:
+      app: checkout-api
+  template:
+    metadata:
+      labels:
+        app: checkout-api
+        app.kubernetes.io/name: checkout-api
+        app.kubernetes.io/part-of: kubeverse-demo
+        app.kubernetes.io/component: checkout
+    spec:
+      terminationGracePeriodSeconds: 30
+      securityContext:
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+      - name: workload
+        image: minishop-checkout-api:demo
+        imagePullPolicy: IfNotPresent
+        ports:
+        - name: http
+          containerPort: 8000
+        resources:
+          requests:
+            cpu: 50m
+            memory: 64Mi
+          limits:
+            cpu: 500m
+            memory: 192Mi
+        startupProbe:
+          httpGet:
+            path: /health/live
+            port: http
+          periodSeconds: 5
+          timeoutSeconds: 2
+          failureThreshold: 30
+        readinessProbe:
+          httpGet:
+            path: /health/ready
+            port: http
+          periodSeconds: 5
+          timeoutSeconds: 2
+          failureThreshold: 3
+        livenessProbe:
+          httpGet:
+            path: /health/live
+            port: http
+          periodSeconds: 5
+          timeoutSeconds: 2
+          failureThreshold: 6
+        securityContext:
+          allowPrivilegeEscalation: false
+          runAsNonRoot: true
+          runAsUser: 10001
+          capabilities:
+            drop:
+            - ALL
+          readOnlyRootFilesystem: true
+        envFrom:
+        - configMapRef:
+            name: minishop-config
+        env:
+        - name: DATABASE_URL
+          valueFrom:
+            secretKeyRef:
+              name: minishop-secrets
+              key: DATABASE_URL
+        - name: INTERNAL_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: minishop-secrets
+              key: INTERNAL_TOKEN
+      topologySpreadConstraints:
+      - maxSkew: 1
+        topologyKey: kubernetes.io/hostname
+        whenUnsatisfiable: ScheduleAnyway
+        labelSelector:
+          matchLabels:
+            app: checkout-api
+      dnsConfig:
+        options:
+        - name: ndots
+          value: '1'
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: checkout-api
+  namespace: minishop
+  labels:
+    app: checkout-api
+    app.kubernetes.io/name: checkout-api
+    app.kubernetes.io/part-of: kubeverse-demo
+    app.kubernetes.io/component: checkout
+spec:
+  selector:
+    app: checkout-api
+  ports:
+  - name: http
+    port: 8000
+    targetPort: 8000
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: payment-api
+  namespace: minishop
+  labels:
+    app: payment-api
+    app.kubernetes.io/name: payment-api
+    app.kubernetes.io/part-of: kubeverse-demo
+    app.kubernetes.io/component: payments
+spec:
+  replicas: 1
+  revisionHistoryLimit: 2
+  selector:
+    matchLabels:
+      app: payment-api
+  template:
+    metadata:
+      labels:
+        app: payment-api
+        app.kubernetes.io/name: payment-api
+        app.kubernetes.io/part-of: kubeverse-demo
+        app.kubernetes.io/component: payments
+    spec:
+      terminationGracePeriodSeconds: 30
+      securityContext:
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+      - name: workload
+        image: minishop-payment-api:demo
+        imagePullPolicy: IfNotPresent
+        ports:
+        - name: http
+          containerPort: 8000
+        resources:
+          requests:
+            cpu: 50m
+            memory: 64Mi
+          limits:
+            cpu: 500m
+            memory: 192Mi
+        startupProbe:
+          httpGet:
+            path: /health/live
+            port: http
+          periodSeconds: 5
+          timeoutSeconds: 2
+          failureThreshold: 30
+        readinessProbe:
+          httpGet:
+            path: /health/ready
+            port: http
+          periodSeconds: 5
+          timeoutSeconds: 2
+          failureThreshold: 3
+        livenessProbe:
+          httpGet:
+            path: /health/live
+            port: http
+          periodSeconds: 5
+          timeoutSeconds: 2
+          failureThreshold: 6
+        securityContext:
+          allowPrivilegeEscalation: false
+          runAsNonRoot: true
+          runAsUser: 10001
+          capabilities:
+            drop:
+            - ALL
+          readOnlyRootFilesystem: true
+        envFrom:
+        - configMapRef:
+            name: minishop-config
+        env:
+        - name: INTERNAL_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: minishop-secrets
+              key: INTERNAL_TOKEN
+      dnsConfig:
+        options:
+        - name: ndots
+          value: '1'
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: payment-api
+  namespace: minishop
+  labels:
+    app: payment-api
+    app.kubernetes.io/name: payment-api
+    app.kubernetes.io/part-of: kubeverse-demo
+    app.kubernetes.io/component: payments
+spec:
+  selector:
+    app: payment-api
+  ports:
+  - name: http
+    port: 8000
+    targetPort: 8000
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: minishop-web
+  namespace: minishop
+  labels:
+    app: minishop-web
+    app.kubernetes.io/name: minishop-web
+    app.kubernetes.io/part-of: kubeverse-demo
+    app.kubernetes.io/component: frontend
+spec:
+  replicas: 1
+  revisionHistoryLimit: 2
+  selector:
+    matchLabels:
+      app: minishop-web
+  template:
+    metadata:
+      labels:
+        app: minishop-web
+        app.kubernetes.io/name: minishop-web
+        app.kubernetes.io/part-of: kubeverse-demo
+        app.kubernetes.io/component: frontend
+    spec:
+      terminationGracePeriodSeconds: 30
+      securityContext:
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+      - name: workload
+        image: minishop-web:demo
+        env:
+        - name: UPSTREAM_SUFFIX
+          value: .minishop.svc.cluster.local
+        imagePullPolicy: IfNotPresent
+        ports:
+        - name: http
+          containerPort: 8080
+        resources:
+          requests:
+            cpu: 25m
+            memory: 32Mi
+          limits:
+            cpu: 250m
+            memory: 96Mi
+        startupProbe:
+          httpGet:
+            path: /health/live
+            port: http
+          periodSeconds: 5
+          timeoutSeconds: 2
+          failureThreshold: 30
+        readinessProbe:
+          httpGet:
+            path: /health/ready
+            port: http
+          periodSeconds: 5
+          timeoutSeconds: 2
+          failureThreshold: 3
+        livenessProbe:
+          httpGet:
+            path: /health/live
+            port: http
+          periodSeconds: 5
+          timeoutSeconds: 2
+          failureThreshold: 6
+        securityContext:
+          allowPrivilegeEscalation: false
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: minishop-web
+  namespace: minishop
+  labels:
+    app: minishop-web
+    app.kubernetes.io/name: minishop-web
+    app.kubernetes.io/part-of: kubeverse-demo
+    app.kubernetes.io/component: frontend
+spec:
+  selector:
+    app: minishop-web
+  ports:
+  - name: http
+    port: 8080
+    targetPort: 8080

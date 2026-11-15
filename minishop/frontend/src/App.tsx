@@ -2,6 +2,7 @@ import {useCallback, useEffect, useRef, useState} from 'react';
 import {ArrowLeft, ArrowRight, Bag, MagnifyingGlass, Plus} from '@phosphor-icons/react';
 import {api, ApiError, Cart, checkoutStorage, money, Order, Product, session} from './api';
 import {Basket, Checkout, Confirmation, Orders, ProductCard} from './components';
+import {AdminMenu} from './AdminMenu';
 
 const emptyCart:Cart = {items:[],total_cents:0,currency:'GBP'};
 
@@ -56,6 +57,7 @@ export default function App() {
   return <><a className="skip" href="#main">Skip to content</a><div className="announcement">A little shop. A lot working together. <span>Part of KubeVerse at DurHack 2026</span></div>
     <header className="site-header"><a href="#/" className="brand" aria-label="MiniShop home"><Bag size={30} weight="duotone"/>mini<span>shop</span><span className="brand-dot">.</span></a><nav aria-label="Main navigation"><a href="#/" aria-current={route==='/'?'page':undefined}>The collection</a><a href="#/orders" aria-current={route==='/orders'?'page':undefined}>Your orders</a></nav><a className="basket-link" href="#/basket" aria-label={`Basket, ${count} items`}><Bag size={22}/><span>Basket</span><b>{count}</b></a></header>
     <main id="main" ref={mainRef} tabIndex={-1} className="shell">
+    {route==='/'&&<AdminMenu />}
     {error&&<div className="error" role="alert"><strong>Something needs a moment.</strong><p>{error.message}</p><details><summary>Request reference</summary><code>{error.requestId}</code></details>{loading===false&&products.length===0&&<button onClick={()=>void load()} className="text-button">Try again</button>}</div>}
     {loading?<div aria-busy="true" aria-label="Loading the shop" className="skeleton-grid">{[1,2,3,4].map(i=><div className="skeleton" key={i}/>)}</div>:<>
     {route==='/'&&<><section className="hero"><div className="hero-copy"><p className="eyebrow">Made for the everyday</p><h1>Good things.<br/>Small pleasures.</h1><p>Thoughtful essentials for your desk, your home, and everywhere in between.</p><a className="primary" href="#collection">Find your everyday <ArrowRight size={18}/></a></div><a className="hero-image" href={featured?`#/product/${featured.id}`:'#collection'}><img src="/images/headphones.jpg" alt="Everyday wireless headphones" width="800" height="800"/>{featured&&<div className="hero-caption"><div><span>Meet your new daily companion</span><strong>{featured.name} · {money(featured.price_cents)}</strong></div><ArrowRight size={24}/></div>}</a></section>

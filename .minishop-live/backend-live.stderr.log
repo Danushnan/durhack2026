@@ -1,0 +1,18 @@
+INFO:     Started server process [66032]
+INFO:     Waiting for application startup.
+INFO:     Application startup complete.
+INFO:     Uvicorn running on http://127.0.0.1:18001 (Press CTRL+C to quit)
+INFO:     127.0.0.1:58196 - "WebSocket /ws" [accepted]
+INFO:     connection open
+INFO:     127.0.0.1:56518 - "WebSocket /ws" [accepted]
+INFO:     connection open
+TigerData ingestion unavailable (ConnectionTimeout); retrying in five seconds
+INFO:     127.0.0.1:65112 - "WebSocket /ws" [accepted]
+INFO:     connection open
+TigerData ingestion unavailable (ConnectionTimeout); retrying in five seconds
+INFO:     127.0.0.1:58261 - "WebSocket /ws" [accepted]
+INFO:     connection open
+TigerData ingestion unavailable (ConnectionTimeout); retrying in five seconds
+TigerData ingestion unavailable (ConnectionTimeout); retrying in five seconds
+TigerData ingestion unavailable (ConnectionTimeout); retrying in five seconds
+TigerData ingestion unavailable (ConnectionTimeout); retrying in five seconds

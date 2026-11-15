@@ -1,0 +1,55 @@
+INFO:     Started server process [54940]
+INFO:     Waiting for application startup.
+INFO:     Application startup complete.
+INFO:     Uvicorn running on http://127.0.0.1:18001 (Press CTRL+C to quit)
+INFO:     127.0.0.1:61934 - "WebSocket /ws" [accepted]
+INFO:     connection open
+TigerData ingestion unavailable (ConnectionTimeout); retrying in five seconds
+TigerData ingestion unavailable (ConnectionTimeout); retrying in five seconds
+INFO:     127.0.0.1:59993 - "WebSocket /ws" [accepted]
+INFO:     connection open
+TigerData ingestion unavailable (ConnectionTimeout); retrying in five seconds
+TigerData ingestion unavailable (ConnectionTimeout); retrying in five seconds
+TigerData ingestion unavailable (ConnectionTimeout); retrying in five seconds
+INFO:     127.0.0.1:50416 - "WebSocket /ws" [accepted]
+INFO:     connection open
+TigerData ingestion unavailable (ConnectionTimeout); retrying in five seconds
+TigerData ingestion unavailable (ConnectionTimeout); retrying in five seconds
+TigerData ingestion unavailable (ConnectionTimeout); retrying in five seconds
+TigerData ingestion unavailable (ConnectionTimeout); retrying in five seconds
+TigerData ingestion unavailable (ConnectionTimeout); retrying in five seconds
+TigerData ingestion unavailable (ConnectionTimeout); retrying in five seconds
+TigerData ingestion unavailable (ConnectionTimeout); retrying in five seconds
+TigerData ingestion unavailable (ConnectionTimeout); retrying in five seconds
+TigerData ingestion unavailable (ConnectionTimeout); retrying in five seconds
+TigerData ingestion unavailable (ConnectionTimeout); retrying in five seconds
+TigerData ingestion unavailable (ConnectionTimeout); retrying in five seconds
+TigerData ingestion unavailable (ConnectionTimeout); retrying in five seconds
+TigerData ingestion unavailable (ConnectionTimeout); retrying in five seconds
+TigerData ingestion unavailable (ConnectionTimeout); retrying in five seconds
+TigerData ingestion unavailable (ConnectionTimeout); retrying in five seconds
+TigerData ingestion unavailable (ConnectionTimeout); retrying in five seconds
+TigerData ingestion unavailable (ConnectionTimeout); retrying in five seconds
+TigerData ingestion unavailable (ConnectionTimeout); retrying in five seconds
+TigerData ingestion unavailable (ConnectionTimeout); retrying in five seconds
+TigerData ingestion unavailable (ConnectionTimeout); retrying in five seconds
+TigerData ingestion unavailable (ConnectionTimeout); retrying in five seconds
+TigerData ingestion unavailable (ConnectionTimeout); retrying in five seconds
+TigerData ingestion unavailable (ConnectionTimeout); retrying in five seconds
+TigerData ingestion unavailable (ConnectionTimeout); retrying in five seconds
+TigerData ingestion unavailable (ConnectionTimeout); retrying in five seconds
+TigerData ingestion unavailable (ConnectionTimeout); retrying in five seconds
+TigerData ingestion unavailable (ConnectionTimeout); retrying in five seconds
+TigerData ingestion unavailable (ConnectionTimeout); retrying in five seconds
+TigerData ingestion unavailable (ConnectionTimeout); retrying in five seconds
+TigerData ingestion unavailable (ConnectionTimeout); retrying in five seconds
+TigerData ingestion unavailable (ConnectionTimeout); retrying in five seconds
+TigerData ingestion unavailable (ConnectionTimeout); retrying in five seconds
+TigerData ingestion unavailable (ConnectionTimeout); retrying in five seconds
+TigerData ingestion unavailable (ConnectionTimeout); retrying in five seconds
+TigerData ingestion unavailable (ConnectionTimeout); retrying in five seconds
+TigerData ingestion unavailable (ConnectionTimeout); retrying in five seconds
+TigerData ingestion unavailable (ConnectionTimeout); retrying in five seconds
+TigerData ingestion unavailable (ConnectionTimeout); retrying in five seconds
+TigerData ingestion unavailable (ConnectionTimeout); retrying in five seconds
+TigerData ingestion unavailable (ConnectionTimeout); retrying in five seconds

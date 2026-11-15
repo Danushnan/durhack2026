@@ -28,17 +28,24 @@ export interface K8sObject {
 }
 
 /** healthy: the target has ready Pods to answer. errors: it answers, but with errors, because something it needs is down. */
-export interface Edge { from: string; to: string; rps: number; healthy: boolean; errors?: boolean }
+export interface Edge {
+  from: string; to: string; rps: number; healthy: boolean; errors?: boolean
+  requests?: number; recentRequests?: number
+}
 
 type WatchEvent =
   | { type: 'ADDED' | 'MODIFIED' | 'DELETED'; object: K8sObject }
   | { type: 'HEALTH'; stale: boolean; lastRefresh: number | null }
   | { type: 'TRAFFIC'; edges: Edge[] }
+  | { type: 'DEMO_TRAFFIC'; edges: Edge[] }
+  | { type: 'DEMO_RESET' }
   | { type: 'SOURCE'; context: string | null } // null: the simulator; otherwise a live cluster's kubectl context
 
 export interface ClusterState {
   objects: Record<string, K8sObject> // by uid
   edges: Edge[]
+  demoEdges?: Edge[]
+  demoRevision?: number
   connected: boolean
   context?: string | null // kubectl context when watching a real cluster (read-only); null/absent for the simulator
   stale?: boolean          // live mode: the last refresh from the cluster failed
@@ -168,15 +175,30 @@ export function useCluster(): ClusterState {
         setState((s) => {
           const objects = { ...s.objects }
           let edges = s.edges
+          let demoEdges = s.demoEdges
+          let demoRevision = s.demoRevision ?? 0
           let { context, stale } = s
           for (const ev of batch) {
             if (ev.type === 'SOURCE') context = ev.context
             else if (ev.type === 'HEALTH') stale = ev.stale
             else if (ev.type === 'TRAFFIC') edges = ev.edges
+            else if (ev.type === 'DEMO_TRAFFIC') {
+              const byCall = new Map(demoEdges?.map((edge) => [`${edge.from}>${edge.to}`, edge]))
+              for (const edge of ev.edges) {
+                const key = `${edge.from}>${edge.to}`
+                const requests = (byCall.get(key)?.requests ?? 0) + 1
+                byCall.set(key, { ...edge, requests, recentRequests: requests })
+              }
+              demoEdges = [...byCall.values()]
+            }
+            else if (ev.type === 'DEMO_RESET') {
+              demoEdges = []
+              demoRevision++
+            }
             else if (ev.type === 'DELETED') delete objects[ev.object.metadata.uid]
             else objects[ev.object.metadata.uid] = ev.object
           }
-          return { objects, edges, context, stale, connected: true }
+          return { objects, edges, demoEdges, demoRevision, context, stale, connected: true }
         })
       }
       ws.onclose = () => {

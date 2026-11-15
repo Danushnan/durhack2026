@@ -1,0 +1,99 @@
+22:17:37 [vite] ws proxy error:
+Error: connect ECONNREFUSED 127.0.0.1:18001
+    at TCPConnectWrap.afterConnect [as oncomplete] (node:net:2083:16)
+22:17:37 [vite] ws proxy error:
+Error: connect ECONNREFUSED 127.0.0.1:18001
+    at TCPConnectWrap.afterConnect [as oncomplete] (node:net:2083:16)
+22:17:38 [vite] http proxy error: /api/telemetry
+Error: connect ECONNREFUSED 127.0.0.1:18001
+    at TCPConnectWrap.afterConnect [as oncomplete] (node:net:2083:16)
+22:17:39 [vite] ws proxy error:
+Error: connect ECONNREFUSED 127.0.0.1:18001
+    at TCPConnectWrap.afterConnect [as oncomplete] (node:net:2083:16)
+22:17:39 [vite] http proxy error: /api/telemetry
+Error: connect ECONNREFUSED 127.0.0.1:18001
+    at TCPConnectWrap.afterConnect [as oncomplete] (node:net:2083:16)
+22:17:39 [vite] (client) [console.warn] THREE.Clock: This module has been deprecated. Please use THREE.Timer instead.
+22:17:39 [vite] (client) [console.warn] THREE.WebGLShadowMap: PCFSoftShadowMap has been removed. Using PCFShadowMap instead.
+22:17:39 [vite] ws proxy error:
+Error: connect ECONNREFUSED 127.0.0.1:18001
+    at TCPConnectWrap.afterConnect [as oncomplete] (node:net:2083:16)
+22:17:40 [vite] ws proxy error:
+Error: connect ECONNREFUSED 127.0.0.1:18001
+    at TCPConnectWrap.afterConnect [as oncomplete] (node:net:2083:16)
+22:18:13 [vite] (client) [console.warn] THREE.Clock: This module has been deprecated. Please use THREE.Timer instead.
+22:18:14 [vite] (client) [console.warn] THREE.WebGLShadowMap: PCFSoftShadowMap has been removed. Using PCFShadowMap instead.
+22:28:36 [vite] (client) [console.warn] THREE.Clock: This module has been deprecated. Please use THREE.Timer instead.
+22:28:36 [vite] (client) [console.warn] THREE.WebGLShadowMap: PCFSoftShadowMap has been removed. Using PCFShadowMap instead.
+22:30:32 [vite] (client) [console.warn] THREE.Clock: This module has been deprecated. Please use THREE.Timer instead.
+22:30:33 [vite] (client) [console.warn] THREE.WebGLShadowMap: PCFSoftShadowMap has been removed. Using PCFShadowMap instead.
+22:30:37 [vite] (client) [console.warn] THREE.Clock: This module has been deprecated. Please use THREE.Timer instead.
+22:30:37 [vite] (client) [console.warn] THREE.WebGLShadowMap: PCFSoftShadowMap has been removed. Using PCFShadowMap instead.
+22:34:14 [vite] (client) [console.warn] THREE.Clock: This module has been deprecated. Please use THREE.Timer instead.
+22:34:14 [vite] (client) [console.warn] THREE.WebGLShadowMap: PCFSoftShadowMap has been removed. Using PCFShadowMap instead.
+22:35:05 [vite] (client) [console.warn] THREE.Clock: This module has been deprecated. Please use THREE.Timer instead.
+22:35:29 [vite] (client) [console.warn] THREE.WebGLShadowMap: PCFSoftShadowMap has been removed. Using PCFShadowMap instead.
+22:35:32 [vite] (client) [console.warn] THREE.Clock: This module has been deprecated. Please use THREE.Timer instead.
+22:35:33 [vite] (client) [console.warn] THREE.WebGLShadowMap: PCFSoftShadowMap has been removed. Using PCFShadowMap instead.
+22:46:12 [vite] (client) [console.warn] THREE.Clock: This module has been deprecated. Please use THREE.Timer instead.
+22:46:13 [vite] (client) [console.warn] THREE.WebGLShadowMap: PCFSoftShadowMap has been removed. Using PCFShadowMap instead.
+23:09:04 [vite] (client) [console.warn] THREE.Clock: This module has been deprecated. Please use THREE.Timer instead.
+23:09:05 [vite] (client) [console.warn] THREE.WebGLShadowMap: PCFSoftShadowMap has been removed. Using PCFShadowMap instead.
+23:15:28 [vite] (client) [console.warn] THREE.Clock: This module has been deprecated. Please use THREE.Timer instead.
+23:15:28 [vite] (client) [console.warn] THREE.WebGLShadowMap: PCFSoftShadowMap has been removed. Using PCFShadowMap instead.
+23:15:30 [vite] (client) [console.warn] THREE.Clock: This module has been deprecated. Please use THREE.Timer instead.
+23:15:30 [vite] (client) [console.warn] THREE.WebGLShadowMap: PCFSoftShadowMap has been removed. Using PCFShadowMap instead.
+23:24:53 [vite] ws proxy error:
+Error: read ECONNRESET
+    at TCP.onStreamRead (node:internal/stream_base_commons:221:20)
+23:24:53 [vite] http proxy error: /api/telemetry
+Error: connect ECONNREFUSED 127.0.0.1:18001
+    at TCPConnectWrap.afterConnect [as oncomplete] (node:net:2083:16)
+23:24:54 [vite] ws proxy error:
+Error: connect ECONNREFUSED 127.0.0.1:18001
+    at TCPConnectWrap.afterConnect [as oncomplete] (node:net:2083:16)
+23:24:56 [vite] ws proxy error:
+Error: connect ECONNREFUSED 127.0.0.1:18001
+    at TCPConnectWrap.afterConnect [as oncomplete] (node:net:2083:16)
+23:24:56 [vite] http proxy error: /api/telemetry
+Error: connect ECONNREFUSED 127.0.0.1:18001
+    at TCPConnectWrap.afterConnect [as oncomplete] (node:net:2083:16)
+23:25:36 [vite] (client) [Unhandled error] TypeError: Cannot read properties of undefined (reading 'metadata')
+ > src/k8s.ts:182:33
+    180 |              else if (ev.type === 'HEALTH') stale = ev.stale
+    181 |              else if (ev.type === 'TRAFFIC') edges = ev.edges
+    182 |              else if (ev.type === 'DEMO_TRAFFIC') {
+        |                                   ^
+    183 |                const byCall = new Map(demoEdges?.map((edge) => [`${edge.from}>${edge.to}`, edge]))
+    184 |                for (const edge of ev.edges) {
+ > basicStateReducer node_modules/react-dom/cjs/react-dom-client.development.js:8317:44
+ > updateReducerImpl node_modules/react-dom/cjs/react-dom-client.development.js:8427:14
+ > updateReducer node_modules/react-dom/cjs/react-dom-client.development.js:8350:13
+ > Object.useState node_modules/react-dom/cjs/react-dom-client.development.js:29181:17
+ > exports.useState node_modules/react/cjs/react.development.js:1309:33
+ > useCluster src/k8s.ts:162:28
+ > App src/App.tsx:13:18
+ > Object.react_stack_bottom_frame node_modules/react-dom/cjs/react-dom-client.development.js:28571:19
+ > renderWithHooks node_modules/react-dom/cjs/react-dom-client.development.js:8030:21
+
+23:25:36 [vite] (client) [console.warn] An error occurred in the <App> component.
+
+Consider adding an error boundary to your tree to customize error handling behavior.
+Visit https://react.dev/link/error-boundaries to learn more about error boundaries.
+
+23:26:40 [vite] (client) [console.warn] THREE.Clock: This module has been deprecated. Please use THREE.Timer instead.
+23:26:41 [vite] (client) [console.warn] THREE.WebGLShadowMap: PCFSoftShadowMap has been removed. Using PCFShadowMap instead.
+23:40:04 [vite] ws proxy error:
+Error: read ECONNRESET
+    at TCP.onStreamRead (node:internal/stream_base_commons:221:20)
+23:40:32 [vite] ws proxy error:
+Error: read ECONNRESET
+    at TCP.onStreamRead (node:internal/stream_base_commons:221:20)
+23:40:32 [vite] ws proxy socket error:
+Error: read ECONNRESET
+    at TCP.onStreamRead (node:internal/stream_base_commons:221:20)
+23:43:08 [vite] ws proxy error:
+Error: read ECONNRESET
+    at TCP.onStreamRead (node:internal/stream_base_commons:221:20)
+23:45:01 [vite] (client) [console.warn] THREE.Clock: This module has been deprecated. Please use THREE.Timer instead.
+23:45:02 [vite] (client) [console.warn] THREE.WebGLShadowMap: PCFSoftShadowMap has been removed. Using PCFShadowMap instead.

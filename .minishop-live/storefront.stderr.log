@@ -1,0 +1,2 @@
+E1114 21:31:57.293853   66576 portforward.go:522] "Unhandled Error" err="an error occurred forwarding 18080 -> 8080: error forwarding port 8080 to pod c9fa6ad23c0dc312c110a4b738cd757f0087fc3d0a4060318bf0318efb7a5aa6, uid : failed to find sandbox \"c9fa6ad23c0dc312c110a4b738cd757f0087fc3d0a4060318bf0318efb7a5aa6\" in store: not found"
+error: lost connection to pod

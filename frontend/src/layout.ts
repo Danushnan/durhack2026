@@ -37,7 +37,7 @@ function hash(s: string, salt = 0) {
 
 /** Pure and deterministic. `calls` must be from→to pairs only (no rates or health) so failures never rearrange the city. */
 export function layoutCity(deployments: { namespace: string; name: string }[], nodes: string[], calls: Call[],
-  gates: Call[] = []): CityLayout {
+  gates: Call[] = [], live = false): CityLayout {
   const keys = deployments.map((d) => `${d.namespace}/${d.name}`).sort()
   const known = new Set(keys)
   const edges = calls.filter((c) => known.has(c.from) && known.has(c.to))
@@ -56,6 +56,16 @@ export function layoutCity(deployments: { namespace: string; name: string }[], n
   let x = 0
   namespaces.forEach((ns, d) => {
     const members = keys.filter((k) => nsOf(k) === ns)
+    if (live) {
+      const columns = Math.ceil(Math.sqrt(members.length))
+      members.forEach((k, i) => {
+        pos[k] = new THREE.Vector3(x + PAD + (i % columns) * COL, 0, Math.floor(i / columns) * ROW)
+      })
+      const x1 = x + 2 * PAD + (columns - 1) * COL
+      districts.push({ name: ns, x0: x, x1, z0: -PAD, z1: Math.floor((members.length - 1) / columns) * ROW + PAD })
+      x = x1 + DISTRICT_GAP
+      return
+    }
     const base = minDepth(ns)
     const cols = Math.max(...members.map((k) => depth[k])) - base + 1
     const shiftZ = d % 2 ? ROW * 0.55 : 0 // neighbouring Districts sit at different depths
@@ -184,9 +194,9 @@ export function offsetPath(pts: THREE.Vector3[], d: number): THREE.Vector3[] {
 }
 
 /** A Car's full trip: out along the right lane, and for a failed request a U-turn and back along the other lane. */
-export function carTrip(road: THREE.Vector3[], turnBack: boolean): THREE.Vector3[] {
+export function carTrip(road: THREE.Vector3[], turnBack: boolean, lanePath = offsetPath): THREE.Vector3[] {
   const lane = ROAD_W / 4
-  const out = offsetPath(road, lane)
+  const out = lanePath(road, lane)
   if (!turnBack) return out
   const n = road.length
   const c = road[n - 1], dir = c.clone().sub(road[n - 2]).normalize()
@@ -195,7 +205,7 @@ export function carTrip(road: THREE.Vector3[], turnBack: boolean): THREE.Vector3
     const t = (i / 8) * Math.PI
     return c.clone().addScaledVector(right, lane * Math.cos(t)).addScaledVector(dir, lane * 1.6 * Math.sin(t))
   })
-  return [...out.slice(0, -1), ...arc, ...offsetPath([...road].reverse(), lane).slice(1)]
+  return [...out.slice(0, -1), ...arc, ...lanePath([...road].reverse(), lane).slice(1)]
 }
 
 /** A polyline you can sample by distance travelled. */

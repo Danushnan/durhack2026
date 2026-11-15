@@ -13,7 +13,9 @@ import { COMPONENTS, componentOf, nameOf, roleOf } from './teach'
 import { textTexture, type TextLine } from './textures'
 import type { Theme } from './theme'
 import { routeKey, trafficColor, type RouteMetrics, type ServiceMetrics } from './Telemetry'
-import { admit, bendLimit, type CarAgent, newCar, stepCars } from './traffic'
+import { admit, bendLimit, type CarAgent, exitClear, newCar, stepCars } from './traffic'
+import { buildLiveRoads, streetKey } from './liveRoads'
+import { roadSections, roundaboutLane, ROUNDABOUT_ASPHALT, ROUNDABOUT_ISLAND, ROUNDABOUT_KERB, type Roundabouts } from './roundabouts'
 
 export interface HoverInfo { title: string; lines: string[]; x: number; y: number }
 type OnHover = (h: HoverInfo | null) => void
@@ -26,6 +28,8 @@ const UNIT_COLS = 6
 const UNIT_Z = 4.4
 const CAR_GROW = 2.2 // distance over which a Car grows as it leaves a Building and shrinks as it enters one
 const CAR_POOL = 40  // most Cars drawn on one Road at once (rush hour fills a Road bumper to bumper)
+const LORRY_LENGTH = 2.8
+const STREET_HEIGHT = 0.09
 const GRIP = 9       // how hard Cars may corner: bends below this radius slow them down
 // Isometric view: an orthographic camera looking down the (1, 1, 1) diagonal from this far away.
 const ISO = new THREE.Vector3(1, 1, 1).normalize()
@@ -179,8 +183,10 @@ const arrow = (() => {
  * A two-lane Road: pavement, asphalt, a dashed centre line, arrows in the outbound lane, and edge lines
  * that glow with the health of the call (blue fine, orange answered-with-errors, red refused, grey idle).
  */
-function Road({ pts, edge, emphasis, theme, measured }: {
-  pts: THREE.Vector3[]; edge: Edge; emphasis: 'normal' | 'dim' | 'strong'; theme: Theme; measured?: string // telemetry colour wins when present
+function Road({ pts, edge, emphasis, theme, measured, twoWay, highway }: {
+  pts: THREE.Vector3[]; edge: Edge; emphasis: 'normal' | 'dim' | 'strong'; theme: Theme; measured?: string
+  twoWay: boolean
+  highway: boolean
 }) {
   const geo = useMemo(() => ({
     kerb: ribbon(pts, ROAD_W + 2 * KERB, 0.006),
@@ -189,17 +195,40 @@ function Road({ pts, edge, emphasis, theme, measured }: {
     right: ribbon(offsetPath(pts, ROAD_W / 2 - 0.14), 0.16, 0.022),
   }), [pts])
   useEffect(() => () => Object.values(geo).forEach((g) => g.dispose()), [geo])
-  const color = measured ?? (!edge.healthy ? RED : edge.errors ? ORANGE : edge.rps === 0 ? '#94a3b8' : theme.roadGlow)
+  const color = measured ?? (!edge.healthy ? RED : edge.errors ? ORANGE : highway ? '#fbbf24' : edge.rps === 0 ? '#94a3b8' : theme.roadGlow)
   const dim = emphasis === 'dim' ? 0.3 : 1
   const glow = <meshBasicMaterial color={color} toneMapped={false} transparent opacity={dim} side={THREE.DoubleSide} />
   return (
-    <group>
+    <group position-y={STREET_HEIGHT}>
       <mesh geometry={geo.kerb} receiveShadow><meshStandardMaterial color={theme.kerb} side={THREE.DoubleSide} /></mesh>
-      <mesh geometry={geo.asphalt} receiveShadow><meshStandardMaterial color={theme.street} roughness={0.95} side={THREE.DoubleSide} /></mesh>
+      <mesh geometry={geo.asphalt} receiveShadow><meshStandardMaterial color={highway ? '#263449' : theme.street} roughness={0.95} side={THREE.DoubleSide} /></mesh>
       <mesh geometry={geo.left} renderOrder={edge.healthy ? 1 : 2}>{glow}</mesh>
       <mesh geometry={geo.right} renderOrder={edge.healthy ? 1 : 2}>{glow}</mesh>
-      <Marks pts={pts} every={2.6} offset={0} start={4} geometry={dash} color={theme.laneMark} opacity={0.9 * dim} />
-      <Marks pts={pts} every={13} offset={ROAD_W / 4} start={7} geometry={arrow} color={theme.laneMark} opacity={0.55 * dim} />
+      <Marks pts={pts} every={highway ? 3.5 : 2.6} offset={0} start={4} geometry={dash} color={highway ? '#facc15' : theme.laneMark} opacity={0.9 * dim} />
+      {!twoWay && <Marks pts={pts} every={13} offset={ROAD_W / 4} start={7} geometry={arrow} color={theme.laneMark} opacity={0.55 * dim} />}
+    </group>
+  )
+}
+
+function Roundabout({ center, theme }: { center: THREE.Vector3; theme: Theme }) {
+  return (
+    <group position={[center.x, STREET_HEIGHT, center.z]}>
+      <mesh rotation-x={-Math.PI / 2} position-y={0.01} receiveShadow>
+        <circleGeometry args={[ROUNDABOUT_KERB, 48]} />
+        <meshStandardMaterial color={theme.kerb} />
+      </mesh>
+      <mesh rotation-x={-Math.PI / 2} position-y={0.02} receiveShadow>
+        <circleGeometry args={[ROUNDABOUT_ASPHALT, 48]} />
+        <meshStandardMaterial color={theme.street} roughness={0.95} />
+      </mesh>
+      <mesh position-y={0.12} castShadow receiveShadow>
+        <cylinderGeometry args={[ROUNDABOUT_ISLAND, ROUNDABOUT_ISLAND, 0.2, 48]} />
+        <meshStandardMaterial color={theme.kerb} />
+      </mesh>
+      <mesh rotation-x={-Math.PI / 2} position-y={0.224} receiveShadow>
+        <circleGeometry args={[ROUNDABOUT_ISLAND - 0.2, 48]} />
+        <meshStandardMaterial color={theme.ground} />
+      </mesh>
     </group>
   )
 }
@@ -317,7 +346,8 @@ function Tank({ claim, attached, index, accent, theme, onHover }: {
   )
 }
 
-function Building({ dep, info, pods, pos, selected, onSelect, powerGrid, nodeColors, theme, onHover, state, metric, claims }: {
+function Building({ dep, info, pods, pos, selected, onSelect, powerGrid, nodeColors, theme, onHover, state, metric, claims, driveway }: {
+  driveway: boolean
   dep: K8sObject; info: LandmarkInfo; pods: K8sObject[]; pos: THREE.Vector3; selected: boolean; onSelect: () => void
   powerGrid: boolean; nodeColors: Record<string, string>; theme: Theme; onHover: OnHover; state?: ServiceState[string]
   metric?: ServiceMetrics; claims: K8sObject[]
@@ -338,6 +368,8 @@ function Building({ dep, info, pods, pos, selected, onSelect, powerGrid, nodeCol
   useFrame((_, dt) => { body.current?.scale.lerp(new THREE.Vector3(size, size, size), Math.min(1, dt * 4)) })
   return (
     <group position={pos}>
+      {driveway && <Pad w={2 * BUILDING.halfW} d={BUILDING.front - BUILDING.back} r={0.8}
+        position={[0, 0.025, (BUILDING.front + BUILDING.back) / 2]} color={theme.kerb} />}
       {selected && <Pad w={17} d={17} r={3.5} position={[0, 0.008, -0.6]} color={info.accent} opacity={0.4} />}
       <group ref={body} position={[0, 0, -2]} scale={size}>
         <Landmark info={info} glow={glow} theme={theme} />
@@ -457,19 +489,23 @@ function PowerStation({ node, pos, used, color, theme, onHover, selected, onSele
  * the Car ahead, slow for bends, and at the callee's door are served, refused (red) or answered with an
  * error (orange). Fate is decided on arrival, from the live state, so Cars already on the road react to failures.
  */
-function Traffic({ edge, road, theme, accent, onHover, metric, endpoints }: {
+function Traffic({ edge, road, theme, accent, onHover, metric, endpoints, roundabouts, lorry }: {
   edge: Edge; road: THREE.Vector3[]; theme: Theme; accent: string; onHover: OnHover; metric?: RouteMetrics
+  roundabouts: Roundabouts
+  lorry: boolean
   endpoints: string[] // uids of the destination's ready Pods: the Service only sends requests to these
 }) {
   const targets = useRef(endpoints)
   targets.current = endpoints
   const trips = useMemo(() => {
-    const ok = new Path(carTrip(road, false)), back = new Path(carTrip(road, true))
+    const lanePath = roundabouts.size ? (pts: THREE.Vector3[], offset: number) => roundaboutLane(pts, offset, roundabouts) : offsetPath
+    const ok = new Path(carTrip(road, false, lanePath)), back = new Path(carTrip(road, true, lanePath))
     return { ok, back, trip: { okLength: ok.length, backLength: back.length, door: ok.length - CAR_GROW,
       limitOk: bendLimit(ok.pts, GRIP), limitBack: bendLimit(back.pts, GRIP) } }
-  }, [road])
+  }, [road, roundabouts])
   const cars = useRef<CarAgent[]>([])
   const credit = useRef(0) // requests waiting to leave as a Car
+  const observed = useRef<number | undefined>(undefined)
   const live = useRef(edge)
   live.current = edge
   const groups = useRef<(THREE.Group | null)[]>([])
@@ -478,6 +514,7 @@ function Traffic({ edge, road, theme, accent, onHover, metric, endpoints }: {
   const brakes = useRef<(THREE.Group | null)[]>([])
   const tmp = useMemo(() => new THREE.Vector3(), [])
   const colors = useMemo(() => ({ ok: new THREE.Color(accent), refused: new THREE.Color(RED), error: new THREE.Color(ORANGE) }), [accent])
+  const length = lorry ? LORRY_LENGTH * 1.15 : undefined
   useFrame(({ clock }, rawDt) => {
     const dt = Math.min(rawDt, 0.1) // a hidden tab must not dump a burst of Cars
     const now = clock.elapsedTime
@@ -485,12 +522,23 @@ function Traffic({ edge, road, theme, accent, onHover, metric, endpoints }: {
     // Arrivals at the request rate, jittered; a backlog waits (up to 3) while the caller's exit is blocked.
     const used = new Set(cars.current.map((c) => c.slot))
     const slot = [...Array(CAR_POOL).keys()].find((i) => !used.has(i))
-    const arrival = admit(credit.current, slot === undefined ? 0 : e.rps, dt, cars.current, Math.random)
-    credit.current = arrival.credit
-    if (arrival.leave && slot !== undefined) cars.current.push(newCar(slot, Math.random))
+    if (e.requests !== undefined) {
+      const previous = observed.current
+      const added = previous === undefined || e.requests < previous ? e.recentRequests ?? 0 : e.requests - previous
+      observed.current = e.requests
+      credit.current += added
+      if (slot !== undefined && credit.current >= 1 && exitClear(cars.current, length)) {
+        credit.current--
+        cars.current.push(newCar(slot, Math.random))
+      }
+    } else {
+      const arrival = admit(credit.current, slot === undefined ? 0 : e.rps, dt, cars.current, Math.random, length)
+      credit.current = arrival.credit
+      if (arrival.leave && slot !== undefined) cars.current.push(newCar(slot, Math.random))
+    }
     const steps = Math.ceil(dt * 60) // small steps keep the car-following stable
     for (let k = 0; k < steps; k++) {
-      const r = stepCars(cars.current, dt / steps, now, trips.trip, e.healthy, !!e.errors)
+      const r = stepCars(cars.current, dt / steps, now, trips.trip, e.healthy, !!e.errors, length)
       for (let n = 0; n < r.served.length; n++) deliver(e.to, targets.current, now)
       cars.current = r.cars
     }
@@ -503,7 +551,9 @@ function Traffic({ edge, road, theme, accent, onHover, metric, endpoints }: {
       const trip = car.phase === 'back' ? trips.back : trips.ok
       g.rotation.y = trip.at(car.s, tmp)
       g.position.copy(tmp)
-      g.scale.setScalar(1.15 * Math.max(0.01, Math.min(1, car.s / CAR_GROW, (trip.length - car.s) / CAR_GROW)))
+      g.position.y += STREET_HEIGHT
+      g.scale.setScalar(1.15 * Math.max(e.requests === undefined ? 0.01 : 0.45,
+        Math.min(1, car.s / CAR_GROW, (trip.length - car.s) / CAR_GROW)))
       paints.current[i]?.color.copy(car.fate ? colors[car.fate] : colors.ok)
       if (hazards.current[i]) hazards.current[i]!.visible = !!car.fate && blink
       if (brakes.current[i]) brakes.current[i]!.visible = car.a < -1.5 || (car.v < 0.3 && car.phase !== 'in')
@@ -523,27 +573,36 @@ function Traffic({ edge, road, theme, accent, onHover, metric, endpoints }: {
             e.stopPropagation()
             const car = cars.current.find((c) => c.slot === i)
             onHover({
-              title: `🚗 Request: ${src} → ${dst}`,
+              title: `${lorry ? '🚚 Cross-district request' : '🚗 Request'}: ${src} → ${dst}`,
               lines: metric ? [`${metric.requests} requests in 10 seconds`, `${Math.round(metric.latency_ms)} ms average · ${(metric.error_rate * 100).toFixed(1)}% errors`]
                 : [story(car), `${live.current.rps} requests/second on this road.`],
               ...at(e),
             })
           }}
           onPointerOut={() => onHover(null)}>
-          <mesh position={[0, 0.3, 0]} castShadow><boxGeometry args={[1.1, 0.35, 0.6]} /><meshStandardMaterial ref={(m) => { paints.current[i] = m }} color={accent} /></mesh>
-          <mesh position={[-0.1, 0.6, 0]}><boxGeometry args={[0.6, 0.3, 0.52]} /><meshStandardMaterial color={night ? '#0f172a' : '#e2e8f0'} /></mesh>
-          {[-0.32, 0.32].map((x) => <mesh key={x} position={[x, 0.13, 0]}><boxGeometry args={[0.26, 0.26, 0.66]} /><meshStandardMaterial color="#111827" /></mesh>)}
-          {night && [-0.18, 0.18].map((z) => (
-            <mesh key={z} position={[0.56, 0.32, z]}><boxGeometry args={[0.04, 0.1, 0.12]} /><meshBasicMaterial color="#fef9c3" toneMapped={false} /></mesh>
+          {lorry ? <>
+            <mesh position={[-0.43, 0.86, 0]} castShadow><boxGeometry args={[1.94, 1.28, 1.02]} /><meshStandardMaterial ref={(m) => { paints.current[i] = m }} color={accent} /></mesh>
+            <mesh position={[1, 0.65, 0]} castShadow><boxGeometry args={[0.8, 0.9, 0.94]} /><meshStandardMaterial color={night ? '#a8b8ce' : '#f1f5f9'} /></mesh>
+            <mesh position={[1.41, 0.89, 0]}><boxGeometry args={[0.025, 0.25, 0.75]} /><meshStandardMaterial color="#26354c" /></mesh>
+            <mesh position={[0, 0.27, 0]}><boxGeometry args={[2.76, 0.15, 0.9]} /><meshStandardMaterial color="#26354c" /></mesh>
+          </> : <>
+            <mesh position={[0, 0.3, 0]} castShadow><boxGeometry args={[1.1, 0.35, 0.6]} /><meshStandardMaterial ref={(m) => { paints.current[i] = m }} color={accent} /></mesh>
+            <mesh position={[-0.1, 0.6, 0]}><boxGeometry args={[0.6, 0.3, 0.52]} /><meshStandardMaterial color={night ? '#0f172a' : '#e2e8f0'} /></mesh>
+          </>}
+          {(lorry ? [-0.98, -0.62, 1.02] : [-0.32, 0.32]).map((x) => (
+            <mesh key={x} position={[x, lorry ? 0.17 : 0.13, 0]}><boxGeometry args={lorry ? [0.34, 0.34, 1.08] : [0.26, 0.26, 0.66]} /><meshStandardMaterial color="#111827" /></mesh>
+          ))}
+          {night && (lorry ? [-0.36, 0.36] : [-0.18, 0.18]).map((z) => (
+            <mesh key={z} position={[lorry ? LORRY_LENGTH / 2 : 0.56, 0.32, z]}><boxGeometry args={[0.04, 0.1, 0.12]} /><meshBasicMaterial color="#fef9c3" toneMapped={false} /></mesh>
           ))}
           <group ref={(g) => { brakes.current[i] = g }} visible={false}>
-            {[-0.22, 0.22].map((z) => (
-              <mesh key={z} position={[-0.56, 0.22, z]}><boxGeometry args={[0.05, 0.08, 0.12]} /><meshBasicMaterial color="#dc2626" toneMapped={false} /></mesh>
+            {(lorry ? [-0.39, 0.39] : [-0.22, 0.22]).map((z) => (
+              <mesh key={z} position={[lorry ? -LORRY_LENGTH / 2 : -0.56, lorry ? 0.32 : 0.22, z]}><boxGeometry args={[0.05, 0.08, 0.12]} /><meshBasicMaterial color="#dc2626" toneMapped={false} /></mesh>
             ))}
           </group>
           <group ref={(g) => { hazards.current[i] = g }} visible={false}>
-            {[-0.22, 0.22].map((z) => (
-              <mesh key={z} position={[-0.56, 0.35, z]}><boxGeometry args={[0.06, 0.12, 0.14]} /><meshBasicMaterial color="#fb923c" toneMapped={false} /></mesh>
+            {(lorry ? [-0.39, 0.39] : [-0.22, 0.22]).map((z) => (
+              <mesh key={z} position={[lorry ? -LORRY_LENGTH / 2 : -0.56, lorry ? 0.46 : 0.35, z]}><boxGeometry args={[0.06, 0.12, 0.14]} /><meshBasicMaterial color="#fb923c" toneMapped={false} /></mesh>
             ))}
           </group>
         </group>
@@ -757,6 +816,8 @@ function CameraRig({ focus, layout, homeTick }: { focus: THREE.Vector3 | null; l
 
 // ---------- the City ----------
 
+const callKey = ({ from, to }: Pick<Edge, 'from' | 'to'>) => `${from}>${to}`
+
 export function City({ cluster, selected, onSelect, powerGrid, theme, onHover, states, homeTick, serviceMetrics, routeMetrics, replay }: {
   serviceMetrics: Record<string, ServiceMetrics>; routeMetrics: Record<string, RouteMetrics>; replay: boolean
   cluster: ClusterState; selected: string | null; onSelect: (key: string | null) => void
@@ -768,32 +829,45 @@ export function City({ cluster, selected, onSelect, powerGrid, theme, onHover, s
   const nodes = all.filter((o) => o.kind === 'Node').sort((a, b) => a.metadata.name.localeCompare(b.metadata.name))
   const nodeColors = Object.fromEntries(nodes.map((n, i) => [n.metadata.name, NODE_COLORS[i % NODE_COLORS.length]]))
   // Keyed on names and from→to pairs only: failures change rps/health, and the city must not rearrange.
-  const layoutKey = [deployments.map(keyOf).sort(), nodes.map((n) => n.metadata.name), cluster.edges.map((e) => `${e.from}>${e.to}`).sort()].join('|')
-  const { layout, roads, obstacles, lamps, keep } = useMemo(() => {
-    const calls = cluster.edges.map((e) => ({ from: e.from, to: e.to }))
+  const isLive = !!cluster.context
+  const visibleTraffic = isLive ? cluster.demoEdges ?? [] : cluster.edges
+  const keyForRoad = (edge: Pick<Edge, 'from' | 'to'>) => isLive ? streetKey(edge.from, edge.to) : callKey(edge)
+  const layoutKey = [cluster.context, deployments.map(keyOf).sort(), nodes.map((n) => n.metadata.name),
+    visibleTraffic.map(callKey)].join('|')
+  const { layout, roads, obstacles, lamps, keep, travelPaths, roundabouts, sections, highways } = useMemo(() => {
+    const calls = visibleTraffic.map((e) => ({ from: e.from, to: e.to }))
     const layout = layoutCity(deployments.map((d) => ({ namespace: d.metadata.namespace!, name: d.metadata.name })),
-      nodes.map((n) => n.metadata.name), calls, calls.filter((c) => c.from.startsWith('ingress:')))
-    const roads = buildRoads(layout, calls)
-    if (import.meta.env.DEV) checkRoads(layout, roads)
+      nodes.map((n) => n.metadata.name), isLive ? [] : calls, calls.filter((c) => c.from.startsWith('ingress:')), isLive)
+    const liveNetwork = isLive ? buildLiveRoads(layout, calls) : null
+    const roads = liveNetwork?.roads ?? buildRoads(layout, calls)
+    const routes = liveNetwork?.routes ?? roads
+    if (import.meta.env.DEV && !isLive) checkRoads(layout, roads)
+    const roundabouts = liveNetwork?.roundabouts ?? new Map()
+    const sections = Object.fromEntries(Object.entries(roads).map(([id, road]) => [id, roadSections(road, roundabouts)]))
+    const travelPaths = Object.fromEntries(calls.filter((e) => routes[keyForRoad(e)]).map((e) => {
+      const road = routes[keyForRoad(e)]
+      return [`${e.from}>${e.to}`, isLive && e.from > e.to ? [...road].reverse() : road]
+    }))
     const lots = [...Object.values(layout.lots), ...Object.values(layout.stations), ...Object.values(layout.gates), ...(layout.hall ? [layout.hall] : [])]
     const clear = (p: THREE.Vector3) => lots.every((l) => Math.abs(p.x - l.center.x) > BUILDING.halfW + 1 ||
       p.z < l.center.z + BUILDING.back - 1 || p.z > l.center.z + BUILDING.front + 1)
     // Lamps every ~9 units on the left kerb of each Road, wherever that is clear of Buildings.
-    const lamps = Object.values(roads).flatMap((r) => {
+    const lamps = Object.values(sections).flat().flatMap((r) => {
       const kerb = new Path(offsetPath(r, -(ROAD_W / 2 + KERB + 0.3)))
       return Array.from({ length: Math.floor(kerb.length / 9) }, (_, i) => {
         const v = new THREE.Vector3()
         kerb.at(4.5 + i * 9, v)
         return v
       })
-    }).filter(clear)
+    }).filter((p) => clear(p) && [...roundabouts.values()].every((center) => center.distanceTo(p) > ROUNDABOUT_KERB + 1))
     // What Scenery must keep clear of: Buildings at full size, Power Stations, Roads.
     const obstacles = [
       ...Object.values(layout.lots).map((l) => ({ x: l.center.x, z: l.center.z - 0.4, rad: 9.5 })),
       ...Object.values(layout.stations).map((l) => ({ x: l.center.x, z: l.center.z, rad: 8 })),
       ...Object.values(layout.gates).map((l) => ({ x: l.center.x, z: l.center.z, rad: 7 })),
       ...(layout.hall ? [{ x: layout.hall.center.x, z: layout.hall.center.z, rad: 11 }] : []),
-      ...Object.values(roads).flatMap((r) => r.filter((_, i) => i % 2 === 0).map((p) => ({ x: p.x, z: p.z, rad: ROAD_W / 2 + KERB + 1.2 }))),
+      ...Object.values(roads).flatMap((r) => r.map((p) => ({ x: p.x, z: p.z, rad: ROAD_W / 2 + KERB + 1.2 }))),
+      ...[...roundabouts.values()].map((p) => ({ x: p.x, z: p.z, rad: ROUNDABOUT_KERB + 1 })),
     ]
     // What Scenery must never hide from the isometric camera: the Buildings' rooms inside each District
     // (its edge padding may be hidden), City Hall, Power Stations and City Gates.
@@ -802,9 +876,23 @@ export function City({ cluster, selected, onSelect, powerGrid, theme, onHover, s
       ...layout.districts.map((d) => ({ x0: d.x0 + 3, x1: d.x1 - 3, z0: d.z0 + 3, z1: d.z1 - 3 })),
       ...lots.filter((l) => !layout.lots[l.key]).map((l) => box(l.center, 8)),
     ]
-    return { layout, roads, obstacles, lamps, keep }
+    return { layout, roads, obstacles, lamps, keep, travelPaths, roundabouts, sections, highways: liveNetwork?.highways }
   }, [layoutKey]) // eslint-disable-line react-hooks/exhaustive-deps
-  const edges = cluster.edges.filter((e) => roads[`${e.from}>${e.to}`])
+  const edges = visibleTraffic.filter((e) => travelPaths[callKey(e)])
+  const streets = new Map<string, Edge>()
+  const connectedLots = new Set(Object.keys(roads).flatMap((key) => key.split('>')).filter((key) => layout.lots[key]))
+  for (const edge of edges) {
+    const key = keyForRoad(edge)
+    if (!roads[key]) continue
+    const previous = streets.get(key)
+    streets.set(key, previous ? { ...edge, rps: edge.rps + previous.rps,
+      healthy: edge.healthy && previous.healthy, errors: edge.errors || previous.errors } : edge)
+  }
+  for (const key of Object.keys(roads)) {
+    if (streets.has(key)) continue
+    const [from, to] = key.split('>')
+    streets.set(key, { from, to, healthy: true, rps: 0 })
+  }
   const focus = !selected ? null : selected === 'city-hall' ? layout.hall?.center ?? null
     : selected.startsWith('node:') ? layout.stations[selected.slice(5)]?.center ?? null : layout.lots[selected]?.center ?? null
   const podsOn = (node: string) => pods.filter((p) => p.spec.nodeName === node && !p.metadata.deletionTimestamp).length
@@ -834,8 +922,12 @@ export function City({ cluster, selected, onSelect, powerGrid, theme, onHover, s
     return from && to ? [from, to] : null
   }, [layout, objects])
   // A Service's endpoints are its ready Pods: the only ones that receive requests.
-  const endpoints = (service: string) => pods.filter((p) => `${p.metadata.namespace}/${p.metadata.labels?.app}` === service &&
-    !p.metadata.deletionTimestamp && p.status?.containerStatuses?.[0]?.ready).map((p) => p.metadata.uid)
+  const deploymentsByKey = new Map(deployments.map((dep) => [keyOf(dep), dep]))
+  const endpoints = (service: string) => {
+    const dep = deploymentsByKey.get(service)
+    return dep ? podsOf(dep, pods).filter((p) =>
+      !p.metadata.deletionTimestamp && p.status?.containerStatuses?.[0]?.ready).map((p) => p.metadata.uid) : []
+  }
 
   return (
     <Canvas shadows orthographic camera={{ position: ISO.clone().multiplyScalar(CAM_DIST).toArray(), zoom: 5, near: 1, far: 1200 }}
@@ -851,11 +943,12 @@ export function City({ cluster, selected, onSelect, powerGrid, theme, onHover, s
       <Ground layout={layout} theme={theme} />
       {ready && <Scenery core={layout.core} districts={layout.districts} obstacles={obstacles} keep={keep} theme={theme} />}
       {ready && <Lamps points={lamps} theme={theme} />}
-      {edges.map((e) => (
-        <Road key={`${e.from}>${e.to}`} pts={roads[`${e.from}>${e.to}`]} edge={e} theme={theme}
+      {[...roundabouts].map(([key, center]) => <Roundabout key={key} center={center} theme={theme} />)}
+      {[...streets].flatMap(([key, e]) => sections[key].map((part, index) => (
+        <Road key={`${key}:${index}`} pts={part} edge={e} theme={theme} twoWay={isLive} highway={highways?.has(key) ?? false}
           measured={routeMetrics[routeKey(e.from, e.to)] ? trafficColor(routeMetrics[routeKey(e.from, e.to)]) : undefined}
           emphasis={!selected ? 'normal' : e.from === selected || e.to === selected ? 'strong' : 'dim'} />
-      ))}
+      )))}
       {nodes.map((n) => layout.stations[n.metadata.name] && (
         <PowerStation key={n.metadata.uid} node={n} pos={layout.stations[n.metadata.name].center} used={podsOn(n.metadata.name)}
           color={nodeColors[n.metadata.name]} theme={theme} onHover={onHover}
@@ -876,6 +969,7 @@ export function City({ cluster, selected, onSelect, powerGrid, theme, onHover, s
         if (!lot) return null
         return (
           <Building key={dep.metadata.uid} dep={dep} info={landmarkFor(dep.metadata.name)} pos={lot.center}
+            driveway={isLive && connectedLots.has(key)}
             selected={selected === key} onSelect={() => onSelect(key)} powerGrid={powerGrid} nodeColors={nodeColors}
             theme={theme} onHover={onHover} state={states[key]} metric={serviceMetrics[key]}
             pods={podsOf(dep, pods)}
@@ -884,9 +978,12 @@ export function City({ cluster, selected, onSelect, powerGrid, theme, onHover, s
       })}
       {edges.map((e) => {
         const metric = routeMetrics[routeKey(e.from, e.to)]
-        if (replay && !metric) return null // replaying history: only routes with recorded traffic get Cars
-        const edge = metric ? { ...e, rps: metric.rps, healthy: metric.error_rate < 0.1 } : e
-        return <Traffic key={`${e.from}>${e.to}`} edge={edge} road={roads[`${e.from}>${e.to}`]} theme={theme} onHover={onHover}
+        if (!isLive && replay && !metric) return null // replaying history: only routes with recorded traffic get Cars
+        const edge = metric && !isLive
+          ? { ...e, requests: undefined, rps: metric.rps, healthy: metric.error_rate < 0.1 } : e
+        return <Traffic key={`${cluster.demoRevision ?? 0}:${callKey(e)}`} edge={edge} road={travelPaths[callKey(e)]} theme={theme} onHover={onHover}
+          lorry={isLive && e.from.split('/', 1)[0] !== e.to.split('/', 1)[0]}
+          roundabouts={roundabouts}
           accent={metric ? trafficColor(metric) : e.from.startsWith('ingress:') ? CUSTOMER : landmarkFor(nameOf(e.from)).accent}
           metric={metric} endpoints={endpoints(e.to)} />
       })}

@@ -1,0 +1,41 @@
+PASS: checkout, saved order f34df24f-4bfe-4dbe-b429-c064a69423c0, idempotent replay and basket clear. Request d7c4e396-a641-4bde-9fa5-5e327a37c49b
+Guest session: f68d78a2-e669-4717-b7e9-cee19dce2a69
+deployment.apps/checkout-api scaled
+Waiting for deployment "checkout-api" rollout to finish: 1 of 3 updated replicas are available...
+Waiting for deployment "checkout-api" rollout to finish: 2 of 3 updated replicas are available...
+deployment "checkout-api" successfully rolled out
+NAME                            READY   STATUS    RESTARTS   AGE     IP            NODE              NOMINATED NODE   READINESS GATES
+checkout-api-68694fd795-f4dnl   1/1     Running   0          6s      10.244.1.32   minishop-worker   <none>           <none>
+checkout-api-68694fd795-ps2zp   1/1     Running   0          3m28s   10.244.1.24   minishop-worker   <none>           <none>
+checkout-api-68694fd795-xp77x   1/1     Running   0          6s      10.244.1.31   minishop-worker   <none>           <none>
+Observed serving pods:
+  checkout-api-68694fd795-f4dnl
+  checkout-api-68694fd795-ps2zp
+  checkout-api-68694fd795-xp77x
+pod "checkout-api-68694fd795-f4dnl" deleted from minishop namespace
+Deleted checkout-api-68694fd795-f4dnl. Watch its replacement: kubectl --context kind-minishop -n minishop get pods -l app=checkout-api -w
+Waiting for deployment "checkout-api" rollout to finish: 2 of 3 updated replicas are available...
+deployment "checkout-api" successfully rolled out
+PASS: checkout, saved order 14e0a753-2dc4-4ceb-8c39-05e816569010, idempotent replay and basket clear. Request 7e757acf-9b15-43ee-adc2-b225d7771cdc
+Guest session: 70ac0b9c-cf3f-4bf0-9db3-fd994018af9a
+deployment.apps/payment-api env updated
+Waiting for deployment "payment-api" rollout to finish: 1 old replicas are pending termination...
+Waiting for deployment "payment-api" rollout to finish: 1 old replicas are pending termination...
+deployment "payment-api" successfully rolled out
+PASS: real payment decline; no order; basket retained. Request 09ed7b0b-9a5f-4b96-a7d7-410f3faa75ee
+Guest session: 47dd7112-e6f8-419d-93e6-59812e39594f
+deployment.apps/payment-api env updated
+Waiting for deployment "payment-api" rollout to finish: 1 old replicas are pending termination...
+Waiting for deployment "payment-api" rollout to finish: 1 old replicas are pending termination...
+deployment "payment-api" successfully rolled out
+PASS: checkout, saved order 6bcbb687-bd9e-4fde-8e17-43be14242aaa, idempotent replay and basket clear. Request eff8e755-94af-4028-b006-d72d17e94c06
+Guest session: e36bf8cd-90c6-43ac-9dcb-f48020048017
+PASS: real cluster checkout, three serving replicas, pod replacement, payment failure and recovery.
+deployment "payment-api" successfully rolled out
+deployment.apps/checkout-api scaled
+deployment "checkout-api" successfully rolled out
+NAME                            READY   STATUS        RESTARTS   AGE     IP            NODE              NOMINATED NODE   READINESS GATES
+checkout-api-68694fd795-l84gl   1/1     Terminating   0          18s     10.244.1.33   minishop-worker   <none>           <none>
+checkout-api-68694fd795-ps2zp   1/1     Running       0          3m49s   10.244.1.24   minishop-worker   <none>           <none>
+checkout-api-68694fd795-xp77x   1/1     Terminating   0          27s     10.244.1.31   minishop-worker   <none>           <none>
+Healthy configuration restored. Persisted data and guest sessions are retained.

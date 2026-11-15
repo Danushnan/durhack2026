@@ -5,9 +5,12 @@ import subprocess
 import time
 from contextlib import asynccontextmanager
 from pathlib import Path
+from random import shuffle
+from typing import Literal
 
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
 from live import discover
@@ -19,22 +22,28 @@ sim = demo_cluster()
 live = None
 logger = logging.getLogger(__name__)
 clients: set[WebSocket] = set()
+shop_origins = [f"http://{host}:{port}" for host in ("localhost", "127.0.0.1") for port in (8080, 18080)]
+
+
+async def broadcast(batch):
+    for ws in list(clients):
+        try:
+            await ws.send_json(batch)
+        except (RuntimeError, WebSocketDisconnect, OSError):
+            clients.discard(ws)
 
 
 async def loop():
     while True:
+        started = time.monotonic()
         try:
             batch = await asyncio.to_thread(live.refresh) if live else sim.tick(time.time())
         except (OSError, subprocess.SubprocessError, ValueError):
             logger.warning("Could not refresh Kubernetes context %s", live.context)
             batch = []
         if batch:
-            for ws in list(clients):
-                try:
-                    await ws.send_json(batch)
-                except Exception:
-                    clients.discard(ws)
-        await asyncio.sleep(2 if live else TICK_SECONDS)
+            await broadcast(batch)
+        await asyncio.sleep(max(0, 1 - (time.monotonic() - started)) if live else TICK_SECONDS)
 
 
 @asynccontextmanager
@@ -54,7 +63,7 @@ async def lifespan(app):
     if live is None:
         sim.tick(time.time())
     dsn = os.environ.get("TIGERDATA_DATABASE_URL")
-    app.state.telemetry = TigerTelemetry(dsn, sim) if dsn and live is None else None
+    app.state.telemetry = TigerTelemetry(dsn, sim, live=live) if dsn else None
     task = asyncio.create_task(loop())
     ingestion = asyncio.create_task(app.state.telemetry.ingest()) if app.state.telemetry is not None else None
     try:
@@ -67,6 +76,7 @@ async def lifespan(app):
 
 app = FastAPI(title="Kuebec Cluster", lifespan=lifespan)
 app.include_router(router)
+app.add_middleware(CORSMiddleware, allow_origins=shop_origins, allow_methods=["POST"], allow_headers=["Content-Type"])
 
 
 @app.websocket("/ws")
@@ -79,6 +89,65 @@ async def watch(ws: WebSocket):
             await ws.receive_text()  # we never expect messages; this just detects disconnect
     except WebSocketDisconnect:
         clients.discard(ws)
+
+
+class DemoTraffic(BaseModel):
+    count: Literal[1, 5, 100]
+    cross_district: bool
+
+
+def demo_pairs(workloads, cross_district, count):
+    """Take one destination per caller before repeating a caller."""
+    candidates = {}
+    for source, namespace in workloads:
+        targets = [target for target, district in workloads
+                   if target != source and (district != namespace) == cross_district]
+        if targets:
+            shuffle(targets)
+            candidates[source] = targets
+    if not candidates:
+        return []
+    sources = list(candidates)
+    shuffle(sources)
+    pairs = []
+    while len(pairs) < count:
+        for source in sources:
+            pairs.append((source, candidates[source].pop()))
+            if len(pairs) == count:
+                break
+        sources = [source for source in sources if candidates[source]]
+        if not sources:
+            return (pairs * count)[:count]
+    return pairs
+
+
+def require_demo_city(request: Request):
+    if request.headers.get("origin") not in shop_origins:
+        raise HTTPException(403, "Open the local MiniShop storefront to send demo traffic.")
+    if not live or not clients:
+        raise HTTPException(409, "Open the live Kuebec city first.")
+
+
+@app.post("/api/demo/traffic")
+async def spawn_demo_traffic(body: DemoTraffic, request: Request):
+    require_demo_city(request)
+    workloads = [(f'{obj["metadata"]["namespace"]}/{obj["metadata"]["name"]}', obj["metadata"]["namespace"])
+                 for obj in live.objects.values() if obj["kind"] == "Deployment"]
+    pairs = demo_pairs(workloads, body.cross_district, body.count)
+    if not pairs:
+        detail = "Two districts with buildings are needed." if body.cross_district else "A district needs at least two buildings."
+        raise HTTPException(409, detail)
+    await broadcast([{"type": "DEMO_TRAFFIC", "edges": [
+        {"from": source, "to": target, "rps": 0, "healthy": True} for source, target in pairs
+    ]}])
+    return {"sent": len(pairs)}
+
+
+@app.post("/api/demo/traffic/reset")
+async def reset_demo_traffic(request: Request):
+    require_demo_city(request)
+    await broadcast([{"type": "DEMO_RESET"}])
+    return {"ok": True}
 
 
 def require_simulator():

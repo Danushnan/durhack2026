@@ -1,0 +1,10 @@
+INFO:     127.0.0.1:53372 - "POST /api/demo/traffic HTTP/1.1" 200 OK
+INFO:     127.0.0.1:53374 - "POST /api/demo/traffic/reset HTTP/1.1" 200 OK
+INFO:     127.0.0.1:53415 - "POST /api/demo/traffic HTTP/1.1" 200 OK
+INFO:     127.0.0.1:53417 - "POST /api/demo/traffic/reset HTTP/1.1" 200 OK
+INFO:     127.0.0.1:61903 - "GET /api/telemetry HTTP/1.1" 200 OK
+INFO:     127.0.0.1:60622 - "GET /api/telemetry HTTP/1.1" 200 OK
+INFO:     127.0.0.1:49679 - "GET /api/telemetry HTTP/1.1" 200 OK
+INFO:     127.0.0.1:56714 - "GET /api/telemetry HTTP/1.1" 200 OK
+INFO:     127.0.0.1:61596 - "GET /api/telemetry HTTP/1.1" 200 OK
+INFO:     127.0.0.1:62960 - "GET /api/telemetry HTTP/1.1" 200 OK

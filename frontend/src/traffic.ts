@@ -65,7 +65,8 @@ export function newCar(slot: number, rand: () => number): CarAgent {
 }
 
 /** The caller's exit is clear enough for another Car to pull out. */
-export const exitClear = (cars: CarAgent[]) => !cars.some((c) => c.phase === 'out' && c.s < DRIVE.length + DRIVE.minGap)
+export const exitClear = (cars: CarAgent[], length = DRIVE.length) =>
+  !cars.some((c) => c.phase === 'out' && c.s < length + DRIVE.minGap)
 
 // shortcut: one Car stands for ~11 requests. A caller's exit lets out ~1.2 Cars/s, so the demo's 8 req/s at the
 // City Gate fills ~60% of it and rush hour (24 req/s) saturates it; rescale if request rates grow much larger.
@@ -75,9 +76,9 @@ export const CARS_PER_REQUEST = 0.09
  * Requests waiting to leave as Cars accrue at the request rate; up to 3 wait while the caller's exit is
  * blocked (that backlog is a full Road). Returns the new backlog and whether a Car leaves now (jittered spacing).
  */
-export function admit(credit: number, rps: number, dt: number, cars: CarAgent[], rand: () => number) {
+export function admit(credit: number, rps: number, dt: number, cars: CarAgent[], rand: () => number, length = DRIVE.length) {
   credit = Math.min(3, credit + rps * CARS_PER_REQUEST * dt)
-  const leave = credit >= 1 && exitClear(cars)
+  const leave = credit >= 1 && exitClear(cars, length)
   return { credit: leave ? credit - (0.6 + 0.8 * rand()) : credit, leave }
 }
 
@@ -85,8 +86,7 @@ export function admit(credit: number, rps: number, dt: number, cars: CarAgent[],
  * Advance every Car by dt. `healthy`/`errors` describe the callee right now. Returns the Cars that
  * finished their trip this step (served ones were delivered to the callee) and the Cars still driving.
  */
-export function stepCars(cars: CarAgent[], dt: number, now: number, trip: Trip, healthy: boolean, errors: boolean) {
-  const len = DRIVE.length
+export function stepCars(cars: CarAgent[], dt: number, now: number, trip: Trip, healthy: boolean, errors: boolean, len = DRIVE.length) {
   // Outbound lane, front to back: everything not yet turned back, including Cars waiting at the door.
   let ahead: { s: number; v: number } | null = null
   for (const c of cars.filter((c) => c.phase !== 'back').sort((a, b) => b.s - a.s)) {
