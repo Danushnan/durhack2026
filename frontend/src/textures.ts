@@ -25,5 +25,5 @@ export function textTexture(lines: TextLine[], opts: { bg: string; border?: stri
   const texture = new THREE.CanvasTexture(c)
   texture.colorSpace = THREE.SRGBColorSpace
   texture.anisotropy = 4
-  return { texture, aspect: c.width / c.height }
+  return { texture, aspect: c.width / c.height, height: c.height }
 }
