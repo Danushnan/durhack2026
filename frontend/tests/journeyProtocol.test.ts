@@ -12,3 +12,15 @@ test('accepts an explicitly paired action with distinct request IDs and reviewed
   assert.equal(validAction({...a, mutation: 'invented-success'}), false)
   assert.equal(validAction(null), false)
 })
+
+test('Checkout uses an independent request ID, strips unrelated fields, and recognises its pending state', async () => {
+  const {actionBody,actionPending}=await import('../src/journeyProtocol.ts')
+  const a={kind:'checkout' as const,action_id:crypto.randomUUID(),request_id:crypto.randomUUID(),checkout:'pending'}
+  assert.ok(validAction(a));assert.ok(actionPending(a))
+  assert.equal(validAction({...a,mutation_id:crypto.randomUUID()}),false)
+  assert.equal(validAction({...a,basket_cleared:true}),false)
+  assert.equal(validAction({...a,checkout:'succeeded',basket_cleared:true}),true)
+  assert.equal(validAction({...a,kind:'unsupported'}),false)
+  assert.deepEqual(actionBody({...a,session:'private',idempotency_key:'private'} as typeof a),a)
+  assert.equal(actionPending({...a,checkout:'succeeded'}),false)
+})

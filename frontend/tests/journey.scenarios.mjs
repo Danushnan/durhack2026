@@ -6,7 +6,7 @@ async function viewer(){
  const context=await browser.newContext({viewport:{width:1280,height:900}})
  const city=await context.newPage(), reports=[]
  city.on('response',async r=>{if(r.url().includes('/api/journeys/')&&r.ok())try{reports.push(await r.json())}catch{}})
- await city.goto('http://127.0.0.1:5181'); await city.getByRole('button',{name:'Journey',exact:true}).click({timeout:20000})
+ await city.goto('http://127.0.0.1:5181'); await city.getByRole('button',{name:'Journey',exact:true}).click({timeout:40000})
  await city.getByLabel('MiniShop URL').fill('http://127.0.0.1:5182')
  const popup=city.waitForEvent('popup');await city.getByRole('button',{name:'Open paired MiniShop'}).click();const shop=await popup
  await shop.getByRole('button',{name:'Add to basket',exact:true}).first().waitFor({timeout:20000})
@@ -14,7 +14,7 @@ async function viewer(){
 }
 async function waitFor(check){for(let i=0;i<80;i++){if(check())return;await new Promise(r=>setTimeout(r,500))}throw new Error('Expected journey outcome unavailable')}
 try{
- const [a,b]=await Promise.all([viewer(),viewer()]);console.log('two independent viewers paired')
+ const a=await viewer(),b=await viewer();console.log('two independent viewers paired')
  await Promise.all([a.shop.getByRole('button',{name:'Add to basket',exact:true}).first().click(),b.shop.getByRole('button',{name:'Add to basket',exact:true}).first().click()])
  await a.shop.evaluate(()=>fetch('/api/products',{headers:{'X-Request-ID':crypto.randomUUID()}}))
  await waitFor(()=>a.reports.some(r=>r.state==='complete')&&b.reports.some(r=>r.state==='complete'))

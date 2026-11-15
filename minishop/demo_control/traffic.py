@@ -11,12 +11,12 @@ class Traffic:
         self.refusal_target = refusal_target
         self.show_refusal = show_refusal
         self.task = None
-        self.state = {"running": False, "attempted": 0, "failed": 0, "checkouts": 0, "last_status": None, "error": None}
+        self.state = {"running": False, "attempted": 0, "failed": 0, "refused": 0, "checkouts": 0, "last_status": None, "error": None}
 
     def start(self, rps=1.0, requests=100):
         if self.task and not self.task.done():
             return False
-        self.state = {"running": True, "attempted": 0, "failed": 0, "checkouts": 0,
+        self.state = {"running": True, "attempted": 0, "failed": 0, "refused": 0, "checkouts": 0,
                       "last_status": None, "error": None, "limit": requests, "rps": rps}
         self.task = asyncio.create_task(self.run(rps, requests))
         return True
@@ -66,13 +66,14 @@ class Traffic:
                             basket = True
                         self.state['error'] = None
                     except (httpx.HTTPError, ValueError, KeyError, TypeError) as exc:
+                        self.state['failed'] += 1
                         self.state['error'] = f'{type(exc).__name__}: storefront request failed'
                         if self.refusal_target and (isinstance(exc, httpx.RequestError) or
                                 isinstance(exc, httpx.HTTPStatusError) and exc.response.status_code in (502, 503, 504)):
                             try:
                                 route = await self.refusal_target(path)
                                 if route:
-                                    self.state['failed'] += 1
+                                    self.state['refused'] += 1
                                     if self.show_refusal:
                                         await self.show_refusal(*route)
                             except (RuntimeError, httpx.HTTPError, ValueError):

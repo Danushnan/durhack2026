@@ -87,7 +87,8 @@ def test_traffic_real_paths_idempotency_counts_and_stop(monkeypatch):
         assert worker.task is original
         await worker.task
         assert len(paths) == worker.state['attempted'] == 5
-        assert worker.state['failed'] == 0
+        assert worker.state['failed'] == 1
+        assert worker.state['refused'] == 0
         assert worker.state['checkouts'] == 1
         assert worker.state['running'] is False
         assert any('/carts/' in str(p.url) and p.method == 'POST' for p in paths)
@@ -102,7 +103,7 @@ def test_traffic_real_paths_idempotency_counts_and_stop(monkeypatch):
     asyncio.run(run())
 
 
-def test_traffic_counts_and_displays_only_confirmed_pod_refusals(monkeypatch):
+def test_traffic_counts_all_failures_but_displays_only_confirmed_pod_refusals(monkeypatch):
     async def run():
         real_client = httpx.AsyncClient
         replies = iter([402, 502, 503])
@@ -114,7 +115,8 @@ def test_traffic_counts_and_displays_only_confirmed_pod_refusals(monkeypatch):
         worker = Traffic('http://127.0.0.1:8080', verify, display)
         worker.start(1000, 3)
         await worker.task
-        assert worker.state['failed'] == 1
+        assert worker.state['failed'] == 3
+        assert worker.state['refused'] == 1
         assert verify.await_count == 2
         display.assert_awaited_once_with(*route)
     asyncio.run(run())
@@ -185,6 +187,7 @@ def test_generator_against_real_minishop_http_services(stack):
     import threading
     from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
     urls = stack['urls']
+    original_checkout = urls['checkout']
     requests = []
     class Forward(BaseHTTPRequestHandler):
         def log_message(self, *args): pass
@@ -209,6 +212,7 @@ def test_generator_against_real_minishop_http_services(stack):
         await worker.task
         assert worker.state['attempted'] == 5
         assert worker.state['failed'] == 0
+        assert worker.state['refused'] == 0
         assert any('/checkout/' in path and code == 200 for _,path,code in requests)
         # Swap to the existing rejecting real checkout process, not a fake HTTP 402.
         urls['checkout'] = urls['failed-checkout']
@@ -218,6 +222,7 @@ def test_generator_against_real_minishop_http_services(stack):
         assert any('/checkout/' in path and code == 402 for _,path,code in requests)
     try: asyncio.run(run())
     finally:
+        urls['checkout'] = original_checkout
         server.shutdown(); server.server_close(); thread.join(timeout=2)
 
 

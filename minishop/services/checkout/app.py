@@ -56,7 +56,8 @@ async def place_order(session_id, idempotency_key):
                 row = await (await conn.execute("SELECT * FROM orders WHERE session_id=%s AND idempotency_key=%s",
                                                (session_id, idempotency_key))).fetchone()
                 if row:
-                    result = await order_view(conn, row)
+                    async with measured("checkout-api", db_target(), "orders.reuse"):
+                        result = await order_view(conn, row)
                 else:
                     token = uuid4()
                     snapshot = require_ok(await call(app, "POST", f"{CART_URL}/internal/carts/{session_id}/snapshot",
@@ -81,15 +82,16 @@ async def place_order(session_id, idempotency_key):
                     paid = require_ok(payment, "Payment service unavailable. Your basket is saved; please retry.")
                     if paid.get("status") != "simulated_paid" or not paid.get("simulated"):
                         raise HTTPException(502, "Unexpected payment response")
-                    row = await (await conn.execute("""
-                        INSERT INTO orders (session_id,idempotency_key,total_cents,payment_reference,cart_version,cart_token)
-                        VALUES (%s,%s,%s,%s,%s,%s) RETURNING *
-                    """, (session_id, idempotency_key, total, paid["transaction_id"], snapshot["version"], token))).fetchone()
-                    async with conn.cursor() as cursor:
-                        await cursor.executemany("""INSERT INTO order_items
-                            (order_id,product_id,name,quantity,unit_price_cents) VALUES (%s,%s,%s,%s,%s)""",
-                                                 [(row["id"], *line) for line in lines])
-                    result = await order_view(conn, row)
+                    async with measured("checkout-api", db_target(), "orders.persist"):
+                        row = await (await conn.execute("""
+                            INSERT INTO orders (session_id,idempotency_key,total_cents,payment_reference,cart_version,cart_token)
+                            VALUES (%s,%s,%s,%s,%s,%s) RETURNING *
+                        """, (session_id, idempotency_key, total, paid["transaction_id"], snapshot["version"], token))).fetchone()
+                        async with conn.cursor() as cursor:
+                            await cursor.executemany("""INSERT INTO order_items
+                                (order_id,product_id,name,quantity,unit_price_cents) VALUES (%s,%s,%s,%s,%s)""",
+                                                     [(row["id"], *line) for line in lines])
+                        result = await order_view(conn, row)
             # The connection context has committed both the order and all items.
             committed = True
         try:

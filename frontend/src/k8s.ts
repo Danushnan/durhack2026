@@ -181,7 +181,7 @@ export function useCluster(): ClusterState {
       socket.onerror = () => socket.close()
       socket.onclose = () => {
         if (closed || ws !== socket) return
-        setState((s) => ({ ...s, connected: false }))
+        setState((s) => ({ ...s, connected: false, demoPackets: undefined }))
         retry = window.setTimeout(connect, 1000)
       }
     }

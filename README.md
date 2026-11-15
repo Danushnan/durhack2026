@@ -74,7 +74,7 @@ Live cluster mode is read-only. The demo script below uses the simulator.
    ```
 4. Break and heal things with real `kubectl` and watch the city react within a few seconds:
    ```bash
-   kubectl -n shop scale deploy/payments --replicas=0     # payments DOWN: red Cars; checkout and frontend Impacted, orange Cars
+   kubectl -n shop scale deploy/payments --replicas=0     # payments DOWN: failures burst and return red; inspect HTTP replies versus failed communication
    kubectl -n shop scale deploy/payments --replicas=2     # it heals
    kubectl -n shop delete pod -l app=cart --wait=false    # Pods replaced by the ReplicaSet controller
    kubectl -n shop scale deploy/frontend --replicas=5     # the Building grows, new Units warm up before taking traffic
@@ -93,7 +93,7 @@ logs one JSON line per call (`200` served, `500` answered with an error, `503` r
 3. **Demolish** a Unit → it shuts down, Kubernetes creates a replacement, the scheduler places it. Watch the glowing
    **messengers** fly from **City Hall** (the control plane) and from the Power Stations' kubelets.
 4. **Sabotage** `payments` (the Bank) → its Units crash; Cars to it are refused and turn back **red**; checkout is now
-   **Impacted**, so Cars to checkout wait at its door, queue, and come back **orange** (an error answer).
+   **Impacted**, so Cars to checkout wait at its door, queue, burst, and come back **red** (an HTTP error answer). Both error replies and failed communication use red return vehicles; route details distinguish them. A MiniShop HTTP 402 payment decline is a business outcome, not evidence of a pod outage.
 5. **Release v2** of the Bank → Unit caps change colour one at a time and the Service never drops below 2 ready Units.
    **Release buggy v3** → the rollout stalls with v2 still serving; **Roll back** returns to v2.
 6. Customers (yellow taxis) enter through the **City Gate** (an Ingress). Each delivered request flashes the ready Unit

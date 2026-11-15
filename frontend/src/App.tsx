@@ -1,5 +1,6 @@
+import { DiscoveryActivity } from './DiscoveryActivity'
 import { JourneyPanel, useJourney } from './Journey'
-import { useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { City, type HoverInfo, type RoadFlow, type ServiceState, type ViewMode } from './City'
 import { affected, describeFlow, ERROR_RATE, overview, serviceFlow, SIGNAL, type Signal, signalOf, SLOW_MS } from './health'
 import {
@@ -22,6 +23,7 @@ const DISTRICT_COLORS = ['#22d3ee', '#e879f9', '#bef264', '#fbc08c', '#93a9ff', 
 export default function App() {
   const cluster = useCluster()
   const [selected, setSelected] = useState<string | null>(null)
+  const [connection, setConnection] = useState<{source: string; key: string} | null>(null)
   const [powerGrid, setPowerGrid] = useState(false)
   const [hover, setHover] = useState<HoverInfo | null>(null)
   const [help, setHelp] = useState(false)
@@ -37,10 +39,16 @@ export default function App() {
   const [toast, setToast] = useState<string | null>(null)
   const source = cluster.metrics?.source_id ?? cluster.context
   const journey = useJourney(cluster.metrics?.source_id)
+  const pauseJourneyCamera = useCallback(() => journey.setFollowing(false), [journey.setFollowing])
+  const pickService = useCallback((key: string | null) => {
+    setSelected(key)
+    setConnection(null)
+    if (key) journey.setFollowing(false)
+  }, [journey.setFollowing])
   const previousSource = useRef(source)
   useEffect(() => {
     if (previousSource.current !== undefined && previousSource.current !== source) {
-      setSelected(null); setReplayAt(null); setAnalyticsOpen(false)
+      setSelected(null); setConnection(null); setReplayAt(null); setAnalyticsOpen(false)
     }
     previousSource.current = source
   }, [source])
@@ -105,7 +113,11 @@ export default function App() {
   const miniShopSource = activeDiscovery?.source ??
     (cluster.metrics?.services.some(({ deployment_uid }) => deployment_uid && cluster.objects[deployment_uid])
       ? cluster.metrics.source_id : undefined)
+  const discoveryMode = !!activeDiscovery && !journey.enabled
+  const focusedConnection = discoveryMode && connection && connection.source === miniShopSource && activeDiscovery.roads.has(connection.key) ? connection.key : null
+  const openJourney = () => { setSelected(null); journey.setEnabled(true) }
   const beginDiscovery = () => {
+    setConnection(null)
     if (miniShopSource) setDiscovery(startDiscovery(miniShopSource, Date.now()))
     setHover(null)
   }
@@ -113,12 +125,14 @@ export default function App() {
 
   return (
     <div className={`app ${mode}`}>
-      <City cluster={cluster} selected={selected} onSelect={setSelected} powerGrid={powerGrid} theme={theme}
+      <City cluster={cluster} selected={selected} onSelect={pickService} powerGrid={powerGrid} theme={theme}
         onHover={setHover} states={states} homeTick={homeTick} flows={flows} districtColors={districtColors} replay={simulatorSource && replayAt !== null} mode={view}
+        journeyFollowing={journey.following} onJourneyManualCamera={pauseJourneyCamera} journeySpeed={journey.speed}
         journeyActive={journey.enabled && !!miniShopSource}
         journeyPlaybackKey={`${journey.journey?.action_id}:${journey.step}:${journey.replayTick}`}
-        journeyServices={journey.enabled && journey.journey?.state !== 'ambiguous' ? journey.journey?.steps.flatMap(step => [step.from_service, step.to_service].filter((key): key is string => !!key)) : undefined}
+        journeyServices={journey.enabled && journey.journey && journey.journey.source === miniShopSource && journey.journey.state !== 'ambiguous' ? journey.journey.steps.flatMap(step => [step.from_service, step.to_service].filter((key): key is string => !!key)) : undefined}
         journeyStep={journey.enabled && journey.journey && journey.journey.source === miniShopSource && journey.journey.state !== 'ambiguous' ? journey.journey.steps[journey.step] : undefined}
+        discoveryMode={discoveryMode} discoveryConnection={focusedConnection} discoveryResetKey={activeDiscovery?.resetAt}
         discoveredRoads={activeDiscovery?.roads}
         trafficPaused={live && (!cluster.connected || !!cluster.awaitingSnapshot || !!cluster.stale || !!cluster.metricsStale ||
           !!cluster.metricsError || (!!activeDiscovery && !discoveryReady(cluster)))} />
@@ -135,7 +149,7 @@ export default function App() {
 
       <nav className="hud controls" aria-label="View controls">
         <button aria-label="Reset the camera to the overview" title="Reset view"
-          onClick={() => { setSelected(null); setHomeTick(homeTick + 1) }}>⌂</button>
+          onClick={() => { journey.setFollowing(false); setSelected(null); setHomeTick(homeTick + 1) }}>⌂</button>
         <button aria-label={view === 'iso' ? 'Switch to the free 3D view' : 'Switch to the isometric view'}
           title={view === 'iso' ? '3D view: drag to orbit, right-drag to pan' : 'Isometric view: drag to pan'}
           onClick={() => setView(view === 'iso' ? '3d' : 'iso')}>{view === 'iso' ? '3D' : 'ISO'}</button>
@@ -171,17 +185,23 @@ export default function App() {
 
       {miniShopSource && <section className="hud journey-controls" aria-label="Activity view">
         <button aria-pressed={!journey.enabled} onClick={() => journey.setEnabled(false)}>Traffic</button>
-        <button aria-pressed={journey.enabled} onClick={() => journey.setEnabled(true)}>Journey</button>
+        <button aria-pressed={journey.enabled} onClick={openJourney}>Journey</button>
+        {journey.enabled && journey.journey && <>
+          <button aria-label="Follow journey guide" aria-pressed={journey.following} onClick={() => journey.setFollowing(!journey.following)}>Follow guide</button>
+        </>}
         {!journey.enabled && <span>Cars illustrate aggregate service activity.</span>}
       </section>}
       {miniShopSource && journey.enabled && <JourneyPanel controller={journey} />}
+      {discoveryMode && activeDiscovery && <DiscoveryActivity cluster={cluster} discovery={activeDiscovery}
+        selectedKey={focusedConnection} onPick={edge => { setSelected(null); setConnection({source:activeDiscovery.source,key:`${edge.from}>${edge.to}`}) }}
+        onClear={() => setConnection(null)} onInspect={key => { setSelected(key); journey.setFollowing(false) }} onJourney={openJourney} />}
 
       {live ? <>
-        <LiveIncidentBanner deployments={deployments} views={liveViews} onPick={setSelected} />
-        <LiveOverview cluster={cluster} views={liveViews} onPick={setSelected} />
+        <LiveIncidentBanner deployments={deployments} views={liveViews} onPick={pickService} />
+        <LiveOverview cluster={cluster} views={liveViews} onPick={pickService} />
       </> : simulatorSource ? <>
-        <Banner deployments={deployments} states={states} outages={outages} edges={flows} onPick={setSelected} />
-        <Overview flows={flows} deployments={deployments} states={states} onPick={setSelected} />
+        <Banner deployments={deployments} states={states} outages={outages} edges={flows} onPick={pickService} />
+        <Overview flows={flows} deployments={deployments} states={states} onPick={pickService} />
       </> : <section className="hud overview" role="status">
         <b>{cluster.connected ? 'Loading cluster snapshot…' : 'Connecting to the cluster…'}</b>
         <p className="small muted">Waiting for the backend to identify the data source.</p>
@@ -200,7 +220,7 @@ export default function App() {
           const info = landmarkFor(d.metadata.name), k = keyOf(d), s = states[k]
           const color = s.live?.color ?? s.affected?.color ?? HEALTH_COLOR[deploymentHealth(d)]
           return (
-            <button key={d.metadata.uid} className={`svc ${selected === k ? 'sel' : ''}`} onClick={() => setSelected(k)}
+            <button key={d.metadata.uid} className={`svc ${selected === k ? 'sel' : ''}`} onClick={() => pickService(k)}
               title={`${info.title}: ${d.metadata.name}. ${roleOf(d.metadata.name).does}`} aria-label={`${d.metadata.name}, ${describeDeployment(d)}`}>
               <span className="emoji">{info.emoji}<i className="pip" style={{ background: color }} /></span>
               {sidebar && <span className="svc-text"><b>{d.metadata.name}</b><small>{s.live ? `${s.affected?.label ?? `Application ${s.live.application.replaceAll('_', ' ')}`} · ${s.live.availability}` : s.affected ? `${s.affected.icon} ${s.affected.label}` : describeDeployment(d)}</small></span>}
@@ -208,7 +228,7 @@ export default function App() {
           )
         })}
         <hr />
-        <button className={`svc ${selected === 'city-hall' ? 'sel' : ''}`} onClick={() => setSelected('city-hall')}
+        <button className={`svc ${selected === 'city-hall' ? 'sel' : ''}`} onClick={() => pickService('city-hall')}
           title="City Hall: the control plane" aria-label="City Hall, the control plane">
           <span className="emoji">🏛️</span>{sidebar && <span className="svc-text"><b>City Hall</b><small>control plane</small></span>}
         </button>
@@ -216,7 +236,7 @@ export default function App() {
           const ready = nodeReady(n)
           return (
             <button key={n.metadata.uid} className={`svc ${selected === `node:${n.metadata.name}` ? 'sel' : ''}`}
-              onClick={() => setSelected(`node:${n.metadata.name}`)} aria-label={`Power Station ${n.metadata.name}`}>
+              onClick={() => pickService(`node:${n.metadata.name}`)} aria-label={`Power Station ${n.metadata.name}`}>
               <span className="emoji">⚡<i className="pip" style={{ background: !ready ? '#ef4444' : n.spec?.unschedulable ? '#f59e0b' : NODE_COLORS[i % NODE_COLORS.length] }} /></span>
               {sidebar && <span className="svc-text"><b>{n.metadata.name}</b><small>{!ready ? 'Power cut' : n.spec?.unschedulable ? 'Maintenance' : 'Running'}</small></span>}
             </button>
@@ -226,7 +246,7 @@ export default function App() {
 
       {node && <StationPanel node={node} all={all} sim={sim} onClose={() => setSelected(null)} />}
       {selected === 'city-hall' && <HallPanel events={events} onClose={() => setSelected(null)} />}
-      {dep && <Inspect dep={dep} cluster={cluster} all={all} events={events} states={states} edges={flows} sim={sim} onPick={setSelected} onClose={() => setSelected(null)} />}
+      {dep && <Inspect dep={dep} cluster={cluster} all={all} events={events} states={states} edges={flows} sim={sim} onPick={pickService} onClose={() => setSelected(null)} />}
 
       {legendOpen ? <Legend live={live} districtColors={districtColors} onClose={() => setLegendOpen(false)} /> : (powerGrid || unhealthyPods) && (
         <div className="hud legend" aria-label="Legend">
@@ -320,7 +340,7 @@ function Help({ live, onClose }: { live: boolean; onClose: () => void }) {
         <li>🌐 The <b>City Gate</b> is an Ingress: customers from the internet enter there and go to the frontend.</li>
         <li>🏛️ <b>City Hall</b> is the control plane. Glowing <b>messengers</b> fly out for each decision; their colour says which part decided.</li>
         <li>🛢️ {live ? 'MiniShop uses PostgreSQL and Redis Deployments with persistent volumes; HTTP metrics do not apply to those stores.' : <><b>Storage tanks</b> beside the Archive are its volumes: this simulated database is a <b>StatefulSet</b>, so its data outlives its Pods.</>}</li>
-        <li>🚗 A burst marks a failed request at the door. A <span className="red">glowing red</span> vehicle carries the failure back to the caller.</li>
+        <li>🚗 A burst marks an illustrated failed request at the door. HTTP error replies (including payment declines) and failed communication are distinct outcomes; neither alone diagnoses a pod outage. A <span className="red">glowing red</span> vehicle carries the failure back to the caller.</li>
         <li>🎨 A Unit's cap colour is its <b>version</b> when supplied by the source. Pod flashes illustrate distribution across Ready units.</li>
       </ul>
       <h3>How Kubernetes thinks</h3>
@@ -697,7 +717,7 @@ function Legend({ live, districtColors, onClose }: { live: boolean; districtColo
       <h3>Cars · requests</h3>
       <div>Aggregate activity illustration, not request-level traces. Car count, travel time and Pod flashes are illustrative.</div>
       <div>🚕 Yellow taxis are customers; other Cars wear their caller's colour.</div>
-      <div><i style={{ background: SIGNAL.refused.color }} />Failed requests burst at the door and return in a glowing red vehicle.</div>
+      <div><i style={{ background: SIGNAL.refused.color }} />Failed requests burst at the door and return in a glowing red vehicle. Inspect the route for HTTP error replies versus failed communication; HTTP 402 is a payment decline, not evidence of a pod outage.</div>
       <div>🔴 Brake lights: slowing, or queuing behind the Car ahead.</div>
     </aside>
   )

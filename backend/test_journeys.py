@@ -195,3 +195,14 @@ def test_routes_disabled_auth_simulator_and_live(monkeypatch):
     result=client.post('/api/journeys/actions',json=a.model_dump(mode='json'),headers=headers)
     assert result.status_code==200
     assert client.get('/api/journeys/'+str(a.action_id),headers=headers).status_code==200
+
+
+def test_each_basket_stage_explains_what_why_and_importance_without_inventing_missing_facts():
+    a,t,s,v=setup()
+    t.ingest(evidence(a),NOW+2)
+    for step in read(s,v,a,t)['steps']:
+        assert all(step[field] for field in ('heading','what','why','matters','evidence_label'))
+    a2,t2,s2,v2=setup()
+    result=read(s2,v2,a2,t2,NOW+COLLECTION+1)
+    assert all(step['what']=='Observation unavailable for this stage.' and step['evidence_label']=='Partial'
+               for step in result['steps'][:-1])

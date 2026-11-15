@@ -59,7 +59,7 @@ Ordinary `/api/products*`, `/api/carts/*`, `/api/checkout/*`, `/api/orders/*` ar
 
 ## Bounds and semantics
 
-One operator process/uvicorn worker owns one in-memory traffic job. Do not run multiple worker processes or operator instances. At most 2 storefront requests/s, 300 attempted requests, 20 checkout attempts, five minutes and one in-flight request. The default UI run is 100 requests. Requests browse products, add quantity one, read baskets and attempt genuine checkout; they consume real demo stock and persist orders. Reset never removes orders, baskets, database volumes or cluster resources. Repeated runs can eventually exhaust stock.
+One operator process/uvicorn worker owns one in-memory traffic job. Do not run multiple worker processes or operator instances. At most 20 storefront requests/s, 300 attempted requests, 20 checkout attempts, five minutes and one in-flight request. The default UI run is 100 requests. Requests browse products, add quantity one, read baskets and attempt genuine checkout; they consume real demo stock and persist orders. Reset never removes orders, baskets, database volumes or cluster resources. Repeated runs can eventually exhaust stock.
 
 Each checkout uses a fresh idempotency key and is never automatically replayed after an ambiguous result. Stop cancels the client task, but an already received server request can finish; counts include attempted requests and confirmed HTTP/network failures, not a guarantee that every cancellation has a known outcome. Payment rejection is HTTP 402, separate from HTTP 5xx and infrastructure failure. Rollout success means readiness and configuration were read back, not that latency metrics were invented or a probe order was created. KubeVerse measures subsequent genuine traffic.
 
@@ -78,3 +78,21 @@ Run tests from `minishop/` after installing `requirements-dev.txt`: `python -m p
 ## Integration
 
 Cherry-pick this branch's commit onto the latest `feature/personAandB` after preserving any local edits. These changes touch only MiniShop files and do not depend on the road integration. Review conflicts in MiniShop main.tsx/vite.config.ts with any other storefront work, then rerun the tests and build. Start with demo controls disabled; enable locally after the owner checks kubeconfig scope. Nothing is automatically merged or pushed.
+
+### Integration counters and illustration boundaries
+
+`attempted` counts storefront HTTP attempts; `failed` counts every unsuccessful
+attempt (including HTTP 402 payment declines, other HTTP errors and communication
+failures). `refused` is the subset where a network/gateway failure is followed by
+a check finding zero Ready pods on a serving workload. Readiness is checked after
+the request; it is not request-level proof of a root cause. A map notification
+failure does not erase either counter.
+
+Operator refusal events are synthetic illustrations. They never enter measured
+TRAFFIC, Journey evidence, service health or PostgreSQL history. A payment decline
+is an HTTP reply and never establishes a Kubernetes infrastructure outage.
+
+Use `minishop/demo_control/` and `minishop/frontend/` as canonical sources. The
+tracked `.minishop-live` source copies and restart builds are retained for review,
+but must not supply the application build. See `INTEGRATION_VERIFICATION.md` at
+the repository root for all canonical paths and verification boundaries.

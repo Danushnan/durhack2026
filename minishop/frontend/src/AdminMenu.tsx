@@ -2,7 +2,7 @@ import {useEffect, useRef, useState} from 'react';
 import './admin.css';
 
 type Status = {
-  traffic: {running:boolean; attempted:number; failed:number; checkouts:number; last_status:number|null; error:string|null};
+  traffic: {running:boolean; attempted:number; failed:number; refused?:number; checkouts:number; last_status:number|null; error:string|null};
   operation: {action:string; status:'running'|'succeeded'|'failed'; message:string}|null;
   verified: {delay_ms:number; rejection:boolean; payment_ready:boolean; checkout_ready:boolean; checkout_replicas:number; checked_at:number}|null;
   namespace:string; context:string;
@@ -76,8 +76,8 @@ export function AdminMenu() {
         <section className="operator-card"><span className="operator-step">01 / Activity</span><h2>Traffic generation</h2><p>Real product browsing, baskets and checkout. One worker; at most 300 requests, 20 checkout attempts and five minutes per run.</p>
           <label htmlFor="traffic-rate">Maximum storefront requests per second</label><select id="traffic-rate" value={rate} onChange={e=>setRate(e.target.value)}><option value="0.2">Gentle · 0.2/s</option><option value="1">Presentation · 1/s</option><option value="2">Busy · 2/s</option><option value="20">20/s</option></select>
           <div className="operator-buttons"><button disabled={!status||running||status.traffic.running} onClick={()=>void run('traffic/start',{rps:Number(rate),requests:100})}>Start traffic</button><button className="secondary" disabled={!status||busy} onClick={()=>void run('traffic/stop')}>Stop traffic</button></div>
-          <dl className="operator-counters"><div><dt>Status</dt><dd>{status?status.traffic.running?'Running':'Stopped':'Unknown'}</dd></div><div><dt>Attempted</dt><dd>{status?.traffic.attempted??'—'}</dd></div><div><dt>Unsuccessful</dt><dd>{status?.traffic.failed??'—'}</dd></div></dl>
-          <p className="operator-note">Unsuccessful counts storefront attempts refused with zero Ready pods on the serving route. Checkout attempts: {status?.traffic.checkouts??'—'}. Last HTTP status: {status?.traffic.last_status??'—'}.</p>
+          <dl className="operator-counters"><div><dt>Status</dt><dd>{status?status.traffic.running?'Running':'Stopped':'Unknown'}</dd></div><div><dt>Attempted</dt><dd>{status?.traffic.attempted??'—'}</dd></div><div><dt>Unsuccessful</dt><dd>{status?.traffic.failed??'—'}</dd></div><div><dt>Verified pod refusals</dt><dd>{status?.traffic.refused??'—'}</dd></div></dl>
+          <p className="operator-note">Unsuccessful counts failed storefront attempts, including HTTP 402 declines, other HTTP errors and communication failures. Verified pod refusals is the subset checked after a network/gateway failure with zero Ready pods on a serving workload; it does not identify every failure’s cause. Checkout attempts: {status?.traffic.checkouts??'—'}. Last HTTP status: {status?.traffic.last_status??'—'}.</p>
           {status?.traffic.error&&<p role="alert" className="operator-error">{status.traffic.error}</p>}
         </section>
         <section className="operator-card"><span className="operator-step">02 / Experiments</span><h2>Payments</h2><p>Change the real payment Deployment configuration. Success is shown only after rollout and configuration verification.</p>
